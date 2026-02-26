@@ -19,15 +19,23 @@ alzheimers_risk_app/
 │   ├── dashboard_page.py     # Figure 1 – Dashboard
 │   ├── intervention_page.py  # Figure 2 – Intervention Simulation
 │   └── export_page.py        # Figure 3 – Export / Report
-
+└── utils/
+    ├── model.py               # stub for your ML model
+    └── data_loader.py         # CSV / TSV / JSON parser
 ---
+
+## Create python env
+```bash
+python -m venv venv
+source venv/bin/activate
+```
+
 
 ## Installation
 
 ```bash
-pip install PyQt5
 pip install --upgrade pip
-pip install matplotlib
+pip install -r requirements.txt
 ```
 
 ---
