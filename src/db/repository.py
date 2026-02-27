@@ -340,3 +340,44 @@ def list_beta_distances(session: Session, project_id: int, metric: str | None = 
         stmt = stmt.where(BetaDistance.metric == metric)
     stmt = stmt.order_by(desc(BetaDistance.created_at), desc(BetaDistance.distance_id))
     return list(session.execute(stmt).scalars().all())
+
+# ==== LATEST HELPERS ====
+# Gets the most recent data tied to the project
+def get_latest_microbiome(session: Session, project_id: int) -> MicrobiomeData | None:
+    stmt = (
+        select(MicrobiomeData)
+        .where(MicrobiomeData.project_id == project_id)
+        .order_by(desc(MicrobiomeData.created_at), desc(MicrobiomeData.microbiome_id))
+        .limit(1)
+    )
+    return session.execute(stmt).scalar_one_or_none()
+
+
+def get_latest_cognitive(session: Session, project_id: int) -> CognitiveData | None:
+    stmt = (
+        select(CognitiveData)
+        .where(CognitiveData.project_id == project_id)
+        .order_by(desc(CognitiveData.created_at), desc(CognitiveData.cognitive_id))
+        .limit(1)
+    )
+    return session.execute(stmt).scalar_one_or_none()
+
+
+def get_latest_mri(session: Session, project_id: int) -> MRIData | None:
+    stmt = (
+        select(MRIData)
+        .where(MRIData.project_id == project_id)
+        .order_by(desc(MRIData.created_at), desc(MRIData.mri_id))
+        .limit(1)
+    )
+    return session.execute(stmt).scalar_one_or_none()
+
+
+def get_latest_risk_assessment(session: Session, project_id: int) -> RiskAssessment | None:
+    stmt = (
+        select(RiskAssessment)
+        .where(RiskAssessment.project_id == project_id)
+        .order_by(desc(RiskAssessment.created_at), desc(RiskAssessment.risk_id))
+        .limit(1)
+    )
+    return session.execute(stmt).scalar_one_or_none()
