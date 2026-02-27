@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 
 from sqlalchemy.orm import Session
+from sqlalchemy import select, desc
 
 # Import ORM models
 from src.db.db_models import Subject, Project, CognitiveData, MRIData, MicrobiomeData, RiskAssessment, SimulationRun, BetaDistance
@@ -225,3 +226,50 @@ def create_beta_distance(
     session.flush()
 
     return beta_distance
+
+# ==== GET HELPERS ====
+def get_subject(session: Session, subject_id: int) -> Subject:
+    stmt = select(Subject).where(Subject.subject_id == subject_id)
+    subject = session.execute(stmt).scalara_one_or_non()
+    if subject is None:
+        raise NotFoundError(f"Subject not found: subject_id={subject_id}")
+    return subject
+
+def get_project(session: Session, project_id: int) -> Project:
+    stmt = select(Project).where(Project.project_id == project_id)
+    project = session.execute(stmt).scalar_one_or_none()
+    if project is None:
+        raise NotFoundError(f"Project not found: project_id={project_id}")
+    return project
+
+
+def get_microbiome(session: Session, microbiome_id: int) -> MicrobiomeData:
+    stmt = select(MicrobiomeData).where(MicrobiomeData.microbiome_id == microbiome_id)
+    mb = session.execute(stmt).scalar_one_or_none()
+    if mb is None:
+        raise NotFoundError(f"Microbiome Data not found: microbiome_id={microbiome_id}")
+    return mb
+
+
+def get_cognitive_data(session: Session, cognitive_id: int) -> CognitiveData:
+    stmt = select(CognitiveData).where(CognitiveData.cognitive_id == cognitive_id)
+    cog = session.execute(stmt).scalar_one_or_none()
+    if cog is None:
+        raise NotFoundError(f"Cognitive Data not found: cognitive_id={cognitive_id}")
+    return cog
+
+
+def get_mri_data(session: Session, mri_id: int) -> MRIData:
+    stmt = select(MRIData).where(MRIData.mri_id == mri_id)
+    mri = session.execute(stmt).scalar_one_or_none()
+    if mri is None:
+        raise NotFoundError(f"MRI Data not found: mri_id={mri_id}")
+    return mri
+
+
+def get_risk_assessment(session: Session, risk_id: int) -> RiskAssessment:
+    stmt = select(RiskAssessment).where(RiskAssessment.risk_id == risk_id)
+    ra = session.execute(stmt).scalar_one_or_none()
+    if ra is None:
+        raise NotFoundError(f"Risk Assessment not found: risk_id={risk_id}")
+    return ra
