@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 
 from sqlalchemy.orm import Session
+from sqlalchemy import select, desc
 
 # Import ORM models
 from src.db.db_models import Subject, Project, CognitiveData, MRIData, MicrobiomeData, RiskAssessment, SimulationRun, BetaDistance
@@ -225,3 +226,158 @@ def create_beta_distance(
     session.flush()
 
     return beta_distance
+
+# ==== GET HELPERS ====
+# Gets data tied to specific ID
+def get_subject(session: Session, subject_id: int) -> Subject:
+     # Build a SELECT query: SELECT * FROM subject WHERE subject_id = :subject_id
+    stmt = select(Subject).where(Subject.subject_id == subject_id)
+    subject = session.execute(stmt).scalara_one_or_non()
+    # Convert "None" into a repository-level error that the UI/ service layer can use
+    if subject is None:
+        raise NotFoundError(f"Subject not found: subject_id={subject_id}")
+    return subject
+
+def get_project(session: Session, project_id: int) -> Project:
+    stmt = select(Project).where(Project.project_id == project_id)
+    project = session.execute(stmt).scalar_one_or_none()
+    if project is None:
+        raise NotFoundError(f"Project not found: project_id={project_id}")
+    return project
+
+
+def get_microbiome(session: Session, microbiome_id: int) -> MicrobiomeData:
+    stmt = select(MicrobiomeData).where(MicrobiomeData.microbiome_id == microbiome_id)
+    mb = session.execute(stmt).scalar_one_or_none()
+    if mb is None:
+        raise NotFoundError(f"Microbiome Data not found: microbiome_id={microbiome_id}")
+    return mb
+
+
+def get_cognitive_data(session: Session, cognitive_id: int) -> CognitiveData:
+    stmt = select(CognitiveData).where(CognitiveData.cognitive_id == cognitive_id)
+    cog = session.execute(stmt).scalar_one_or_none()
+    if cog is None:
+        raise NotFoundError(f"Cognitive Data not found: cognitive_id={cognitive_id}")
+    return cog
+
+
+def get_mri_data(session: Session, mri_id: int) -> MRIData:
+    stmt = select(MRIData).where(MRIData.mri_id == mri_id)
+    mri = session.execute(stmt).scalar_one_or_none()
+    if mri is None:
+        raise NotFoundError(f"MRI Data not found: mri_id={mri_id}")
+    return mri
+
+
+def get_risk_assessment(session: Session, risk_id: int) -> RiskAssessment:
+    stmt = select(RiskAssessment).where(RiskAssessment.risk_id == risk_id)
+    ra = session.execute(stmt).scalar_one_or_none()
+    if ra is None:
+        raise NotFoundError(f"Risk Assessment not found: risk_id={risk_id}")
+    return ra
+
+# ==== LIST HELPERS ====
+# Returns list of data related to project
+def list_projects_for_subject(session: Session, subject_id: int) -> list[Project]:
+    stmt = (
+        select(Project)
+        .where(Project.subject_id == subject_id)
+        .order_by(desc(Project.created_at), desc(Project.project_id))
+    )
+    return list(session.execute(stmt).scalars().all())
+
+def list_microbiomes_for_project(session: Session, project_id: int) -> list[MicrobiomeData]:
+    stmt = (
+        select(MicrobiomeData)
+        .where(MicrobiomeData.project_id == project_id)
+        .order_by(desc(MicrobiomeData.created_at), desc(MicrobiomeData.microbiome_id))
+    )
+    return list(session.execute(stmt).scalars().all())
+
+
+def list_cognitive_for_project(session: Session, project_id: int) -> list[CognitiveData]:
+    stmt = (
+        select(CognitiveData)
+        .where(CognitiveData.project_id == project_id)
+        .order_by(desc(CognitiveData.created_at), desc(CognitiveData.cognitive_id))
+    )
+    return list(session.execute(stmt).scalars().all())
+
+
+def list_mris_for_project(session: Session, project_id: int) -> list[MRIData]:
+    stmt = (
+        select(MRIData)
+        .where(MRIData.project_id == project_id)
+        .order_by(desc(MRIData.created_at), desc(MRIData.mri_id))
+    )
+    return list(session.execute(stmt).scalars().all())
+
+
+def list_risk_assessments_for_project(session: Session, project_id: int) -> list[RiskAssessment]:
+    stmt = (
+        select(RiskAssessment)
+        .where(RiskAssessment.project_id == project_id)
+        .order_by(desc(RiskAssessment.created_at), desc(RiskAssessment.risk_id))
+    )
+    return list(session.execute(stmt).scalars().all())
+
+
+def list_simulation_runs(session: Session, project_id: int) -> list[SimulationRun]:
+    # SimulationRun references microbiomes. we can list runs for a project by joining base microbiome
+    stmt = (
+        select(SimulationRun)
+        .join(MicrobiomeData, SimulationRun.base_microbiome_id == MicrobiomeData.microbiome_id)
+        .where(MicrobiomeData.project_id == project_id)
+        .order_by(desc(SimulationRun.created_at), desc(SimulationRun.simulation_id))
+    )
+    return list(session.execute(stmt).scalars().all())
+
+
+def list_beta_distances(session: Session, project_id: int, metric: str | None = None) -> list[BetaDistance]:
+    stmt = select(BetaDistance).where(BetaDistance.project_id == project_id)
+    if metric:
+        stmt = stmt.where(BetaDistance.metric == metric)
+    stmt = stmt.order_by(desc(BetaDistance.created_at), desc(BetaDistance.distance_id))
+    return list(session.execute(stmt).scalars().all())
+
+# ==== LATEST HELPERS ====
+# Gets the most recent data tied to the project
+def get_latest_microbiome(session: Session, project_id: int) -> MicrobiomeData | None:
+    stmt = (
+        select(MicrobiomeData)
+        .where(MicrobiomeData.project_id == project_id)
+        .order_by(desc(MicrobiomeData.created_at), desc(MicrobiomeData.microbiome_id))
+        .limit(1)
+    )
+    return session.execute(stmt).scalar_one_or_none()
+
+
+def get_latest_cognitive(session: Session, project_id: int) -> CognitiveData | None:
+    stmt = (
+        select(CognitiveData)
+        .where(CognitiveData.project_id == project_id)
+        .order_by(desc(CognitiveData.created_at), desc(CognitiveData.cognitive_id))
+        .limit(1)
+    )
+    return session.execute(stmt).scalar_one_or_none()
+
+
+def get_latest_mri(session: Session, project_id: int) -> MRIData | None:
+    stmt = (
+        select(MRIData)
+        .where(MRIData.project_id == project_id)
+        .order_by(desc(MRIData.created_at), desc(MRIData.mri_id))
+        .limit(1)
+    )
+    return session.execute(stmt).scalar_one_or_none()
+
+
+def get_latest_risk_assessment(session: Session, project_id: int) -> RiskAssessment | None:
+    stmt = (
+        select(RiskAssessment)
+        .where(RiskAssessment.project_id == project_id)
+        .order_by(desc(RiskAssessment.created_at), desc(RiskAssessment.risk_id))
+        .limit(1)
+    )
+    return session.execute(stmt).scalar_one_or_none()
