@@ -232,7 +232,7 @@ def create_beta_distance(
 def get_subject(session: Session, subject_id: int) -> Subject:
      # Build a SELECT query: SELECT * FROM subject WHERE subject_id = :subject_id
     stmt = select(Subject).where(Subject.subject_id == subject_id)
-    subject = session.execute(stmt).scalara_one_or_non()
+    subject = session.execute(stmt).scalar_one_or_none()
     # Convert "None" into a repository-level error that the UI/ service layer can use
     if subject is None:
         raise NotFoundError(f"Subject not found: subject_id={subject_id}")
