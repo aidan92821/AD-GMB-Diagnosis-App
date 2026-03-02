@@ -1,0 +1,175 @@
+/* ─── Global ─────────────────────────────────────────────── */
+QWidget {
+    background-color: #f4f8ff;
+    color: #1a2a4a;
+    font-family: "Segoe UI", Arial, sans-serif;
+    font-size: 13px;
+}
+
+/* ─── Sidebar ─────────────────────────────────────────────── */
+#Sidebar {
+    background-color: #ddeeff;
+    border-right: 2px solid #88c8f0;
+    min-width: 170px;
+    max-width: 170px;
+}
+
+#AppTitle {
+    color: #1a4fa3;
+    font-size: 18px;
+    font-weight: bold;
+    qproperty-alignment: AlignCenter;
+    padding: 10px 5px;
+}
+
+/* ─── Sidebar Buttons ─────────────────────────────────────── */
+QPushButton#SidebarBtn {
+    background-color: #2979d4;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 10px 6px;
+    font-weight: bold;
+    font-size: 11px;
+    letter-spacing: 0.5px;
+    margin: 4px 10px;
+}
+
+QPushButton#SidebarBtn:hover {
+    background-color: #1a5fb4;
+}
+
+QPushButton#SidebarBtn:pressed {
+    background-color: #0d3d80;
+}
+
+/* ─── Panel / Card ────────────────────────────────────────── */
+QFrame#Card {
+    background-color: white;
+    border: 2px solid #88c8f0;
+    border-radius: 10px;
+}
+
+QLabel#CardTitle {
+    color: #2979d4;
+    font-size: 14px;
+    font-weight: bold;
+    padding: 4px 8px;
+}
+
+/* ─── Risk Display ────────────────────────────────────────── */
+QLabel#RiskDisplay {
+    background-color: #2357b5;
+    color: white;
+    font-size: 64px;
+    font-weight: bold;
+    border-radius: 8px;
+    qproperty-alignment: AlignCenter;
+    min-height: 160px;
+}
+
+/* ─── Upload area ─────────────────────────────────────────── */
+QLabel#UploadHint {
+    color: #aaa;
+    font-size: 13px;
+    qproperty-alignment: AlignCenter;
+}
+
+QTextEdit#DataDisplay {
+    background-color: white;
+    border: 1px solid #c0dcf0;
+    border-radius: 6px;
+    color: #444;
+    font-size: 12px;
+    padding: 6px;
+}
+
+/* ─── Sliders ─────────────────────────────────────────────── */
+QSlider::groove:horizontal {
+    height: 4px;
+    background: #88c8f0;
+    border-radius: 2px;
+}
+
+QSlider::handle:horizontal {
+    background: white;
+    border: 2px solid #2979d4;
+    width: 14px;
+    height: 14px;
+    margin: -5px 0;
+    border-radius: 7px;
+}
+
+QSlider::sub-page:horizontal {
+    background: #2979d4;
+    border-radius: 2px;
+}
+
+QLabel#SliderLabel {
+    color: #2979d4;
+    font-size: 13px;
+    font-weight: bold;
+    qproperty-alignment: AlignCenter;
+}
+
+/* ─── ComboBox ────────────────────────────────────────────── */
+QComboBox {
+    background-color: white;
+    border: 1px solid #88c8f0;
+    border-radius: 5px;
+    padding: 4px 8px;
+    color: #1a2a4a;
+    min-width: 130px;
+}
+
+QComboBox::drop-down {
+    border: none;
+    width: 22px;
+}
+
+QComboBox QAbstractItemView {
+    background: white;
+    border: 1px solid #88c8f0;
+    selection-background-color: #ddeeff;
+}
+
+/* ─── Section titles (export/intervention) ──────────────── */
+QLabel#SectionTitle {
+    color: #1a4fa3;
+    font-size: 20px;
+    font-weight: bold;
+    padding: 6px 4px;
+}
+
+/* ─── Generate / Simulate buttons ──────────────────────────*/
+QPushButton#ActionBtn {
+    background-color: #2979d4;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    padding: 12px 10px;
+    font-weight: bold;
+    font-size: 12px;
+    letter-spacing: 0.5px;
+    margin-top: 10px;
+}
+
+QPushButton#ActionBtn:hover {
+    background-color: #1a5fb4;
+}
+
+QPushButton#ActionBtn:pressed {
+    background-color: #0d3d80;
+}
+
+/* ─── Toggle (dark/light) placeholder ──────────────────── */
+QPushButton#ToggleBtn {
+    background-color: #2979d4;
+    color: white;
+    border-radius: 12px;
+    min-width: 50px;
+    max-width: 50px;
+    min-height: 24px;
+    max-height: 24px;
+    font-size: 11px;
+}
