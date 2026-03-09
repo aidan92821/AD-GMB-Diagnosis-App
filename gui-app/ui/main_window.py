@@ -20,10 +20,11 @@ class MainWindow(QMainWindow):
         self.resize(1200, 760)
 
         # ── Shared state ──────────────────────────────────────
-        self.uploaded_data: dict = {}   # populated after file upload
-        self.ad_risk: float = 15.0      # last computed risk %
-        self.simulation_history: list = []
-
+        self.uploaded_data: dict = {}       # {"path", "name", "taxa": dict[str,float]}
+        self.ad_risk: float = 0.0           # last computed risk %
+        self.simulation_history: list = []  # list of result dicts
+        self.current_project_id: int | None = None   # set via SET PROJECT button
+        self.last_risk_result: dict | None  = None   # last compute_and_store_risk result
         # ── Root layout ───────────────────────────────────────
         root = QWidget()
         self.setCentralWidget(root)
