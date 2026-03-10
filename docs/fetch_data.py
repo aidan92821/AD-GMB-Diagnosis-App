@@ -26,13 +26,44 @@ def get_runs(email, bioproject, srr=None, n_runs=1):
 
     summary = Entrez.read(handle)
 
+    # get list of runs or singular run
     runs = []
     for sample in summary:
         runs.append(sample["Runs"].split()[1].split(sep='=')[1].strip('\"'))
 
-    print(runs)
+    # create temporary directories for fetching
+    # !!! -----> the actual path to run in application needs to be determined
+    # !!! -----> the following are temporary paths
+    subprocess.run(['mkdir', '-p', 
+                    f"data/{bioproject}/fastq_files"])
+    subprocess.run(['mkdir', '-p', 
+                    f"data/{bioproject}/qiime_files"])
 
+    
 
+# the output_dir should have some reference to the bioproject id
+def fetch_runs(runs, output_dir):
+    
+    # get the number of cores from user's machine
+    # and calculate how many to use for the process
+    cores = os.cpu_count()
+    cores = str(max(cores - 4, 1))
+
+    # fetch from NCBI and convert to fastq files -> output_dir
+    for run in runs:
+        subprocess.run(['fasterq-dump', run, 
+                        '--split-files', 
+                        '--threads', cores,
+                        '--outdir', output_dir,],
+                        check=True)
+
+# both input_dir and output_dir should have some reference to bioproject id
+def write_manifest(input_dir, output_dir):
+    pass
+
+# pass the fastq data to the database and clear the temporary directories
+def fastq_to_db(input_dir):
+    pass
 
 # testing
-get_runs('emmanicolego@gmail.com', 'PRJNA1028813')
+# get_runs('emmanicolego@gmail.com', 'PRJNA1028813')
