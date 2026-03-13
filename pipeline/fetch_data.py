@@ -42,8 +42,6 @@ def get_runs(bioproject: str, srr=None, n_runs=1) -> tuple[list[str], list[str]]
 def fetch_runs(bioproject: str, lib_layout: str, runs: list[str]):
 
     # create temporary directory for fetching
-    # !!! -----> the actual path to run in application needs to be determined
-    # !!! -----> the following are temporary paths
     output_dir_fastq = f"data/{bioproject}/fastq/{lib_layout}"
     Path(output_dir_fastq).mkdir(parents=True, exist_ok=True)
     
@@ -137,4 +135,3 @@ def fetch_ncbi_data(bioproject: str, srr=None, n_runs=1) -> dict[str: bool]:
         lib_layout['single'] = True
         
     return lib_layout
-        
