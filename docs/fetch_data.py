@@ -1,16 +1,16 @@
-from Bio import Entrez
 import csv
 import pandas as pd
 from pathlib import Path
 import io, os
-import sqlite3
+import shutil
 import subprocess
+
 
 # make sure that in the UI, user knows they can only download max 4 runs at a time
 # this function downloads one run at a time if the run is specified
 # it can download up to 4 runs at a time if no run is specified
-# returns two lists of strings: paired end runs and single end runs
-def get_runs(bioproject, srr=None, n_runs=1):
+# returns two lists of strings: paired end runs and single end runs (SRR Accessions)
+def get_runs(bioproject: str, srr=None, n_runs=1) -> tuple[list[str], list[str]]:
 
     # fetch information about the runs in the bioproject into a csv
     result = subprocess.run(
@@ -25,31 +25,27 @@ def get_runs(bioproject, srr=None, n_runs=1):
     if srr is None:
         # select the first n_runs runs from the dataset
         info = info.head(n_runs)
-
-        # determine which are paired end and which are single
-        paired_runs = info.loc[info['LibraryLayout'] == 'PAIRED', 'Run'].tolist()
-        single_runs = info.loc[info['LibraryLayout'] == 'SINGLE', 'Run'].tolist()
     # run id is specified
     else: 
         # get the specific run
-        row = info.loc[info['Run'] == srr]
+        info = info.loc[info['Run'] == srr]
 
-        # determine paired or single end
-        paired_runs = row.loc[row['LibraryLayout'] == 'PAIRED', 'Run'].tolist()
-        single_runs = row.loc[row['LibraryLayout'] == 'SINGLE', 'Run'].tolist()
+    # determine paired or single end
+    paired_runs = info.loc[info['LibraryLayout'] == 'PAIRED', 'Run'].tolist()
+    single_runs = info.loc[info['LibraryLayout'] == 'SINGLE', 'Run'].tolist()
     
     return paired_runs, single_runs
 
 
-# the output_dir should have some reference to the bioproject id
-def fetch_runs(bioproject, paired_runs, single_runs):
+# lib_layout = 'paired' or 'single'
+# runs = list of SRR Accessions
+def fetch_runs(bioproject: str, lib_layout: str, runs: list[str]):
 
-    # create temporary directories for fetching
+    # create temporary directory for fetching
     # !!! -----> the actual path to run in application needs to be determined
     # !!! -----> the following are temporary paths
-    output_dir_fastq = f"data/{bioproject}/fastq"
-    Path(f"{output_dir_fastq}/paired").mkdir(parents=True, exist_ok=True)
-    Path(f"{output_dir_fastq}/single").mkdir(parents=True, exist_ok=True)
+    output_dir_fastq = f"data/{bioproject}/fastq/{lib_layout}"
+    Path(output_dir_fastq).mkdir(parents=True, exist_ok=True)
     
     # get the number of cores from user's machine
     # and calculate how many to use for the process
@@ -57,55 +53,60 @@ def fetch_runs(bioproject, paired_runs, single_runs):
     cores = str(max(cores - 4, 1))
 
     # fetch from NCBI and convert to fastq files -> output_dir
-    for run in paired_runs:
+    for run in runs:
         subprocess.run(['fasterq-dump', run, '--split-files', 
                         '--threads', cores, 
-                        '--outdir', f"{output_dir_fastq}/paired"],
-                       check=True)
-    for run in single_runs:
-        subprocess.run(['fasterq-dump', run, '--split-files', 
-                        '--threads', cores, 
-                        '--outdir', f"{output_dir_fastq}/single"],
-                       check=True)
+                        '--outdir', output_dir_fastq],
+                        check=True)
 
-# both input_dir should be abs path to data/bioproject/fastq/
-def write_manifest(bioproject):
 
-    input_dir = f"data/{bioproject}/fastq"
+# lib_layout = 'paired' or 'single'
+def write_manifest(bioproject: str, lib_layout: str):
+
+    input_dir = f"data/{bioproject}/fastq/{lib_layout}"
 
     # create the temporary qiime directory
-    output_dir_qiime = f"data/{bioproject}/qiime"
-    Path(f"{output_dir_qiime}").mkdir(exist_ok=True)
+    output_dir = f"data/{bioproject}/qiime/{lib_layout}"
+    Path(output_dir).mkdir(exist_ok=True)
 
-    # list the fastq files in the paired end dir
-    paired_files = os.listdir(f"{input_dir}/paired")
-    # write the paired manifest file for qiime processing
-    if paired_files:
-        # separate the forward and reverse fastq files
+    # organize fastq types
+    files = os.listdir(input_dir)
+    if files:
+        # if single, they will all be contained in files list
         forward, reverse = [], []
-        for file in paired_files:
+        for file in files:
             if '_1.fastq' in file:
                 forward.append(file)
             elif '_2.fastq' in file:
                 reverse.append(file)
         
         # open the manifest file for writing
-        with open(f"{output_dir_qiime}/manifest_paired.tsv", "w", newline="") as f:
-            writer = csv.writer(f, delimiter='\t')
-            writer.writerow(['sample-id', 'forward-absolute-filepath', 'reverse-absolute-filepath'])
-            for f, r in zip(forward, reverse):
-                writer.writerow([f"{f[:-8]}", Path(f"{input_dir}/paired/{f}").resolve(), Path(f"{input_dir}/paired/{r}").resolve()]) # -8 removes _#.fastq chars and keeps srr # only
+        with open(f"{output_dir}/manifest.tsv", "w", newline="") as m:
+            writer = csv.writer(m, delimiter='\t')
+            if forward:
+                # paired end
+                writer.writerow(['sample-id', 
+                                 'forward-absolute-filepath', 
+                                 'reverse-absolute-filepath'])
+                for f, r in zip(forward, reverse):
+                    writer.writerow([f"{f[:-8]}", 
+                                     Path(f"{input_dir}/{f}").resolve(), 
+                                     Path(f"{input_dir}/{r}").resolve()]) # -8 removes _#.fastq chars and keeps srr accession only
+            else:
+                # single end
+                writer.writerow(['sample-id', 
+                                 'absolute-filepath'])
+                for s in files:
+                    writer.writerow([f"{s[:-6]}", 
+                                     Path(f"{input_dir}/{s}").resolve()]) # -6 removes .fastq chars and keeps srr accession only
 
-    # list the fastq files in the single end dir
-    single_files = os.listdir(f"{input_dir}/single")
-    # write the single manifest file for qiime processing
-    if single_files:
-        # open the manifest file for writing
-        with open(f"{output_dir_qiime}/manifest_single.tsv", "w", newline="") as f:
-            writer = csv.writer(f, delimiter='\t')
-            writer.writerow(['sample-id', 'absolute-filepath'])
-            for s in single_files:
-                writer.writerow([f"{s[:-6]}", Path(f"{input_dir}/single/{s}").resolve()]) # -6 removes .fastq chars and keeps srr # only
+
+# clean up the temporary files
+# after data tables have been imported to the database, remove them
+# the only files needed after importing are rep-seqs.fasta and tree.nwk
+def cleanup(bioproject):
+    shutil.rmtree(Path("data") / bioproject / "fastq")
+    shutil.rmtree(Path("data") / bioproject / "qiime")
 
 
 # testing
