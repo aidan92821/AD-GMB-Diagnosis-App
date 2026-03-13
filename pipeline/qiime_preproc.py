@@ -3,6 +3,7 @@ from pathlib import Path
 import subprocess
 from environment import get_conda_env_path
 from qc import get_trunc
+import urllib.request
 
 
 # interact with qiime environment
@@ -96,7 +97,10 @@ def dada2_denoise(bioproject: str, lib_layout: str, trunc_f: int=None, trunc_r: 
             '--o-denoising-stats', f"{io_dir}/stats.qza"
         ], check=True, env=env)
 
-
+'''
+classifier: silva-138-99-nb-classifier.qza
+source: https://data.qiime2.org/classifiers/sklearn-1.4.2/silva/silva-138-99-nb-classifier.qza
+'''
 # lib_layout: 'paired' or 'single'
 def classify_taxa(bioproject: str, lib_layout: str):
     
@@ -199,3 +203,13 @@ def qiime_preprocess(bioproject: str, lib_layout: str):
 
     create_tables(bioproject=bioproject,
                   lib_layout=lib_layout)
+    
+
+def download_classifier(classifier_url: str):
+
+    output_dir = Path("taxa_classifier")
+    output_dir.mkdir(exist_ok=True)
+
+    classifier_file = output_dir / classifier_url.split("/")[-1]
+
+    urllib.request.urlretrieve(classifier_url, classifier_file)
