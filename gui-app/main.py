@@ -1,24 +1,23 @@
 """
-Alzheimer's Risk Assessment Tool
-Entry point
+GutSeq – entry point.
+
+Run:
+    python main.py
 """
+
 import sys
-import os
-from PyQt5.QtWidgets import QApplication
-from ui.main_window import MainWindow
+from PyQt6.QtWidgets import QApplication
+from PyQt6.QtCore    import Qt
+from ui.main_window  import MainWindow
 
 
-def main():
+def main() -> None:
     app = QApplication(sys.argv)
-    app.setApplicationName("Alzheimer's Risk Assessment")
-    
-    # Load global stylesheet
-    with open("assets/styles.qss", "r") as f:
-        app.setStyleSheet(f.read())
-
+    app.setApplicationName("GutSeq")
+    #app.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps)
     window = MainWindow()
     window.show()
-    sys.exit(app.exec_())
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":

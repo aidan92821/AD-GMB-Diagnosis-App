@@ -1,85 +1,100 @@
-# Alzheimer's Risk Assessment Tool
+# GutSeq — Microbiome Analytics Dashboard
 
-A PyQt5 desktop application for assessing Alzheimer's disease risk from microbiome data,
-simulating lifestyle interventions, and exporting reports.
+A PyQt6 desktop application for analysing human gut microbiome sequencing
+data fetched from NCBI, processed through QIIME2, and visualised with
+diversity metrics and an experimental Alzheimer's disease risk predictor.
 
 ---
 
-## Project Structure
+## Project structure
 
 ```
-alzheimers_risk_app/
-├── main.py                   # Entry point
+gutseq/
+├── main.py                   ← entry point
 ├── requirements.txt
-├── assets/
-│   └── styles.qss            # Global QSS stylesheet
+│
+├── models/
+│   └── data_models.py        ← pure-Python dataclasses (no Qt)
+│
+├── services/
+│   └── analysis_service.py   ← NCBI fetching, FASTQ validation,
+│                               diversity & risk analysis
+│
+├── resources/
+│   └── styles.py             ← colour palette + global QSS stylesheet
+│
 ├── ui/
-│   ├── __init__.py
-│   ├── main_window.py        # Root window + sidebar navigation
-│   ├── dashboard_page.py     # Figure 1 – Dashboard
-│   ├── intervention_page.py  # Figure 2 – Intervention Simulation
-│   └── export_page.py        # Figure 3 – Export / Report
+│   ├── main_window.py        ← MainWindow (shell + signal wiring)
+│   ├── sidebar.py            ← left navigation panel
+│   ├── panels.py             ← one class per dashboard section (Steps 1–6)
+│   └── widgets.py            ← reusable primitive widgets
+│
 └── utils/
-    ├── model.py               # stub for your ML model
-    └── data_loader.py         # CSV / TSV / JSON parser
----
-
-## Create python env
-```bash
-python -m venv venv
-source venv/bin/activate
+    └── __init__.py           ← (reserved for future helpers)
 ```
 
+### Design principles
 
-## Installation
+| Concern              | Location                  |
+|----------------------|---------------------------|
+| Data structures      | `models/`                 |
+| Business / API logic | `services/`               |
+| Visual layout        | `ui/panels.py`            |
+| Reusable primitives  | `ui/widgets.py`           |
+| App wiring           | `ui/main_window.py`       |
+| Theming              | `resources/styles.py`     |
+
+Keeping these layers separate means:
+- Models and services can be unit-tested without starting Qt.
+- Panels receive data through explicit setter methods; they never call
+  services directly.
+- Swapping in a dark theme only requires editing `styles.py`.
+
+---
+
+## Setup
 
 ```bash
-pip install --upgrade pip
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+python main.py
 ```
 
----
-
-
-
-### Dashboard (Figure 1)
-| Panel | Description |
-|---|---|
-| **Risk of AD** | Large % badge showing computed risk |
-| **Phylogeny of Microbiome Taxa** | Cladogram drawn with QPainter |
-| **Uploaded Data** | Drag-and-drop or browse to load CSV/TSV/JSON |
-| **Taxa Abundance** | Bar chart (matplotlib) |
-
-### Intervention Simulation (Figure 2)
-- Sliders: Probiotic, Antibiotics, Fiber, Processed Foods (range −10 to +10)
-- Click **SIMULATE INTERVENTION** to run a simulation step
-- Results plotted as a line chart: AD Risk (%) vs. Simulation number
-
-### Export Page (Figure 3)
-- Choose **Report Type**, **File Type** (PDF/HTML/DOCX/CSV), and sections to **Include**
-- Preview shows live microbiome summary, phylogeny, perturbation trajectory, and taxa chart
-- Click **GENERATE REPORT** to save (HTML export works out-of-the-box; add WeasyPrint/python-docx for other formats)
+Python ≥ 3.11 recommended.
 
 ---
 
-## Customisation
+## Usage
 
-### Plug in your real ML model
-Edit `utils/model.py` → replace `predict_risk()` with your actual inference pipeline.
-
-### Plug in a real data parser
-Edit `utils/data_loader.py` → extend `load_file()` for your specific microbiome file format (e.g. BIOM, QIIME2 artifacts).
-
-### Wire the data loader into the UI
-In `ui/dashboard_page.py`, `_load_file()` currently shows a basic summary.  
-Call `data_loader.load_file(path)` there and pass the result to `model.predict_risk()`.
+1. Enter a BioProject accession (e.g. `PRJNA123456`) and click **Fetch →**.
+2. The dashboard populates all six sections automatically.
+3. Optionally upload `.fastq` or `.fastq.gz` files for each run.
+4. Use the **R1 / R2 / R3 / R4** pill buttons to switch between runs in
+   the abundance, taxonomy, and diversity panels.
 
 ---
 
-## Dependencies
+## Connecting to real data
 
-| Package | Purpose |
-|---|---|
-| PyQt5 | GUI framework |
-| matplotlib | Charts (bar, line) |
-| numpy | Data manipulation |
+All analysis methods in `services/analysis_service.py` are clearly marked
+with `# TODO: real API call`.  To connect live data:
+
+- **NCBI**: install `biopython` and use `Bio.Entrez.esearch` / `efetch`.
+- **QIIME2**: install the `qiime2` Python package and call its artifact API.
+- **Risk model**: train a classifier (scikit-learn / ONNX) on a cohort
+  dataset and replace `_compute_risk_score` with model inference.
+
+---
+
+## Running tests
+
+```bash
+pip install pytest
+pytest tests/          # (test directory not yet scaffolded — see below)
+```
+
+Suggested first tests:
+- `test_validate_bioproject_accession` — regex edge cases
+- `test_validate_fastq_file` — malformed FASTQ fixtures
+- `test_compute_risk_score` — known biomarker inputs → expected score
