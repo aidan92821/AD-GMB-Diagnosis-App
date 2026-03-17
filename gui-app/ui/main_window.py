@@ -1,118 +1,251 @@
 """
-Main application window – hosts the sidebar and stacked pages.
-"""
-from PyQt5.QtWidgets import (
-    QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QPushButton, QLabel, QStackedWidget, QSizePolicy
-)
-from PyQt5.QtCore import Qt
+GutSeq – MainWindow.
 
-from ui.dashboard_page import DashboardPage
-from ui.intervention_page import InterventionPage
+Shell layout:
+  ┌─────────────────────────────────────────────────────────┐
+  │  Dark sidebar  │  Top bar (project title + badges)      │
+  │                ├─────────────────────────────────────────│
+  │   nav items    │  QStackedWidget (one page per nav item) │
+  │                │  wrapped in a QScrollArea               │
+  └─────────────────────────────────────────────────────────┘
+
+Clicking a sidebar item switches the stacked page — nothing else changes.
+"""
+
+from __future__ import annotations
+
+from PyQt6.QtWidgets import (
+    QMainWindow, QWidget, QFrame, QLabel, QHBoxLayout, QVBoxLayout,
+    QStackedWidget, QScrollArea, QPushButton, QSizePolicy,
+)
+from PyQt6.QtCore import Qt
+
+from resources.styles import (
+    APP_QSS,
+    SB_BG, SB_SECTION, WHITE, BG_PAGE, BG_CARD, BORDER,
+    TEXT_H, TEXT_M,
+)
+from models.example_data import PROJECT
+from ui.pages import (
+    OverviewPage, UploadRunsPage, DiversityPage,
+    TaxonomyPage, AsvTablePage, PhylogenyPage, AlzheimerPage,
+)
 from ui.export_page import ExportPage
 
 
+# ── Sidebar nav definition ────────────────────────────────────────────────────
+
+NAV = [
+    # (section_label, [(display_name, icon)])
+    ("ANALYSIS", [
+        ("Overview",       "⊞"),
+        ("Upload Runs",    "↑"),
+        ("Diversity",      "≋"),
+        ("Taxonomy",       "⊙"),
+        ("ASV Table",      "⋮"),
+        ("Phylogeny",      "∿"),
+    ]),
+    ("INSIGHTS", [
+        ("Alzheimer Risk", "♥"),
+    ]),
+    ("EXPORT", [
+        ("Export PDF",     "⬇"),
+    ]),
+]
+
+
 class MainWindow(QMainWindow):
-    def __init__(self):
+
+    def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Alzheimer's Risk Assessment")
-        self.setMinimumSize(1100, 700)
-        self.resize(1200, 760)
+        self.setWindowTitle("GutSeq — Microbiome Analytics")
+        self.resize(1280, 880)
+        self.setMinimumSize(900, 600)
 
-        # ── Shared state ──────────────────────────────────────
-        self.uploaded_data: dict = {}   # populated after file upload
-        self.ad_risk: float = 15.0      # last computed risk %
-        self.simulation_history: list = []
+        # Apply the stylesheet globally — every widget in the app inherits it
+        self.setStyleSheet(APP_QSS)
 
-        # ── Root layout ───────────────────────────────────────
-        root = QWidget()
-        self.setCentralWidget(root)
-        root_layout = QHBoxLayout(root)
-        root_layout.setContentsMargins(0, 0, 0, 0)
-        root_layout.setSpacing(0)
+        self._nav_buttons: list[QPushButton] = []   # flat list in nav order
+        self._active_idx  = 0
 
-        # ── Sidebar ───────────────────────────────────────────
-        self.sidebar = self._build_sidebar()
-        root_layout.addWidget(self.sidebar)
+        self._build_ui()
 
-        # ── Page stack ───────────────────────────────────────
-        self.stack = QStackedWidget()
-        self.dashboard_page = DashboardPage(self)
-        self.intervention_page = InterventionPage(self)
-        self.export_page = ExportPage(self)
+    # ── UI construction ───────────────────────────────────────────────────────
 
-        self.stack.addWidget(self.dashboard_page)    # index 0
-        self.stack.addWidget(self.intervention_page) # index 1
-        self.stack.addWidget(self.export_page)       # index 2
+    def _build_ui(self) -> None:
+        root_widget = QWidget()
+        root_widget.setStyleSheet(f"background: {BG_PAGE};")
+        self.setCentralWidget(root_widget)
 
-        root_layout.addWidget(self.stack, stretch=1)
+        root_row = QHBoxLayout(root_widget)
+        root_row.setContentsMargins(0, 0, 0, 0)
+        root_row.setSpacing(0)
 
-    # ── Sidebar builder ──────────────────────────────────────
-    def _build_sidebar(self) -> QWidget:
-        sidebar = QWidget()
-        sidebar.setObjectName("Sidebar")
-        sidebar.setFixedWidth(175)
+        # ── Sidebar ──
+        sidebar = self._build_sidebar()
+        root_row.addWidget(sidebar)
 
-        layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(0, 20, 0, 20)
-        layout.setSpacing(4)
+        # ── Right column: top bar + stacked pages ──
+        right = QVBoxLayout()
+        right.setContentsMargins(0, 0, 0, 0)
+        right.setSpacing(0)
 
-        buttons = [
-            # ("UPLOAD DATA",           self._on_upload_data),
-            ("GET AD RISK %",         self._on_get_risk),
-            ("SIMULATE INTERVENTION", self._on_simulate),
-            ("CLEAR ALL",             self._on_clear_all),
-            # ("CLEAR LAST",            self._on_clear_last),
-            ("HELP",                  self._on_help),
+        right.addWidget(self._build_topbar())
+        right.addWidget(self._build_content_area(), 1)
+
+        root_row.addLayout(right, 1)
+
+    # ── Sidebar ───────────────────────────────────────────────────────────────
+
+    def _build_sidebar(self) -> QFrame:
+        sb = QFrame()
+        sb.setObjectName("sidebar")
+        sb.setFixedWidth(180)
+
+        lay = QVBoxLayout(sb)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        # Logo block
+        logo_block = QWidget()
+        logo_block.setStyleSheet(f"background: {SB_BG};")
+        lb = QVBoxLayout(logo_block)
+        lb.setContentsMargins(20, 20, 20, 14)
+        lb.setSpacing(2)
+        logo = QLabel("GutSeq")
+        logo.setObjectName("sb_logo")
+        sub  = QLabel("microbiome analytics")
+        sub.setObjectName("sb_sub")
+        lb.addWidget(logo)
+        lb.addWidget(sub)
+        lay.addWidget(logo_block)
+
+        # Thin separator
+        sep = QFrame()
+        sep.setStyleSheet(f"background: #2D3748; max-height: 1px;")
+        sep.setFixedHeight(1)
+        lay.addWidget(sep)
+
+        # Nav sections
+        nav_widget = QWidget()
+        nav_widget.setStyleSheet(f"background: {SB_BG};")
+        nav_lay = QVBoxLayout(nav_widget)
+        nav_lay.setContentsMargins(0, 8, 0, 0)
+        nav_lay.setSpacing(0)
+
+        for section_name, items in NAV:
+            sec_lbl = QLabel(section_name)
+            sec_lbl.setObjectName("sb_section")
+            nav_lay.addWidget(sec_lbl)
+
+            for display, icon in items:
+                btn = QPushButton(f"  {icon}   {display}")
+                btn.setObjectName("nav_btn")
+                btn.setProperty("active", len(self._nav_buttons) == 0)
+                idx = len(self._nav_buttons)
+                btn.clicked.connect(lambda _, i=idx: self._switch_page(i))
+                btn.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+                btn.setFixedHeight(38)
+                nav_lay.addWidget(btn)
+                self._nav_buttons.append(btn)
+
+        nav_lay.addStretch()
+        lay.addWidget(nav_widget, 1)
+
+        # Footer
+        footer = QLabel("QIIME2 pipeline · v2024.5")
+        footer.setObjectName("sb_footer")
+        footer.setStyleSheet(f"background: {SB_BG}; color: {SB_SECTION}; font-size: 10px; padding: 10px 20px;")
+        lay.addWidget(footer)
+
+        return sb
+
+    # ── Top bar ───────────────────────────────────────────────────────────────
+
+    def _build_topbar(self) -> QFrame:
+        bar = QFrame()
+        bar.setObjectName("topbar")
+        bar.setFixedHeight(52)
+
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(24, 0, 24, 0)
+        lay.setSpacing(10)
+
+        title = QLabel(f"{PROJECT['bioproject_id']} — {PROJECT['title']}")
+        title.setObjectName("topbar_title")
+        lay.addWidget(title)
+        lay.addStretch()
+
+        # Status badges
+        n_runs    = len(PROJECT["runs"])
+        n_upload  = sum(PROJECT["uploaded"].values())
+        n_errors  = len(PROJECT.get("qiime_errors", {}))
+
+        runs_badge = QLabel(f"{n_runs} runs loaded")
+        runs_badge.setObjectName("badge_green")
+        lay.addWidget(runs_badge)
+
+        if n_errors:
+            warn_badge = QLabel(f"{n_errors} warning{'s' if n_errors > 1 else ''}")
+            warn_badge.setObjectName("badge_yellow")
+            lay.addWidget(warn_badge)
+
+        return bar
+
+    # ── Content area (stacked pages) ─────────────────────────────────────────
+
+    def _build_content_area(self) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setObjectName("content_scroll")
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        # Host widget so the scroll area has a background
+        host = QWidget()
+        host.setObjectName("content_host")
+        host.setStyleSheet(f"background: {BG_PAGE};")
+        host_lay = QVBoxLayout(host)
+        host_lay.setContentsMargins(0, 0, 0, 0)
+
+        # Stacked widget — one page per nav button
+        self._stack = QStackedWidget()
+        self._stack.setStyleSheet(f"background: {BG_PAGE};")
+
+        self._pages = [
+            OverviewPage(),
+            UploadRunsPage(),
+            DiversityPage(),
+            TaxonomyPage(),
+            AsvTablePage(),
+            PhylogenyPage(),
+            AlzheimerPage(),
+            ExportPage(),
         ]
+        for page in self._pages:
+            self._stack.addWidget(page)
 
-        for label, slot in buttons:
-            btn = QPushButton(label)
-            btn.setObjectName("SidebarBtn")
-            btn.clicked.connect(slot)
-            layout.addWidget(btn)
+        host_lay.addWidget(self._stack)
+        scroll.setWidget(host)
+        return scroll
 
-        layout.addStretch(1)
+    # ── Navigation ────────────────────────────────────────────────────────────
 
-        title = QLabel("Alzheimers\nRisk\nAssessment")
-        title.setObjectName("AppTitle")
-        title.setAlignment(Qt.AlignCenter)
-        layout.addWidget(title)
+    def _switch_page(self, idx: int) -> None:
+        """Deactivate old button, activate new, switch stack page."""
+        if idx == self._active_idx:
+            return
 
-        return sidebar
+        # Deactivate previous
+        old = self._nav_buttons[self._active_idx]
+        old.setProperty("active", False)
+        old.style().unpolish(old)
+        old.style().polish(old)
 
-    # ── Sidebar actions ──────────────────────────────────────
-    def _on_upload_data(self):
-        """Delegate file upload to dashboard page."""
-        self.stack.setCurrentIndex(0)
-        self.dashboard_page.open_file_dialog()
+        # Activate new
+        self._active_idx = idx
+        new = self._nav_buttons[idx]
+        new.setProperty("active", True)
+        new.style().unpolish(new)
+        new.style().polish(new)
 
-    def _on_get_risk(self):
-        self.stack.setCurrentIndex(0)
-        self.dashboard_page.compute_risk()
-
-    def _on_simulate(self):
-        self.stack.setCurrentIndex(1)
-
-    def _on_clear_all(self):
-        self.uploaded_data = {}
-        self.ad_risk = 0.0
-        self.simulation_history = []
-        self.dashboard_page.reset()
-        self.intervention_page.reset()
-
-    def _on_clear_last(self):
-        if self.simulation_history:
-            self.simulation_history.pop()
-            self.intervention_page.refresh_chart()
-
-    def _on_help(self):
-        from PyQt5.QtWidgets import QMessageBox
-        QMessageBox.information(
-            self, "Help",
-            "1. Upload microbiome data via 'UPLOAD DATA'.\n"
-            "2. Click 'GET AD RISK %' to compute your Alzheimer's risk score.\n"
-            "3. Use 'SIMULATE INTERVENTION' to explore lifestyle changes.\n"
-            "4. Visit the Export page to generate a report.\n\n"
-            "Supported file formats: CSV, TSV, JSON."
-        )
+        self._stack.setCurrentIndex(idx)
