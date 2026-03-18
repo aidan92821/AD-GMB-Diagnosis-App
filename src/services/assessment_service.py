@@ -1,314 +1,433 @@
 # src/services/assessment_service.py
 #
-# The service layer sits between the UI and the database.
-# It owns the session lifecycle (open -> commit/rollback -> close) so the UI
-# never touches SQLAlchemy directly. Every function returns a plain Python dict.
+# Service layer — bridges the GUI and the database.
+# Owns the session lifecycle (open -> commit/rollback -> close).
+# All functions return plain Python dicts, no SQLAlchemy objects leave this module.
 from __future__ import annotations
 
-import json
-import math
 from typing import Callable
 
-# Import only what we need from the repository layer.
-# The repository handles raw DB operations; the service calls them and wraps errors.
-from src.db.repository import (
-    get_project, create_microbiome_data, create_risk_assessment,
-    create_simulation_run, get_subject, list_projects_for_subject,
-    get_latest_microbiome, get_latest_cognitive,
-    get_latest_mri, get_latest_risk_assessment, RepositoryError,
-)
 from src.db.database import SessionLocal
+from src.db.repository import (
+    get_user,
+    create_project as repo_create_project,
+    create_run as repo_create_run,
+    get_project,
+    get_run,
+    get_run_by_srr,
+    list_runs_for_project,
+    create_genus_bulk,
+    get_genus_for_run,
+    create_feature,
+    list_features_for_run,
+    create_feature_count_bulk,
+    get_feature_counts_for_run,
+    create_tree,
+    get_tree_for_run,
+    create_alpha_diversity,
+    get_alpha_diversity_for_run,
+    create_beta_diversity as repo_create_beta_diversity,
+    get_beta_diversity,
+    RepositoryError,
+)
 
 
-# RepositoryError (from repository.py) is a DB-level error.
-# We catch it and re-raise as ServiceError so the UI only needs one error type.
 class ServiceError(Exception):
     """Raised when a service operation fails (wraps RepositoryError)."""
 
 
-# ── Private helpers ────────────────────────────────────────────────────────────
+# ==== Project & Run setup ====
+def create_project(user_id: int, name: str) -> dict:
+    """
+    Create a new project for a user and return it as a dict.
+    Raises ServiceError if the user does not exist.
+    """
+    session = SessionLocal()
+    try:
+        user = get_user(session, user_id)       # verify user exists first
+        project = repo_create_project(session, user=user, name=name)
+        session.commit()
+        return {
+            "project_id": project.project_id,
+            "user_id": project.user_id,
+            "name": project.name,
+            "created_at": project.created_at.isoformat(),
+        }
+    except RepositoryError as e:
+        session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
 
-def _compute_shannon(taxa: dict[str, float]) -> float:
-      """Compute Shannon diversity index: H = -sum(p * ln(p)) for all p > 0."""
-      # Higher result = more diverse microbiome. Skips any taxa with proportion 0.
-      return -sum(p * math.log(p) for p in taxa.values() if p > 0)
+
+def create_run(
+        project_id: int,
+        source: str,                            # "upload" || "ncbi"
+        srr_accession: str | None = None,       # e.g. SRR35606904
+        bio_proj_accession: str | None = None,  # e.g. PRJNA123456
+        library_layout: str | None = None,      # "PAIRED" || "SINGLE"
+) -> dict:
+    """
+    Create a new run under a project and return it as a dict.
+    Raises ServiceError if the project does not exist.
+    """
+    session = SessionLocal()
+    try:
+        project = get_project(session, project_id)
+        run = repo_create_run(
+            session,
+            project=project,
+            source=source,
+            srr_accession=srr_accession,
+            bio_proj_accession=bio_proj_accession,
+            library_layout=library_layout,
+        )
+        session.commit()
+        return {
+            "run_id": run.run_id,
+            "project_id": run.project_id,
+            "source": run.source,
+            "srr_accession": run.srr_accession,
+            "bio_proj_accession": run.bio_proj_accession,
+            "library_layout": run.library_layout,
+            "created_at": run.created_at.isoformat(),
+        }
+    except RepositoryError as e:
+        session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
 
 
+def get_run_id_by_srr(srr_accession: str) -> int:
+    """
+    Look up the integer run_id for an SRR accession string.
+    ML pipeline uses SRR strings, the DB uses integer IDs.
+    Raises ServiceError if the accession is not registered.
+    """
+    session = SessionLocal()
+    try:
+        run = get_run_by_srr(session, srr_accession)
+        return run.run_id
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+# ==== Project overview ====
+def get_project_overview(project_id: int) -> dict:
+    """
+    Return a summary of a project for the dashboard header.
+
+    Counts total runs, unique ASVs across all runs, unique genere across all
+    runs, and how many runs have data uploaded vs still pending.
+    """
+    session = SessionLocal()
+    try:
+        project = get_project(session, project_id)
+        runs = list_runs_for_project(session, project_id)
+
+        uploaded_count = 0
+        total_asvs = 0
+        all_genera: set[str] = set()
+
+        for run in runs:
+            features = list_features_for_run(session, run.run_id)
+            genera = get_genus_for_run(session, run.run_id)
+
+            # A run is "uploaded" if it has any data associated with it
+            if features or genera:
+                uploaded_count += 1
+
+            total_asvs += len(features)
+            all_genera.update(g.genus for g in genera)
+
+        return {
+            "project_id": project.project_id,
+            "name": project.name,
+            # Use the first run's accession as the project-level accession (ncbi projects)
+            "bio_proj_accession": runs[0].bio_proj_accession if runs else None,
+            "total_runs": len(runs),
+            "uploaded_runs": uploaded_count,
+            "pending_runs": len(runs) - uploaded_count,
+            "total_asvs": total_asvs,
+            "total_genera": len(all_genera),
+            "run_ids": [r.run_id for r in runs],
+        }
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+# ==== Run data ingestion ====
+def ingest_run_data(
+        run_id: int,                         # integer DB ID returned by create_run(), NOT the SRR accession string
+        genus_rows: list[tuple[str, float]], # [(genus_name, relative_abundance), ...] parsed from genus-table.tsv
+        features: list[dict],                # [{"feature_id": ..., "sequence": ..., "taxonomy": ...}]
+        feature_counts: dict[str, int],      # {feature_id: raw_count}
+        newick_path: str | None = None,      # path to .nwk file on disk, if available
+) -> dict:
+    """
+    Bulk-insert all QIIME2 output for a run in a single transaction.
+
+    Stores genus abundances, ASV features, feature counts, and optionally a
+    phylogenetic tree. If anything fails, everything rolls back.
+    """
+    session = SessionLocal()
+    try:
+        run = get_run(session, run_id)
+
+        # Convert list of tuples to dict for the repository layer
+        genus_abundances = dict(genus_rows)
+
+        # Insert genus-level relative abundances
+        create_genus_bulk(session, run=run, genus_abundances=genus_abundances)
+
+        # Insert each ASV feature (sequence + taxonomy)
+        for f in features:
+            create_feature(
+                session,
+                run=run,
+                feature_id=f["feature_id"],
+                sequence=f.get("sequence"),
+                taxonomy=f.get("taxonomy"),
+            )
+
+        # Flush features to DB before inserting counts — feature_count has a FK to feature
+        session.flush()
+        create_feature_count_bulk(session, run_id=run_id, counts=feature_counts)
+
+        # Tree is optional — only store if a path was provided
+        tree = None
+        if newick_path:
+            tree = create_tree(session, run=run, newick_path=newick_path)
+
+        session.commit()
+        return {
+            "run_id": run_id,
+            "genera_inserted": len(genus_abundances),
+            "features_inserted": len(features),
+            "feature_counts_inserted": len(feature_counts),
+            "tree_path": tree.newick_path if tree else None,
+        }
+    except RepositoryError as e:
+        session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+# ==== Genus data ====
+def get_genus_data(run_id: int) -> list[dict]:
+    """
+    Return all genus relative abundances for a run, sorted alphabetically.
+    """
+    session = SessionLocal()
+    try:
+        genera = get_genus_for_run(session, run_id)
+        return [
+            {"genus": g.genus, "relative_abundance": g.relative_abundance}
+            for g in genera
+        ]
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+# ==== Feature counts ====
+def get_feature_counts(run_id: int) -> list[dict]:
+    """
+    Return ASV feature counts for a run, each with its taxonomy string.
+    """
+    session = SessionLocal()
+    try:
+        counts = get_feature_counts_for_run(session, run_id)
+        return [
+            {
+                "feature_id": fc.feature_id,
+                "abundance": fc.abundance,
+                # fc.feature is the related Feature row — access taxonomy via relationship
+                "taxonomy": fc.feature.taxonomy if fc.feature else None,
+            }
+            for fc in counts
+        ]
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+# ==== Tree ====
+def get_tree(run_id: int) -> dict | None:
+    """
+    Return the phylogenetic tree path for a run, or None if not yet uploaded.
+    """
+    session = SessionLocal()
+    try:
+        tree = get_tree_for_run(session, run_id)
+        if tree is None:
+            return None
+        return {
+            "tree_id": tree.tree_id,
+            "run_id": tree.run_id,
+            "newick_path": tree.newick_path,
+            "created_at": tree.created_at.isoformat(),
+        }
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+# ==== Alpha diversity ====
+def store_alpha_diversities(run_id: int, metrics: dict[str, float]) -> list[dict]:
+    """
+    Store one or more alpha diversity metrics for a run.
+    metrics: {"shannon": 2.45, "simpson": 0.88, ...}
+    """
+    session = SessionLocal()
+    try:
+        run = get_run(session, run_id)
+        rows = []
+        for metric, value in metrics.items():
+            alpha = create_alpha_diversity(session, run=run, metric=metric, value=value)
+            rows.append({"run_id": run_id, "metric": alpha.metric, "value": alpha.value})
+        session.commit()
+        return rows
+    except RepositoryError as e:
+        session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+def get_alpha_diversities(run_id: int) -> list[dict]:
+    """
+    Return all stored alpha diversity metrics for a run.
+    """
+    session = SessionLocal()
+    try:
+        alphas = get_alpha_diversity_for_run(session, run_id)
+        return [{"metric": a.metric, "value": a.value} for a in alphas]
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+# ==== Beta diversity ====
+def store_beta_diversity(
+        run_id_1: int,
+        run_id_2: int,
+        metric: str,
+        value: float,
+) -> dict:
+    """
+    Store a single pairwise beta diversity result between two runs.
+    Raises ServiceError if either run does not exist or run_id_1 == run_id_2.
+    """
+    session = SessionLocal()
+    try:
+        r1 = get_run(session, run_id_1)
+        r2 = get_run(session, run_id_2)
+        beta = repo_create_beta_diversity(session, run_1=r1, run_2=r2, metric=metric, value=value)
+        session.commit()
+        return {
+            "run_id_1": beta.run_id_1,
+            "run_id_2": beta.run_id_2,
+            "metric": beta.metric,
+            "value": beta.value,
+        }
+    except RepositoryError as e:
+        session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+def get_beta_diversity_matrix(project_id: int, metric: str) -> list[dict]:
+    """
+    Return all pairwise beta diversity values for a project as a flat list.
+
+    Queries only the upper triangle of the matrix (run_id_1 < run_id_2)
+    to avoid duplicate pairs.
+    Returns: [{"run_id_1": 1, "run_id_2": 2, "metric": "bray_curtis", "value": 0.32}, ...]
+    """
+    session = SessionLocal()
+    try:
+        runs = list_runs_for_project(session, project_id)
+        results = []
+        for i, r1 in enumerate(runs):
+            for r2 in runs[i + 1:]:  # upper triangle only — avoids (R1,R2) and (R2,R1) duplicates
+                # Normalize order to match how the row was stored (lower ID first)
+                id_a, id_b = sorted([r1.run_id, r2.run_id])
+                betas = get_beta_diversity(session, id_a, id_b, metric=metric)
+                for b in betas:
+                    results.append({
+                        "run_id_1": b.run_id_1,
+                        "run_id_2": b.run_id_2,
+                        "metric": b.metric,
+                        "value": b.value,
+                    })
+        return results
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+# ==== AD Risk prediction ====
+def compute_risk(
+        run_id: int,
+        model_fn: Callable[[dict], dict],
+) -> dict:
+    """
+    Run the ML model against a run's genus data and return the risk assessment.
+
+    model_fn receives {genus_name: relative_abundance} and must return a dict with:
+      - risk_probability: float (0-100)
+      - confidence:       float (0-100)
+      - biomarkers:       dict[str, float]  key taxa driving the prediction (optional)
+
+    Results are not persisted — add a RiskAssessment table later if needed.
+    Raises ServiceError if the run has no genus data yet.
+    """
+    session = SessionLocal()
+    try:
+        genera = get_genus_for_run(session, run_id)
+        if not genera:
+            raise ServiceError(
+                f"No genus data found for run_id={run_id}. "
+                "Ingest run data before computing risk."
+            )
+
+        # Build the taxa dict the model expects: {genus_name: relative_abundance}
+        taxa = {g.genus: g.relative_abundance for g in genera}
+
+        result = model_fn(taxa)
+        risk_probability = float(result["risk_probability"])
+
+        return {
+            "run_id": run_id,
+            "risk_probability": risk_probability,
+            "risk_label": _risk_label(risk_probability),
+            "confidence": float(result.get("confidence", 0.0)),
+            "biomarkers": result.get("biomarkers", {}),
+        }
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+# ==== Private helpers ====
 def _risk_label(probability: float) -> str:
-      """Translate a risk percentage into a human-readable label."""
-      if probability < 33.0:
-           return "Low"
-      if probability < 66.0:
-           return "Moderate"
-      return "High"
-
-
-# ── Public service functions ───────────────────────────────────────────────────
-
-def store_microbiome_upload(
-      project_id: int,
-      file_path: str | None,
-      taxa: dict[str, float],
-      alpha_diversity: float | None = None,
-      shannon_index: float | None = None,
-) -> dict:
-      """
-      Persist a parsed microbiome file upload to the database.
-
-      Automatically computes shannon_index and alpha_diversity from the taxa
-      dict if they are not provided by the caller.
-      Raises ServiceError if the project does not exist.
-      """
-      # Open a new DB session for this request
-      session = SessionLocal()
-      try:
-            # Verify the project exists — raises RepositoryError (caught below) if not
-            project = get_project(session, project_id)
-
-            # Auto-compute stats if the caller didn't provide them
-            if shannon_index is None:
-                  shannon_index = _compute_shannon(taxa)
-            if alpha_diversity is None:
-                  alpha_diversity = float(len(taxa))  # count of distinct taxa
-
-            # Write the microbiome row to the DB (session.flush happens inside)
-            mb = create_microbiome_data(
-                  session,
-                  project=project,
-                  raw_file_path=file_path,
-                  taxa=taxa,
-                  alpha_diversity=alpha_diversity,
-                  shannon_index=shannon_index,
-            )
-            # Finalize the write — without commit() nothing is saved to disk
-            session.commit()
-
-            # Return a plain dict (no SQLAlchemy objects) so the UI can use it freely
-            return {
-                  "microbiome_id": mb.microbiome_id,
-                  "project_id": mb.project_id,
-                  "raw_file_path": mb.raw_file_path,
-                  "taxa": taxa,
-                  "alpha_diversity": mb.alpha_diversity,
-                  "shannon_index": mb.shannon_index,
-                  "created_at": mb.created_at.isoformat(),  # convert datetime to string
-            }
-      except RepositoryError as e:
-            session.rollback()  # undo any partial writes on error
-            raise ServiceError(str(e)) from e
-      finally:
-            session.close()  # always close, whether success or error
-
-
-def get_subject_profile(subject_id: int) -> dict:
-      """
-      Return a subject's full profile as a nested dict.
-
-      Includes demographics and a list of all their projects, each with
-      their latest microbiome, cognitive, MRI, and risk assessment records.
-      Raises ServiceError if the subject does not exist.
-      """
-      session = SessionLocal()
-      try:
-            # Fetch the subject row. raises RepositoryError if subject_id doesn't exist
-            subject = get_subject(session, subject_id)
-            # Get all projects belonging to this subject (ordered newest first)
-            projects_orm = list_projects_for_subject(session, subject_id)
-
-            projects_out = []
-            for proj in projects_orm:
-                  # For each project, fetch the most recent record of each data type.
-                  # These return None if no data has been uploaded yet for that type.
-                  mb  = get_latest_microbiome(session, proj.project_id)
-                  cog = get_latest_cognitive(session, proj.project_id)
-                  mri = get_latest_mri(session, proj.project_id)
-                  ra  = get_latest_risk_assessment(session, proj.project_id)
-
-                  # "if mb else None" pattern: build a small summary dict only if the
-                  # record exists, otherwise set the field to None
-                  projects_out.append({
-                        "project_id": proj.project_id,
-                        "name": proj.name,
-                        "created_at": proj.created_at.isoformat() if proj.created_at else None,
-                        "notes": proj.notes,
-                        "latest_microbiome": {"microbiome_id": mb.microbiome_id, "shannon_index": mb.shannon_index} if mb else None,
-                        "latest_cognitive":  {"cognitive_id": cog.cognitive_id, "mmse_score": cog.mmse_score} if cog else None,
-                        "latest_mri":        {"mri_id": mri.mri_id, "image_path": mri.image_path} if mri else None,
-                        "latest_risk":       {"risk_id": ra.risk_id, "risk_probability": ra.risk_probability, "risk_label": ra.risk_label} if ra else None,
-                  })
-
-            return {
-                  "subject_id": subject.subject_id,
-                  "age": subject.age,
-                  "sex": subject.sex,
-                  "apoe_genotype": subject.apoe_genotype,
-                  "polygenic_risk_score": subject.polygenic_risk_score,
-                  "projects": projects_out,
-            }
-      except RepositoryError as e:
-            # No rollback needed here since this function only reads, never writes
-            raise ServiceError(str(e)) from e
-      finally:
-            session.close()
-
-
-def compute_and_store_risk(
-      project_id: int,
-      model_fn: Callable[[dict], float],  # a function that takes taxa dict -> returns risk %
-      model_version: str = "stub-v1",     # label stored with the result so we know which model ran
-) -> dict:
-      """
-      Run model_fn against the project's latest microbiome data,
-      persist the RiskAssessment, and return it as a dict.
-
-      model_fn receives the taxa dict and must return a risk percentage (0-100).
-      Cognitive and MRI data are included automatically if they exist.
-      Raises ServiceError if the project has no microbiome data yet.
-      """
-      session = SessionLocal()
-      try:
-            project  = get_project(session, project_id)
-
-            # Risk requires microbiome data. guard clause raises early if none uploaded yet
-            microbiome = get_latest_microbiome(session, project_id)
-            if microbiome is None:
-                  raise ServiceError(
-                  f"No microbiome data found for project_id={project_id}. "
-                  "Upload microbiome data before computing risk."
-            )
-
-            # Cognitive and MRI are optional — pass them in if they exist, None otherwise
-            cognitive = get_latest_cognitive(session, project_id)  # may be None
-            mri       = get_latest_mri(session, project_id)        # may be None
-
-            # taxa_json is stored as a raw text string in the DB — decode it back to a dict
-            taxa = json.loads(microbiome.taxa_json)
-            # Call the injected ML model. float() ensures we always get a float, not an int.
-            risk_probability = float(model_fn(taxa))
-            # Convert numeric probability to a human-readable label (Low / Moderate / High)
-            label = _risk_label(risk_probability)
-
-            # Persist the risk assessment row, linking it to microbiome (and optionally cog/mri)
-            ra = create_risk_assessment(
-                  session,
-                  project=project,
-                  microbiome=microbiome,
-                  cognitive=cognitive,
-                  mri=mri,
-                  risk_probability=risk_probability,
-                  risk_label=label,
-                  model_version=model_version,
-            )
-            session.commit()
-
-            return {
-                  "risk_id": ra.risk_id,
-                  "project_id": ra.project_id,
-                  "risk_probability": ra.risk_probability,
-                  "risk_label": ra.risk_label,
-                  "model_version": ra.model_version,
-                  "microbiome_id": ra.microbiome_id,
-                  "cognitive_id": ra.cognitive_id,  # None if no cognitive data was available
-                  "mri_id": ra.mri_id,              # None if no MRI data was available
-                  "created_at": ra.created_at.isoformat(),
-            }
-      except RepositoryError as e:
-            session.rollback()
-            raise ServiceError(str(e)) from e
-      finally:
-            session.close()
-
-def run_and_store_simulation(
-      project_id: int,
-      diet_parameters: dict,                       # keys: probiotic, antibiotics, fiber, processed_foods
-      model_fn: Callable[[dict, dict], float],     # takes (updated_taxa, diet_parameters) → risk %
-      model_version: str = "stub-v1",
-) -> dict:
-      """
-      Apply diet intervention parameters to the latest microbiome, compute a
-      new risk score, and persist a SimulationRun linking base and result.
-      Raises ServiceError if the project has no microbiome data yet.
-      """
-      session = SessionLocal()
-      try:
-            project = get_project(session, project_id)
-            # The "before diet" microbiome required as the starting point
-            base_microbiome = get_latest_microbiome(session, project_id)
-            if base_microbiome is None:
-                  raise ServiceError(
-                  f"No microbiome data found for project_id={project_id}. "
-                  "Upload microbiome data before running a simulation."
-                  )
-
-            # Decode taxa from JSON string back to a Python dict (stored as text in DB)
-            base_taxa = json.loads(base_microbiome.taxa_json)
-
-            # Compute a single multiplier for the net diet effect on microbiom diversity.
-            # Coefficients are stubs — not clinically validated, replace with model-derived values later.
-            # Positive terms increase diversity, negative terms decrease it.
-            diversity_delta = (
-                  diet_parameters.get("probiotic", 0)         * 0.02   # probiotics boost diversity
-                  + diet_parameters.get("fiber", 0)           * 0.015  # fiber feeds beneficial bacteria
-                  - diet_parameters.get("antibiotics", 0)     * 0.025  # antibiotics kill bacteria (strongest effect)
-                  - diet_parameters.get("processed_foods", 0) * 0.01   # processed foods mildly reduce diversity
-            )
-
-            # Scale each taxon by the delta. max(0.001) prevents any taxon from reaching zero.
-            scaled = {k: max(0.001, v * (1.0 + diversity_delta)) for k, v in base_taxa.items()}
-            # Renormalize so all proportions still sum to 1.0
-            total = sum(scaled.values())
-            updated_taxa = {k: round(v / total, 6) for k, v in scaled.items()}
-            # Recompute Shannon index for the updated microbiome
-            new_shannon = _compute_shannon(updated_taxa)
-
-            # Save the simulated "after diet" microbiome as a new DB row (not a real upload, so raw_file_path=None)
-            resulting_microbiome = create_microbiome_data(
-                  session,
-                  project=project,
-                  raw_file_path=None,
-                  taxa=updated_taxa,
-                  alpha_diversity=float(len(updated_taxa)),
-                  shannon_index=new_shannon,
-            )
-
-            # Run the ML model on the post-diet taxa to get the new predicted risk
-            new_risk_probability = float(model_fn(updated_taxa, diet_parameters))
-            new_label            = _risk_label(new_risk_probability)
-
-            # Store the predicted risk for the post-diet microbiome
-            resulting_risk = create_risk_assessment(
-                  session,
-                  project=project,
-                  microbiome=resulting_microbiome,
-                  risk_probability=new_risk_probability,
-                  risk_label=new_label,
-                  model_version=model_version,
-            )
-
-            # Link the before/after microbiomes together in a SimulationRun record
-            sim = create_simulation_run(
-                  session,
-                  base_microbiome=base_microbiome,
-                  resulting_microbiome=resulting_microbiome,
-                  diet_parameters=diet_parameters,
-                  updated_taxa=updated_taxa,
-                  resulting_risk=resulting_risk,
-            )
-            session.commit()
-
-            return {
-                  "simulation_id": sim.simulation_id,
-                  "base_microbiome_id": sim.base_microbiome_id,           # the "before" microbiome
-                  "resulting_microbiome_id": sim.resulting_microbiome_id, # the simulated "after" microbiome
-                  "resulting_risk_probability": new_risk_probability,
-                  "resulting_risk_label": new_label,
-                  "diet_parameters": diet_parameters,
-                  "updated_taxa": updated_taxa,
-                  "updated_shannon_index": new_shannon,
-                  "created_at": sim.created_at.isoformat(),
-            }
-      except RepositoryError as e:
-            session.rollback()
-            raise ServiceError(str(e)) from e
-      finally:
-            session.close()
+    """Translate a risk percentage into a human-readable label."""
+    if probability < 33.0:
+        return "Low"
+    if probability < 66.0:
+        return "Moderate"
+    return "High"
