@@ -55,7 +55,8 @@ class Run(Base):
 
     run_id             = Column(Integer, primary_key=True)
     project_id         = Column(Integer, ForeignKey("project.project_id"), nullable=False)
-    bio_proj_accession = Column(String(64))   # e.g. PRJNA123456 || null if local upload
+    srr_accession      = Column(String(64), unique=True, nullable=False)  # e.g. SRR35606904
+    bio_proj_accession = Column(String(64))   # e.g. PRJNA123456
     library_layout     = Column(String(32))   # e.g. PAIRED, SINGLE
     source             = Column(String(16), nullable=False)  # "upload" or "ncbi"
     created_at         = Column(DateTime(timezone=True), default=utcnow)

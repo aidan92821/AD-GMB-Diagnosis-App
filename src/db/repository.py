@@ -82,12 +82,14 @@ def create_run(
         *,
         project: Project,
         source: str,    # "upload" || "ncbi"
+        srr_accession: str,                     # e.g. SRR35606904
         bio_proj_accession: str | None = None,
         library_layout: str | None = None,
 ) -> Run:
     run = Run(
         project=project,
         source=source,
+        srr_accession=srr_accession,
         bio_proj_accession=bio_proj_accession,
         library_layout=library_layout,
     )
@@ -101,6 +103,14 @@ def get_run(session: Session, run_id: int) -> Run:
     run = session.execute(stmt).scalar_one_or_none()
     if run is None:
         raise NotFoundError(f"Run not found: run_id={run_id}")
+    return run
+
+
+def get_run_by_srr(session: Session, srr_accession: str) -> Run:
+    stmt = select(Run).where(Run.srr_accession == srr_accession)
+    run = session.execute(stmt).scalar_one_or_none()
+    if run is None:
+        raise NotFoundError(f"Run not found: srr_accession={srr_accession!r}")
     return run
 
 
