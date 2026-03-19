@@ -10,6 +10,8 @@ from typing import Callable
 from src.db.database import SessionLocal
 from src.db.repository import (
     get_user,
+    get_user_by_username,
+    create_user as repo_create_user,
     create_project as repo_create_project,
     create_run as repo_create_run,
     get_project,
@@ -34,6 +36,26 @@ from src.db.repository import (
 
 class ServiceError(Exception):
     """Raised when a service operation fails (wraps RepositoryError)."""
+
+
+# ==== User ====
+def get_or_create_user(username: str) -> dict:
+    """
+    Return existing user by username, or create one if not found.
+    Intended for pipeline/testing use while the GUI auth is not yet built.
+    """
+    session = SessionLocal()
+    try:
+        user = get_user_by_username(session, username)
+        if user is None:
+            user = repo_create_user(session, username=username)
+            session.commit()
+        return {"user_id": user.user_id, "username": user.username}
+    except RepositoryError as e:
+        session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
 
 
 # ==== Project & Run setup ====
