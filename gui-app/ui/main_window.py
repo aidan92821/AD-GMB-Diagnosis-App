@@ -58,11 +58,11 @@ class MainWindow(QMainWindow):
         layout.setSpacing(4)
 
         buttons = [
-            # ("UPLOAD DATA",           self._on_upload_data),
+            ("UPLOAD DATA",           self._on_upload_data),
             ("GET AD RISK %",         self._on_get_risk),
             ("SIMULATE INTERVENTION", self._on_simulate),
             ("CLEAR ALL",             self._on_clear_all),
-            # ("CLEAR LAST",            self._on_clear_last),
+            ("CLEAR LAST",            self._on_clear_last),
             ("HELP",                  self._on_help),
         ]
 
