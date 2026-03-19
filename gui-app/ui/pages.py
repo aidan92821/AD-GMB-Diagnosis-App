@@ -54,16 +54,25 @@ RUN_COLORS = {
 
 class OverviewPage(QWidget):
     """
-    Top section: BioProject fetch form.
-    Bottom section: project summary stat cards.
+    Fetch form (top) + live project stat cards (bottom).
+
+    Signals
+    -------
+    fetch_requested(bioproject_id, run_accession, max_runs)
+        Emitted when the user clicks Fetch and inputs pass validation.
+        MainWindow listens and calls back load_project() when done.
     """
 
-    fetch_requested = pyqtSignal(str, str, int)   # bioproject, run_acc, n_runs
+    fetch_requested = pyqtSignal(str, str, int)
+
+    # Regex patterns for basic client-side validation
+    _BP_RE  = __import__("re").compile(r"^PRJ[EDN]A\d+$", __import__("re").IGNORECASE)
+    _RUN_RE = __import__("re").compile(r"^[SED]RR\d+$",   __import__("re").IGNORECASE)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._build()
-        self._populate_with_example()
+        self._show_empty_stats()          # start with placeholder, not fake data
 
     # ── Build ─────────────────────────────────────────────────────────────────
 
@@ -74,109 +83,399 @@ class OverviewPage(QWidget):
 
         root.addWidget(page_title("Overview"))
 
-        # ── Fetch card ──
+        # ── Fetch card ──────────────────────────────────────────────────────
         fetch_card = card()
         root.addWidget(fetch_card)
+        lay = fetch_card.layout()
 
-        fetch_card.layout().addWidget(section_title("Fetch data from NCBI"))
-        fetch_card.layout().addWidget(
-            label_hint("BioProject accession required · Run accession optional")
-        )
+        lay.addWidget(section_title("Fetch data from NCBI"))
+        lay.addWidget(label_hint(
+            "Enter a BioProject accession to load all runs for that study.  "
+            "Optionally filter to a single run by entering its Run accession."
+        ))
 
-        # Input row
+        # ── Input row ──
         input_row = QHBoxLayout()
         input_row.setSpacing(12)
 
-        # BioProject
-        col1 = QVBoxLayout(); col1.setSpacing(4)
-        bp_lbl = QLabel("BioProject accession <span style='color:#EF4444'>*</span>")
+        # BioProject accession (required)
+        col_bp = QVBoxLayout(); col_bp.setSpacing(4)
+        bp_lbl = QLabel(
+            "BioProject accession "
+            "<span style='color:#EF4444;font-weight:700'>*</span>"
+        )
         bp_lbl.setTextFormat(Qt.TextFormat.RichText)
         bp_lbl.setObjectName("label_muted")
-        self._bp_input = QLineEdit(PROJECT["bioproject_id"])
-        self._bp_input.setProperty("state", "ok")
-        col1.addWidget(bp_lbl)
-        col1.addWidget(self._bp_input)
-        input_row.addLayout(col1, 3)
+        self._bp_input = QLineEdit()
+        self._bp_input.setPlaceholderText("e.g. PRJNA123456")
+        self._bp_input.setToolTip(
+            "Required. NCBI BioProject ID — groups all sequencing runs "
+            "from one study. Format: PRJNA followed by digits."
+        )
+        self._bp_input.textChanged.connect(self._validate_inputs)
+        col_bp.addWidget(bp_lbl)
+        col_bp.addWidget(self._bp_input)
+        input_row.addLayout(col_bp, 3)
 
-        # Run accession
-        col2 = QVBoxLayout(); col2.setSpacing(4)
-        run_lbl = QLabel("Run accession <span style='font-size:11px;color:#9CA3AF'>(filter to single run)</span>")
+        # Run accession (optional)
+        col_run = QVBoxLayout(); col_run.setSpacing(4)
+        run_lbl = QLabel(
+            "Run accession "
+            "<span style='color:#9CA3AF;font-size:11px'>(optional)</span>"
+        )
         run_lbl.setTextFormat(Qt.TextFormat.RichText)
         run_lbl.setObjectName("label_muted")
         self._run_input = QLineEdit()
-        self._run_input.setPlaceholderText("e.g. SRR98765")
-        col2.addWidget(run_lbl)
-        col2.addWidget(self._run_input)
-        input_row.addLayout(col2, 3)
+        self._run_input.setPlaceholderText("e.g. SRR001001  —  leave blank for all runs")
+        self._run_input.setToolTip(
+            "Optional. Filter to a single sequencing file. "
+            "Format: SRR / ERR / DRR followed by digits."
+        )
+        self._run_input.textChanged.connect(self._validate_inputs)
+        col_run.addWidget(run_lbl)
+        col_run.addWidget(self._run_input)
+        input_row.addLayout(col_run, 3)
 
-        # Runs to fetch
-        col3 = QVBoxLayout(); col3.setSpacing(4)
-        col3.addWidget(label_muted("Runs to fetch"))
+        # Runs to fetch dropdown
+        col_n = QVBoxLayout(); col_n.setSpacing(4)
+        col_n.addWidget(label_muted("Max runs to fetch"))
         self._run_count = QComboBox()
         for n in ["1", "2", "3", "4"]:
             self._run_count.addItem(n)
-        self._run_count.setCurrentIndex(3)
-        col3.addWidget(self._run_count)
-        input_row.addLayout(col3, 1)
-
-        # Fetch button
-        self._fetch_btn = btn_primary("Fetch →")
-        self._fetch_btn.clicked.connect(self._on_fetch)
-        input_row.addWidget(self._fetch_btn, 0, Qt.AlignmentFlag.AlignBottom)
-
-        fetch_card.layout().addLayout(input_row)
-        fetch_card.layout().addWidget(
-            label_hint(
-                "BioProject groups all runs from one study.  Run Accession "
-                "(SRR…/ERR…) lets you drill into a single sequencing file.  "
-                "Fetched runs appear as R1–R4 throughout the dashboard."
-            )
+        self._run_count.setCurrentIndex(3)   # default = 4
+        self._run_count.setToolTip(
+            "How many runs to load from this BioProject. "
+            "Ignored when a specific Run accession is entered."
         )
+        col_n.addWidget(self._run_count)
+        input_row.addLayout(col_n, 1)
 
-        # ── Stats card ──
-        stats_card = card()
-        root.addWidget(stats_card)
-        stats_card.layout().addWidget(section_title("Project overview"))
+        lay.addLayout(input_row)
+
+        # ── Validation message + Fetch button row ──
+        action_row = QHBoxLayout()
+        action_row.setSpacing(12)
+
+        self._validation_lbl = QLabel("")
+        self._validation_lbl.setStyleSheet(
+            f"font-size:11px; color:{DANGER_FG};"
+        )
+        self._validation_lbl.setWordWrap(True)
+        action_row.addWidget(self._validation_lbl, 1)
+
+        self._fetch_btn = btn_primary("  ⬇  Fetch data  →")
+        self._fetch_btn.setFixedHeight(42)
+        self._fetch_btn.setMinimumWidth(160)
+        # Vivid indigo inline style — overrides the generic btn_primary QSS
+        # so the button is impossible to miss against any background
+        self._fetch_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #C7D2FE;
+                color: #FFFFFF;
+                border: none;
+                border-radius: 8px;
+                font-size: 14px;
+                font-weight: 700;
+                padding: 0 22px;
+            }
+            QPushButton:hover   { background-color: #4338CA; }
+            QPushButton:pressed { background-color: #3730A3; }
+            QPushButton:disabled {
+                background-color: #C7D2FE;
+                color: #818CF8;
+            }
+        """)
+        self._fetch_btn.clicked.connect(self._on_fetch_clicked)
+        action_row.addWidget(self._fetch_btn, 0, Qt.AlignmentFlag.AlignRight)
+
+        lay.addLayout(action_row)
+        lay.addWidget(label_hint(
+            "BioProject = study-level ID (e.g. PRJNA123456).  "
+            "Run accession = one sequencing file (e.g. SRR001001).  "
+            "Fetched runs appear as R1–R4 throughout the dashboard."
+        ))
+
+        # ── Status / progress bar (hidden until fetch starts) ──
+        self._status_bar = QFrame()
+        self._status_bar.setStyleSheet(
+            f"background:#EEF2FF; border:1px solid #C7D2FE; border-radius:6px;"
+        )
+        self._status_bar.hide()
+        sb_lay = QHBoxLayout(self._status_bar)
+        sb_lay.setContentsMargins(12, 8, 12, 8)
+        self._status_lbl = QLabel("")
+        self._status_lbl.setStyleSheet("font-size:12px; color:#4338CA;")
+        sb_lay.addWidget(self._status_lbl)
+        root.addWidget(self._status_bar)
+
+        # ── Project stats card (shown after successful fetch) ────────────────
+        self._stats_card = card()
+        root.addWidget(self._stats_card)
+
+        stats_header = QHBoxLayout()
+        stats_header.addWidget(section_title("Project overview"))
+        self._stats_card.layout().addLayout(stats_header)
 
         self._stats_row = QHBoxLayout()
         self._stats_row.setSpacing(10)
-        stats_card.layout().addLayout(self._stats_row)
+        self._stats_card.layout().addLayout(self._stats_row)
+
+        # ── Run details table (shown after successful fetch) ─────────────────
+        self._runs_card = card()
+        root.addWidget(self._runs_card)
+        self._runs_card.layout().addWidget(section_title("Fetched runs"))
+        self._runs_body = QVBoxLayout()
+        self._runs_body.setSpacing(0)
+        self._runs_card.layout().addLayout(self._runs_body)
 
         root.addStretch()
 
-    # ── Populate ──────────────────────────────────────────────────────────────
+    # ── Validation ────────────────────────────────────────────────────────────
 
-    def _populate_with_example(self) -> None:
-        """Fill stat cards from example data."""
-        while self._stats_row.count():
-            item = self._stats_row.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+    def _validate_inputs(self) -> None:
+        """
+        Live-validate both input fields and update the fetch button state.
+        Called on every keystroke via textChanged signal.
+        """
+        bp  = self._bp_input.text().strip()
+        run = self._run_input.text().strip()
 
-        p = PROJECT
-        run_labels = "  ".join(p["runs"])
-        uploaded   = sum(p["uploaded"].values())
+        bp_ok  = bool(bp) and bool(self._BP_RE.match(bp))
+        run_ok = (not run) or bool(self._RUN_RE.match(run))
 
-        cards = [
-            stat_card(p["project_id"],         "Project ID"),
-            stat_card(str(len(p["runs"])),      "Runs",   run_labels),
-            stat_card(f"{p['asv_count']:,}",    "ASVs",   "unique sequences"),
-            stat_card(str(p["genus_count"]),     "Genera", "bacterial genera"),
-            stat_card(p["library"],              "Library"),
-            stat_card(f"{uploaded} / {len(p['runs'])}", "Upload status",
-                      "1 pending" if uploaded < len(p["runs"]) else "all uploaded"),
-        ]
-        for c in cards:
-            self._stats_row.addWidget(c)
+        # Visual border feedback
+        self._bp_input.setStyleSheet(
+            f"border: 1.5px solid {'#10B981' if bp_ok else '#EF4444' if bp else '#E5E7EB'};"
+            "border-radius:6px; padding:7px 10px; font-size:13px; background:white;"
+        )
+        if run:
+            self._run_input.setStyleSheet(
+                f"border: 1.5px solid {'#10B981' if run_ok else '#EF4444'};"
+                "border-radius:6px; padding:7px 10px; font-size:13px; background:white;"
+            )
+        else:
+            self._run_input.setStyleSheet("")
 
-    # ── Slot ──────────────────────────────────────────────────────────────────
+        # Validation message
+        if bp and not bp_ok:
+            self._validation_lbl.setText(
+                f"⚠  '{bp}' is not a valid BioProject accession. "
+                "Expected format: PRJNA / PRJEB / PRJDB followed by digits."
+            )
+        elif run and not run_ok:
+            self._validation_lbl.setText(
+                f"⚠  '{run}' is not a valid Run accession. "
+                "Expected format: SRR / ERR / DRR followed by digits."
+            )
+        else:
+            self._validation_lbl.setText("")
 
-    def _on_fetch(self) -> None:
+        # Enable fetch only when required field is valid
+        self._fetch_btn.setEnabled(bp_ok and run_ok)
+
+    # ── Fetch slot ────────────────────────────────────────────────────────────
+
+    def _on_fetch_clicked(self) -> None:
+        """
+        Called when the user clicks Fetch.
+        Shows a loading state immediately, then emits fetch_requested so
+        MainWindow can run the actual network call on a background thread.
+        """
         bp  = self._bp_input.text().strip()
         run = self._run_input.text().strip()
         n   = int(self._run_count.currentText())
-        if bp:
-            self.fetch_requested.emit(bp, run, n)
+
+        # Lock the form while fetching
+        self._fetch_btn.setEnabled(False)
+        self._fetch_btn.setText("  ⟳  Fetching…")
+        self._bp_input.setEnabled(False)
+        self._run_input.setEnabled(False)
+        self._run_count.setEnabled(False)
+
+        # Show progress banner
+        self._status_lbl.setText(
+            f"⟳  Fetching data for  {bp}"
+            + (f"  ·  run {run}" if run else "") + "  …"
+        )
+        self._status_bar.show()
+
+        # Emit — MainWindow handles the actual work
+        self.fetch_requested.emit(bp, run, n)
+
+    # ── Public API (called by MainWindow after fetch completes) ───────────────
+
+    def load_project(self, project: dict) -> None:
+        """
+        Populate stat cards and run list from the fetched project data.
+        *project* is a dict with keys matching models/example_data.PROJECT.
+        Called by MainWindow._on_fetch_complete().
+        """
+        # Restore form
+        self._fetch_btn.setEnabled(True)
+        self._fetch_btn.setText("  ⬇  Fetch data  →")
+        self._bp_input.setEnabled(True)
+        self._run_input.setEnabled(True)
+        self._run_count.setEnabled(True)
+
+        # Update status banner to success
+        self._status_lbl.setText(
+            f"✓  Loaded  {project['bioproject_id']}  —  "
+            f"{len(project['runs'])} runs fetched successfully."
+        )
+        self._status_bar.setStyleSheet(
+            "background:#ECFDF5; border:1px solid #A7F3D0; border-radius:6px;"
+        )
+        self._status_lbl.setStyleSheet("font-size:12px; color:#065F46;")
+
+        self._rebuild_stat_cards(project)
+        self._rebuild_runs_list(project)
+
+    def show_fetch_error(self, message: str) -> None:
+        """Called by MainWindow when the fetch fails."""
+        self._fetch_btn.setEnabled(True)
+        self._fetch_btn.setText("  ⬇  Fetch data  →")
+        self._bp_input.setEnabled(True)
+        self._run_input.setEnabled(True)
+        self._run_count.setEnabled(True)
+
+        self._status_lbl.setText(f"✗  {message}")
+        self._status_bar.setStyleSheet(
+            "background:#FEF2F2; border:1px solid #FECACA; border-radius:6px;"
+        )
+        self._status_lbl.setStyleSheet("font-size:12px; color:#991B1B;")
+        self._status_bar.show()
+
+    # ── Private helpers ───────────────────────────────────────────────────────
+
+    def _show_empty_stats(self) -> None:
+        """Show placeholder text before any project is fetched."""
+        self._clear_layout(self._stats_row)
+        placeholder = QLabel(
+            "Enter a BioProject accession above and click  Fetch data →  "
+            "to load project statistics."
+        )
+        placeholder.setObjectName("label_hint")
+        placeholder.setWordWrap(True)
+        self._stats_row.addWidget(placeholder)
+
+        self._clear_layout(self._runs_body)
+        run_placeholder = QLabel("No runs loaded yet.")
+        run_placeholder.setObjectName("label_hint")
+        self._runs_body.addWidget(run_placeholder)
+
+    def _rebuild_stat_cards(self, p: dict) -> None:
+        """Replace stat cards with live data from *p*."""
+        self._clear_layout(self._stats_row)
+
+        run_labels = "  ".join(p["runs"])
+        uploaded   = sum(p["uploaded"].values())
+
+        for value, label, sub in [
+            (p["project_id"],                   "Project ID",      ""),
+            (p["bioproject_id"],                "BioProject ID",   "NCBI accession"),
+            (str(len(p["runs"])),               "Runs",            run_labels),
+            (f"{p['asv_count']:,}",             "ASVs",            "unique sequences"),
+            (str(p["genus_count"]),             "Genera",          "bacterial genera"),
+            (p["library"],                      "Library",         "sequencing type"),
+            (f"{uploaded} / {len(p['runs'])}", "Uploaded",        "FASTQ files ready"),
+        ]:
+            self._stats_row.addWidget(stat_card(value, label, sub))
+
+    def _rebuild_runs_list(self, p: dict) -> None:
+        """Rebuild the run-by-run details table."""
+        self._clear_layout(self._runs_body)
+
+        # Header row
+        header = QHBoxLayout()
+        for col_text, stretch in [
+            ("Run", 0), ("Accession", 1), ("Reads", 1),
+            ("Status", 1), ("QIIME2", 2),
+        ]:
+            lbl = QLabel(col_text)
+            lbl.setStyleSheet(
+                f"font-size:11px; font-weight:600; color:{TEXT_M}; "
+                "padding-bottom:4px;"
+            )
+            if stretch:
+                header.addWidget(lbl, stretch)
+            else:
+                lbl.setFixedWidth(36)
+                header.addWidget(lbl)
+        self._runs_body.addLayout(header)
+
+        # Thin rule
+        rule = QFrame()
+        rule.setFrameShape(QFrame.Shape.HLine)
+        rule.setStyleSheet(f"background:{BORDER}; max-height:1px;")
+        self._runs_body.addWidget(rule)
+
+        # One row per run
+        for run_label in p["runs"]:
+            accession  = p["run_accessions"].get(run_label, "—")
+            uploaded   = p["uploaded"].get(run_label, False)
+            qiime_err  = p.get("qiime_errors", {}).get(run_label, "")
+
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 6, 0, 6)
+
+            # Run label badge
+            badge = QLabel(run_label)
+            badge.setFixedWidth(36)
+            badge.setStyleSheet(
+                "font-size:11px; font-weight:700; color:#6366F1; "
+                "background:#EEF2FF; border-radius:4px; padding:2px 4px;"
+            )
+            row.addWidget(badge)
+
+            row.addWidget(self._run_cell(accession, mono=True), 1)
+            row.addWidget(self._run_cell("—"), 1)   # read count placeholder
+
+            # Upload status
+            status_text = "✓  Uploaded" if uploaded else "○  Pending"
+            status_color = SUCCESS_FG if uploaded else TEXT_HINT
+            status_lbl = QLabel(status_text)
+            status_lbl.setStyleSheet(
+                f"font-size:11px; color:{status_color};"
+            )
+            row.addWidget(status_lbl, 1)
+
+            # QIIME2 status
+            if qiime_err:
+                qiime_lbl = QLabel(f"⚠  {qiime_err[:60]}…" if len(qiime_err) > 60 else f"⚠  {qiime_err}")
+                qiime_lbl.setStyleSheet(f"font-size:10px; color:{DANGER_FG};")
+                qiime_lbl.setWordWrap(True)
+            else:
+                qiime_lbl = QLabel("—")
+                qiime_lbl.setStyleSheet(f"font-size:11px; color:{TEXT_HINT};")
+            row.addWidget(qiime_lbl, 2)
+
+            self._runs_body.addLayout(row)
+
+            # Thin row divider
+            div = QFrame()
+            div.setFrameShape(QFrame.Shape.HLine)
+            div.setStyleSheet(f"background:{BORDER}; max-height:1px;")
+            self._runs_body.addWidget(div)
+
+    @staticmethod
+    def _run_cell(text: str, mono: bool = False) -> QLabel:
+        lbl = QLabel(text)
+        style = f"font-size:{'11' if mono else '12'}px; color:{TEXT_M};"
+        if mono:
+            style += " font-family: monospace;"
+        lbl.setStyleSheet(style)
+        return lbl
+
+    @staticmethod
+    def _clear_layout(layout: QHBoxLayout | QVBoxLayout) -> None:
+        """Remove and delete all widgets from a layout."""
+        while layout.count():
+            item = layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+            elif item.layout():
+                # Recursively clear nested layouts
+                OverviewPage._clear_layout(item.layout())
 
 
 # ═════════════════════════════════════════════════════════════════════════════

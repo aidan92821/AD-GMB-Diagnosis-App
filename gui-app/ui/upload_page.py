@@ -1,4 +1,3 @@
-# from importlib.resources import as_file
 # from PyQt5.QtWidgets import (
 #     QWidget, QVBoxLayout, QPushButton,
 #     QFileDialog, QTextEdit
@@ -52,7 +51,7 @@
 
 #         self.file_path = path
 
-#         result = as_file(path)
+#         result = load_file(path)
 
 #         self.output.append("File Loaded\n")
 #         self.output.append(result["summary"])

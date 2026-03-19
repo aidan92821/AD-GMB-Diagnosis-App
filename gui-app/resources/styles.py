@@ -7,6 +7,7 @@ Every widget imports from here; nothing is hard-coded in panel files.
 
 # ── Colour tokens ─────────────────────────────────────────────────────────────
 WHITE        = "#FFFFFF"
+BLACK        = ""
 BG_PAGE      = "#F4F5F7"
 BG_CARD      = "#FFFFFF"
 BG_INPUT     = "#F9FAFB"

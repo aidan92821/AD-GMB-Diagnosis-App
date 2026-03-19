@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QFrame, QLabel, QHBoxLayout, QVBoxLayout,
     QStackedWidget, QScrollArea, QPushButton, QSizePolicy,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThread, QObject, pyqtSignal
 
 from resources.styles import (
     APP_QSS,
@@ -31,6 +31,69 @@ from ui.pages import (
     TaxonomyPage, AsvTablePage, PhylogenyPage, AlzheimerPage,
 )
 from ui.export_page import ExportPage
+
+
+# ── Background fetch worker ───────────────────────────────────────────────────
+
+class _FetchWorker(QObject):
+    """
+    Calls the data service on a background thread so the UI never freezes
+    while waiting for an NCBI response.
+
+    Signals
+    -------
+    finished(dict)  — project data dict on success
+    errored(str)    — human-readable error message on failure
+    """
+    finished = pyqtSignal(object)   # emits the project dict
+    errored  = pyqtSignal(str)
+
+    def __init__(self, bioproject: str, run_filter: str, max_runs: int) -> None:
+        super().__init__()
+        self._bioproject  = bioproject
+        self._run_filter  = run_filter or None
+        self._max_runs    = max_runs
+
+    def run(self) -> None:
+        try:
+            # Import here so the worker thread owns the import
+            from models.example_data import PROJECT, GENERA, GENUS_ABUNDANCE
+
+            # ── Real NCBI call would go here ──────────────────────────────
+            # from src.services.assessment_service import fetch_project_overview
+            # overview = fetch_project_overview(
+            #     self._bioproject, self._max_runs, self._run_filter
+            # )
+            # project_dict = _overview_to_dict(overview)
+            # ─────────────────────────────────────────────────────────────
+
+            # Simulate network latency so the loading state is visible
+            import time; time.sleep(0.8)
+
+            # Return a copy of example data but with the user-typed accession
+            import copy
+            result = copy.deepcopy(PROJECT)
+            result["bioproject_id"] = self._bioproject
+
+            # If a run filter was given, keep only that run
+            if self._run_filter:
+                matching = [
+                    r for r in result["runs"]
+                    if result["run_accessions"].get(r) == self._run_filter
+                ]
+                if matching:
+                    result["runs"] = matching
+                else:
+                    # Filter not matched → still return all, warn
+                    pass
+
+            # Trim to max_runs
+            result["runs"] = result["runs"][: self._max_runs]
+
+            self.finished.emit(result)
+
+        except Exception as exc:          # noqa: BLE001
+            self.errored.emit(str(exc))
 
 
 # ── Sidebar nav definition ────────────────────────────────────────────────────
@@ -171,24 +234,22 @@ class MainWindow(QMainWindow):
         lay.setContentsMargins(24, 0, 24, 0)
         lay.setSpacing(10)
 
-        title = QLabel(f"{PROJECT['bioproject_id']} — {PROJECT['title']}")
-        title.setObjectName("topbar_title")
-        lay.addWidget(title)
+        # Title — updated dynamically after a successful fetch
+        self._topbar_title = QLabel("AD-GMB Diagnosis  —  No project loaded")
+        self._topbar_title.setObjectName("topbar_title")
+        lay.addWidget(self._topbar_title)
         lay.addStretch()
 
-        # Status badges
-        n_runs    = len(PROJECT["runs"])
-        n_upload  = sum(PROJECT["uploaded"].values())
-        n_errors  = len(PROJECT.get("qiime_errors", {}))
+        # Badges — hidden until a project is fetched
+        self._runs_badge = QLabel("")
+        self._runs_badge.setObjectName("badge_green")
+        self._runs_badge.hide()
+        lay.addWidget(self._runs_badge)
 
-        runs_badge = QLabel(f"{n_runs} runs loaded")
-        runs_badge.setObjectName("badge_green")
-        lay.addWidget(runs_badge)
-
-        if n_errors:
-            warn_badge = QLabel(f"{n_errors} warning{'s' if n_errors > 1 else ''}")
-            warn_badge.setObjectName("badge_yellow")
-            lay.addWidget(warn_badge)
+        self._warn_badge = QLabel("")
+        self._warn_badge.setObjectName("badge_yellow")
+        self._warn_badge.hide()
+        lay.addWidget(self._warn_badge)
 
         return bar
 
@@ -211,8 +272,9 @@ class MainWindow(QMainWindow):
         self._stack = QStackedWidget()
         self._stack.setStyleSheet(f"background: {BG_PAGE};")
 
+        self._overview_page = OverviewPage()
         self._pages = [
-            OverviewPage(),
+            self._overview_page,
             UploadRunsPage(),
             DiversityPage(),
             TaxonomyPage(),
@@ -224,9 +286,63 @@ class MainWindow(QMainWindow):
         for page in self._pages:
             self._stack.addWidget(page)
 
+        # ── Wire the fetch signal ──────────────────────────────────────────
+        # OverviewPage emits fetch_requested → MainWindow handles the work
+        self._overview_page.fetch_requested.connect(self._on_fetch_requested)
+
         host_lay.addWidget(self._stack)
         scroll.setWidget(host)
         return scroll
+
+    # ── Fetch orchestration ───────────────────────────────────────────────────
+
+    def _on_fetch_requested(
+        self, bioproject: str, run_accession: str, max_runs: int
+    ) -> None:
+        """
+        Spawn a background worker for the NCBI fetch.
+        The worker emits finished/errored back to the main thread.
+        """
+        self._fetch_thread = QThread(self)
+        self._fetch_worker = _FetchWorker(bioproject, run_accession, max_runs)
+        self._fetch_worker.moveToThread(self._fetch_thread)
+
+        self._fetch_thread.started.connect(self._fetch_worker.run)
+        self._fetch_worker.finished.connect(self._on_fetch_complete)
+        self._fetch_worker.errored.connect(self._on_fetch_error)
+        self._fetch_worker.finished.connect(self._fetch_thread.quit)
+        self._fetch_worker.errored.connect(self._fetch_thread.quit)
+
+        self._fetch_thread.start()
+
+    def _on_fetch_complete(self, project: dict) -> None:
+        """Called on the main thread when the worker succeeds."""
+        # 1. Hand results back to the Overview page
+        self._overview_page.load_project(project)
+
+        # 2. Update the top bar to reflect the loaded project
+        self._topbar_title.setText(
+            f"{project['bioproject_id']}  —  {project['title']}"
+        )
+        n_runs = len(project["runs"])
+        n_errs = len(project.get("qiime_errors", {}))
+        self._runs_badge.setText(f"{n_runs} run{'s' if n_runs != 1 else ''} loaded")
+        self._runs_badge.setObjectName("badge_green")
+        self._runs_badge.style().unpolish(self._runs_badge)
+        self._runs_badge.style().polish(self._runs_badge)
+        self._runs_badge.show()
+
+        if n_errs:
+            self._warn_badge.setText(
+                f"{n_errs} warning{'s' if n_errs > 1 else ''}"
+            )
+            self._warn_badge.show()
+        else:
+            self._warn_badge.hide()
+
+    def _on_fetch_error(self, message: str) -> None:
+        """Called on the main thread when the worker fails."""
+        self._overview_page.show_fetch_error(message)
 
     # ── Navigation ────────────────────────────────────────────────────────────
 
