@@ -56,41 +56,15 @@ class _FetchWorker(QObject):
 
     def run(self) -> None:
         try:
-            # Import here so the worker thread owns the import
-            from models.example_data import PROJECT, GENERA, GENUS_ABUNDANCE
+            from services.ncbi_service import NcbiService, NcbiFetchError
 
-            # ── Real NCBI call would go here ──────────────────────────────
-            # from src.services.assessment_service import fetch_project_overview
-            # overview = fetch_project_overview(
-            #     self._bioproject, self._max_runs, self._run_filter
-            # )
-            # project_dict = _overview_to_dict(overview)
-            # ─────────────────────────────────────────────────────────────
-
-            # Simulate network latency so the loading state is visible
-            import time; time.sleep(0.8)
-
-            # Return a copy of example data but with the user-typed accession
-            import copy
-            result = copy.deepcopy(PROJECT)
-            result["bioproject_id"] = self._bioproject
-
-            # If a run filter was given, keep only that run
-            if self._run_filter:
-                matching = [
-                    r for r in result["runs"]
-                    if result["run_accessions"].get(r) == self._run_filter
-                ]
-                if matching:
-                    result["runs"] = matching
-                else:
-                    # Filter not matched → still return all, warn
-                    pass
-
-            # Trim to max_runs
-            result["runs"] = result["runs"][: self._max_runs]
-
-            self.finished.emit(result)
+            service = NcbiService()   # reads ENTREZ_EMAIL from ncbi_service.py
+            project = service.fetch_project(
+                self._bioproject,
+                max_runs   = self._max_runs,
+                run_filter = self._run_filter,
+            )
+            self.finished.emit(project.to_dict())
 
         except Exception as exc:          # noqa: BLE001
             self.errored.emit(str(exc))
