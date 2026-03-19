@@ -41,7 +41,7 @@ class ServiceError(Exception):
 # ==== User ====
 def get_or_create_user(username: str) -> dict:
     """
-    Return existing user by username, or create one if not found.
+    Return existing user by username, or create one and return if not found.
     Intended for pipeline/testing use while the GUI auth is not yet built.
     """
     session = SessionLocal()
