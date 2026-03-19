@@ -27,8 +27,8 @@ Base.metadata.create_all(engine)
 session = SessionLocal()
 user    = create_user(session, username="testuser")
 project = create_project(session, user=user, name="Test Project")
-run1    = create_run(session, project=project, source="upload", library_layout="PAIRED")
-run2    = create_run(session, project=project, source="ncbi",   bio_proj_accession="PRJNA123456")
+run1    = create_run(session, project=project, source="upload", srr_accession="SRR99999999", library_layout="PAIRED")
+run2    = create_run(session, project=project, source="ncbi",   srr_accession="SRR35606904", bio_proj_accession="PRJNA123456")
 session.commit()
 user_id    = user.user_id
 project_id = project.project_id
