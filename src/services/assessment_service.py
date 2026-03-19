@@ -1,0 +1,455 @@
+# src/services/assessment_service.py
+#
+# Service layer — bridges the GUI and the database.
+# Owns the session lifecycle (open -> commit/rollback -> close).
+# All functions return plain Python dicts, no SQLAlchemy objects leave this module.
+from __future__ import annotations
+
+from typing import Callable
+
+from src.db.database import SessionLocal
+from src.db.repository import (
+    get_user,
+    get_user_by_username,
+    create_user as repo_create_user,
+    create_project as repo_create_project,
+    create_run as repo_create_run,
+    get_project,
+    get_run,
+    get_run_by_srr,
+    list_runs_for_project,
+    create_genus_bulk,
+    get_genus_for_run,
+    create_feature,
+    list_features_for_run,
+    create_feature_count_bulk,
+    get_feature_counts_for_run,
+    create_tree,
+    get_tree_for_run,
+    create_alpha_diversity,
+    get_alpha_diversity_for_run,
+    create_beta_diversity as repo_create_beta_diversity,
+    get_beta_diversity,
+    RepositoryError,
+)
+
+
+class ServiceError(Exception):
+    """Raised when a service operation fails (wraps RepositoryError)."""
+
+
+# ==== User ====
+def get_or_create_user(username: str) -> dict:
+    """
+    Return existing user by username, or create one if not found.
+    Intended for pipeline/testing use while the GUI auth is not yet built.
+    """
+    session = SessionLocal()
+    try:
+        user = get_user_by_username(session, username)
+        if user is None:
+            user = repo_create_user(session, username=username)
+            session.commit()
+        return {"user_id": user.user_id, "username": user.username}
+    except RepositoryError as e:
+        session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+# ==== Project & Run setup ====
+def create_project(user_id: int, name: str) -> dict:
+    """
+    Create a new project for a user and return it as a dict.
+    Raises ServiceError if the user does not exist.
+    """
+    session = SessionLocal()
+    try:
+        user = get_user(session, user_id)       # verify user exists first
+        project = repo_create_project(session, user=user, name=name)
+        session.commit()
+        return {
+            "project_id": project.project_id,
+            "user_id": project.user_id,
+            "name": project.name,
+            "created_at": project.created_at.isoformat(),
+        }
+    except RepositoryError as e:
+        session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+def create_run(
+        project_id: int,
+        source: str,                            # "upload" || "ncbi"
+        srr_accession: str | None = None,       # e.g. SRR35606904
+        bio_proj_accession: str | None = None,  # e.g. PRJNA123456
+        library_layout: str | None = None,      # "PAIRED" || "SINGLE"
+) -> dict:
+    """
+    Create a new run under a project and return it as a dict.
+    Raises ServiceError if the project does not exist.
+    """
+    session = SessionLocal()
+    try:
+        project = get_project(session, project_id)
+        run = repo_create_run(
+            session,
+            project=project,
+            source=source,
+            srr_accession=srr_accession,
+            bio_proj_accession=bio_proj_accession,
+            library_layout=library_layout,
+        )
+        session.commit()
+        return {
+            "run_id": run.run_id,
+            "project_id": run.project_id,
+            "source": run.source,
+            "srr_accession": run.srr_accession,
+            "bio_proj_accession": run.bio_proj_accession,
+            "library_layout": run.library_layout,
+            "created_at": run.created_at.isoformat(),
+        }
+    except RepositoryError as e:
+        session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+def get_run_id_by_srr(srr_accession: str) -> int:
+    """
+    Look up the integer run_id for an SRR accession string.
+    ML pipeline uses SRR strings, the DB uses integer IDs.
+    Raises ServiceError if the accession is not registered.
+    """
+    session = SessionLocal()
+    try:
+        run = get_run_by_srr(session, srr_accession)
+        return run.run_id
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+# ==== Project overview ====
+def get_project_overview(project_id: int) -> dict:
+    """
+    Return a summary of a project for the dashboard header.
+
+    Counts total runs, unique ASVs across all runs, unique genere across all
+    runs, and how many runs have data uploaded vs still pending.
+    """
+    session = SessionLocal()
+    try:
+        project = get_project(session, project_id)
+        runs = list_runs_for_project(session, project_id)
+
+        uploaded_count = 0
+        total_asvs = 0
+        all_genera: set[str] = set()
+
+        for run in runs:
+            features = list_features_for_run(session, run.run_id)
+            genera = get_genus_for_run(session, run.run_id)
+
+            # A run is "uploaded" if it has any data associated with it
+            if features or genera:
+                uploaded_count += 1
+
+            total_asvs += len(features)
+            all_genera.update(g.genus for g in genera)
+
+        return {
+            "project_id": project.project_id,
+            "name": project.name,
+            # Use the first run's accession as the project-level accession (ncbi projects)
+            "bio_proj_accession": runs[0].bio_proj_accession if runs else None,
+            "total_runs": len(runs),
+            "uploaded_runs": uploaded_count,
+            "pending_runs": len(runs) - uploaded_count,
+            "total_asvs": total_asvs,
+            "total_genera": len(all_genera),
+            "run_ids": [r.run_id for r in runs],
+        }
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+# ==== Run data ingestion ====
+def ingest_run_data(
+        run_id: int,                         # integer DB ID returned by create_run(), NOT the SRR accession string
+        genus_rows: list[tuple[str, float]], # [(genus_name, relative_abundance), ...] parsed from genus-table.tsv
+        features: list[dict],                # [{"feature_id": ..., "sequence": ..., "taxonomy": ...}]
+        feature_counts: dict[str, int],      # {feature_id: raw_count}
+        newick_path: str | None = None,      # path to .nwk file on disk, if available
+) -> dict:
+    """
+    Bulk-insert all QIIME2 output for a run in a single transaction.
+
+    Stores genus abundances, ASV features, feature counts, and optionally a
+    phylogenetic tree. If anything fails, everything rolls back.
+    """
+    session = SessionLocal()
+    try:
+        run = get_run(session, run_id)
+
+        # Convert list of tuples to dict for the repository layer
+        genus_abundances = dict(genus_rows)
+
+        # Insert genus-level relative abundances
+        create_genus_bulk(session, run=run, genus_abundances=genus_abundances)
+
+        # Insert each ASV feature (sequence + taxonomy)
+        for f in features:
+            create_feature(
+                session,
+                run=run,
+                feature_id=f["feature_id"],
+                sequence=f.get("sequence"),
+                taxonomy=f.get("taxonomy"),
+            )
+
+        # Flush features to DB before inserting counts — feature_count has a FK to feature
+        session.flush()
+        create_feature_count_bulk(session, run_id=run_id, counts=feature_counts)
+
+        # Tree is optional — only store if a path was provided
+        tree = None
+        if newick_path:
+            tree = create_tree(session, run=run, newick_path=newick_path)
+
+        session.commit()
+        return {
+            "run_id": run_id,
+            "genera_inserted": len(genus_abundances),
+            "features_inserted": len(features),
+            "feature_counts_inserted": len(feature_counts),
+            "tree_path": tree.newick_path if tree else None,
+        }
+    except RepositoryError as e:
+        session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+# ==== Genus data ====
+def get_genus_data(run_id: int) -> list[dict]:
+    """
+    Return all genus relative abundances for a run, sorted alphabetically.
+    """
+    session = SessionLocal()
+    try:
+        genera = get_genus_for_run(session, run_id)
+        return [
+            {"genus": g.genus, "relative_abundance": g.relative_abundance}
+            for g in genera
+        ]
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+# ==== Feature counts ====
+def get_feature_counts(run_id: int) -> list[dict]:
+    """
+    Return ASV feature counts for a run, each with its taxonomy string.
+    """
+    session = SessionLocal()
+    try:
+        counts = get_feature_counts_for_run(session, run_id)
+        return [
+            {
+                "feature_id": fc.feature_id,
+                "abundance": fc.abundance,
+                # fc.feature is the related Feature row — access taxonomy via relationship
+                "taxonomy": fc.feature.taxonomy if fc.feature else None,
+            }
+            for fc in counts
+        ]
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+# ==== Tree ====
+def get_tree(run_id: int) -> dict | None:
+    """
+    Return the phylogenetic tree path for a run, or None if not yet uploaded.
+    """
+    session = SessionLocal()
+    try:
+        tree = get_tree_for_run(session, run_id)
+        if tree is None:
+            return None
+        return {
+            "tree_id": tree.tree_id,
+            "run_id": tree.run_id,
+            "newick_path": tree.newick_path,
+            "created_at": tree.created_at.isoformat(),
+        }
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+# ==== Alpha diversity ====
+def store_alpha_diversities(run_id: int, metrics: dict[str, float]) -> list[dict]:
+    """
+    Store one or more alpha diversity metrics for a run.
+    metrics: {"shannon": 2.45, "simpson": 0.88, ...}
+    """
+    session = SessionLocal()
+    try:
+        run = get_run(session, run_id)
+        rows = []
+        for metric, value in metrics.items():
+            alpha = create_alpha_diversity(session, run=run, metric=metric, value=value)
+            rows.append({"run_id": run_id, "metric": alpha.metric, "value": alpha.value})
+        session.commit()
+        return rows
+    except RepositoryError as e:
+        session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+def get_alpha_diversities(run_id: int) -> list[dict]:
+    """
+    Return all stored alpha diversity metrics for a run.
+    """
+    session = SessionLocal()
+    try:
+        alphas = get_alpha_diversity_for_run(session, run_id)
+        return [{"metric": a.metric, "value": a.value} for a in alphas]
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+# ==== Beta diversity ====
+def store_beta_diversity(
+        run_id_1: int,
+        run_id_2: int,
+        metric: str,
+        value: float,
+) -> dict:
+    """
+    Store a single pairwise beta diversity result between two runs.
+    Raises ServiceError if either run does not exist or run_id_1 == run_id_2.
+    """
+    session = SessionLocal()
+    try:
+        r1 = get_run(session, run_id_1)
+        r2 = get_run(session, run_id_2)
+        beta = repo_create_beta_diversity(session, run_1=r1, run_2=r2, metric=metric, value=value)
+        session.commit()
+        return {
+            "run_id_1": beta.run_id_1,
+            "run_id_2": beta.run_id_2,
+            "metric": beta.metric,
+            "value": beta.value,
+        }
+    except RepositoryError as e:
+        session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+def get_beta_diversity_matrix(project_id: int, metric: str) -> list[dict]:
+    """
+    Return all pairwise beta diversity values for a project as a flat list.
+
+    Queries only the upper triangle of the matrix (run_id_1 < run_id_2)
+    to avoid duplicate pairs.
+    Returns: [{"run_id_1": 1, "run_id_2": 2, "metric": "bray_curtis", "value": 0.32}, ...]
+    """
+    session = SessionLocal()
+    try:
+        runs = list_runs_for_project(session, project_id)
+        results = []
+        for i, r1 in enumerate(runs):
+            for r2 in runs[i + 1:]:  # upper triangle only — avoids (R1,R2) and (R2,R1) duplicates
+                # Normalize order to match how the row was stored (lower ID first)
+                id_a, id_b = sorted([r1.run_id, r2.run_id])
+                betas = get_beta_diversity(session, id_a, id_b, metric=metric)
+                for b in betas:
+                    results.append({
+                        "run_id_1": b.run_id_1,
+                        "run_id_2": b.run_id_2,
+                        "metric": b.metric,
+                        "value": b.value,
+                    })
+        return results
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+# ==== AD Risk prediction ====
+def compute_risk(
+        run_id: int,
+        model_fn: Callable[[dict], dict],
+) -> dict:
+    """
+    Run the ML model against a run's genus data and return the risk assessment.
+
+    model_fn receives {genus_name: relative_abundance} and must return a dict with:
+      - risk_probability: float (0-100)
+      - confidence:       float (0-100)
+      - biomarkers:       dict[str, float]  key taxa driving the prediction (optional)
+
+    Results are not persisted — add a RiskAssessment table later if needed.
+    Raises ServiceError if the run has no genus data yet.
+    """
+    session = SessionLocal()
+    try:
+        genera = get_genus_for_run(session, run_id)
+        if not genera:
+            raise ServiceError(
+                f"No genus data found for run_id={run_id}. "
+                "Ingest run data before computing risk."
+            )
+
+        # Build the taxa dict the model expects: {genus_name: relative_abundance}
+        taxa = {g.genus: g.relative_abundance for g in genera}
+
+        result = model_fn(taxa)
+        risk_probability = float(result["risk_probability"])
+
+        return {
+            "run_id": run_id,
+            "risk_probability": risk_probability,
+            "risk_label": _risk_label(risk_probability),
+            "confidence": float(result.get("confidence", 0.0)),
+            "biomarkers": result.get("biomarkers", {}),
+        }
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+# ==== Private helpers ====
+def _risk_label(probability: float) -> str:
+    """Translate a risk percentage into a human-readable label."""
+    if probability < 33.0:
+        return "Low"
+    if probability < 66.0:
+        return "Moderate"
+    return "High"
