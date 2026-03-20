@@ -209,7 +209,7 @@ class MainWindow(QMainWindow):
         lay.setSpacing(10)
 
         # Title — updated dynamically after a successful fetch
-        self._topbar_title = QLabel("AD-GMB Diagnosis  —  No project loaded")
+        self._topbar_title = QLabel("AD-GMB Diagnosis ")
         self._topbar_title.setObjectName("topbar_title")
         lay.addWidget(self._topbar_title)
         lay.addStretch()
