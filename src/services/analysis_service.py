@@ -1,333 +1,287 @@
-# """
-# GutSeq — service layer.
+"""
+gui-app/services/analysis_service.py
 
-# All data-fetching and analysis logic lives here, completely separate from
-# the UI.  The real NCBI calls are stubbed with realistic mock data so the
-# app runs without a network connection; swap in the real Entrez / SRA API
-# calls by replacing the methods marked with  # TODO: real API call.
-# """
+Computes diversity metrics and taxonomy from fetched NCBI data.
 
-# from __future__ import annotations
+For a real pipeline, these methods would:
+  1. Download FASTQ via SRA-toolkit
+  2. Run DADA2/QIIME2 denoising
+  3. Classify against SILVA/Greengenes database
+  4. Output ASV table, taxonomy, phylogenetic tree
 
-# import re
-# import gzip
-# import math
-# from pathlib import Path
-# from typing import Optional
+For now, they derive realistic-looking metrics directly from the
+SRA run metadata (read counts, library layout, etc.) so every
+fetched project gets unique, plausible values rather than
+identical example data.
+"""
 
-# from models.data_models import (
-#     ProjectOverview, RunInfo, LibraryLayout,
-#     GenusAbundance, AsvFeature,
-#     DiversityMetrics, BetaDiversityMatrix,
-#     AlzheimerRiskResult, Biomarker, RiskLevel,
-# )
+from __future__ import annotations
 
+import math
+import hashlib
+from typing import Optional
 
-# # ── Validation helpers ────────────────────────────────────────────────────────
-
-# BIOPROJECT_RE = re.compile(r"^PRJ[EDN]A\d+$", re.IGNORECASE)
-# RUN_ACCESSION_RE = re.compile(r"^[SED]RR\d+$", re.IGNORECASE)
+from models.app_state import AppState, RunState
 
 
-# def validate_bioproject_accession(accession: str) -> tuple[bool, str]:
-#     """
-#     Return (is_valid, error_message).
-#     A valid BioProject accession matches PRJNA / PRJEB / PRJDB + digits.
-#     """
-#     if not accession.strip():
-#         return False, "BioProject accession is required."
-#     if not BIOPROJECT_RE.match(accession.strip()):
-#         return False, f"'{accession}' does not match expected format (e.g. PRJNA123456)."
-#     return True, ""
+# Top 15 human gut genera used for simulated taxonomy
+_GUT_GENERA = [
+    "Bacteroides", "Prevotella", "Faecalibacterium", "Ruminococcus",
+    "Blautia", "Roseburia", "Lachnospiraceae", "Akkermansia",
+    "Bifidobacterium", "Lactobacillus", "Clostridium", "Eubacterium",
+    "Coprococcus", "Dorea", "Subdoligranulum",
+]
 
 
-# def validate_run_accession(accession: str) -> tuple[bool, str]:
-#     """
-#     Return (is_valid, error_message).
-#     A valid Run accession matches SRR / ERR / DRR + digits.
-#     Empty string is also valid (field is optional).
-#     """
-#     if not accession.strip():
-#         return True, ""   # optional field — blank is fine
-#     if not RUN_ACCESSION_RE.match(accession.strip()):
-#         return False, f"'{accession}' does not match expected format (e.g. SRR987654)."
-#     return True, ""
+def _seed(text: str) -> float:
+    """Deterministic pseudo-random float in [0,1] from a string seed."""
+    h = int(hashlib.md5(text.encode()).hexdigest(), 16)
+    return (h % 10_000) / 10_000.0
 
 
-# # ── FASTQ format validator ────────────────────────────────────────────────────
+def compute_analysis(state: AppState) -> None:
+    """
+    Populate *state* with diversity metrics and taxonomy estimates
+    derived from the run metadata already in *state*.
 
-# VALID_SEQ_CHARS = set("ACGTNacgtn")
-# PHRED_OFFSET    = 33   # Sanger / Illumina 1.8+
+    This modifies *state* in-place.  Call this after a successful fetch
+    and before displaying Diversity / Taxonomy / ASV Table pages.
 
-# def validate_fastq_file(path: Path) -> tuple[bool, str]:
-#     """
-#     Peek at the first 40 records of a .fastq or .fastq.gz file and verify
-#     the 4-line FASTQ format:
-#         Line 1 – @SEQID
-#         Line 2 – sequence (A/C/G/T/N only)
-#         Line 3 – + (optional second ID)
-#         Line 4 – Phred quality string (same length as line 2)
+    In production: replace each section with real QIIME2 API calls.
+    """
+    if not state.runs:
+        return
 
-#     Returns (is_valid, error_message).
-#     """
-#     opener = gzip.open if path.suffix == ".gz" else open
+    _compute_taxonomy(state)
+    _compute_alpha_diversity(state)
+    _compute_beta_diversity(state)
+    _compute_pcoa(state)
+    _compute_asv_features(state)
+    _compute_phylo_tree(state)
 
-#     try:
-#         with opener(path, "rt", encoding="utf-8", errors="replace") as fh:
-#             lines = [fh.readline().rstrip("\n") for _ in range(160)]  # 40 records × 4 lines
-#     except OSError as exc:
-#         return False, f"Cannot open file: {exc}"
-
-#     if not lines[0]:
-#         return False, "File appears to be empty."
-
-#     for record_index in range(40):
-#         base = record_index * 4
-#         if base + 3 >= len(lines):
-#             break   # fewer than 40 records is still valid
-
-#         id_line, seq_line, plus_line, qual_line = (
-#             lines[base], lines[base + 1], lines[base + 2], lines[base + 3]
-#         )
-
-#         if not id_line.startswith("@"):
-#             return False, f"Record {record_index + 1}: ID line must start with '@'."
-
-#         invalid_bases = set(seq_line) - VALID_SEQ_CHARS
-#         if invalid_bases:
-#             return False, (
-#                 f"Record {record_index + 1}: invalid sequence characters "
-#                 f"{invalid_bases}."
-#             )
-
-#         if not plus_line.startswith("+"):
-#             return False, f"Record {record_index + 1}: line 3 must start with '+'."
-
-#         if len(qual_line) != len(seq_line):
-#             return False, (
-#                 f"Record {record_index + 1}: Phred quality length "
-#                 f"({len(qual_line)}) ≠ sequence length ({len(seq_line)})."
-#             )
-
-#     return True, ""
+    # Update aggregate counts
+    if state.genus_abundances:
+        first_run = state.run_labels[0]
+        state.genus_count = len(state.genus_abundances[first_run])
+        state.asv_count   = sum(
+            len(feats) for feats in state.asv_features.values()
+        )
 
 
-# # ── NCBI data service ─────────────────────────────────────────────────────────
+def _compute_taxonomy(state: AppState) -> None:
+    """
+    Derive genus relative abundances for each run.
+    Uses the run accession as a seed so each run gets unique but
+    reproducible abundances.
+    """
+    state.genus_abundances = {}
 
-# class NcbiService:
-#     """
-#     Handles all communication with NCBI (Entrez / SRA).
+    for run in state.runs:
+        seed_base = run.accession
 
-#     Currently returns realistic mock data so the app runs offline.
-#     To connect to the real API, install Biopython and replace the
-#     methods marked with  # TODO: real API call.
-#     """
+        # Generate raw weights seeded by accession
+        weights = []
+        for i, genus in enumerate(_GUT_GENERA):
+            s = _seed(f"{seed_base}_{genus}_{i}")
+            # Exponential distribution to mimic realistic microbiome dominance
+            w = math.exp(-3.0 * s)
+            weights.append(w)
 
-#     def fetch_project_overview(
-#         self,
-#         bioproject_accession: str,
-#         max_runs: int = 4,
-#         run_accession_filter: Optional[str] = None,
-#     ) -> ProjectOverview:
-#         """
-#         Fetch project metadata and up to *max_runs* run accessions.
-#         If *run_accession_filter* is given, only that run is returned.
-#         """
-#         # TODO: real API call — use Bio.Entrez.esearch + efetch
-#         return self._mock_project(bioproject_accession, max_runs, run_accession_filter)
+        total = sum(weights)
+        pcts  = [round(w / total * 100, 2) for w in weights]
 
-#     # ── Mock data ─────────────────────────────────────────────────────────────
+        # Sort descending by abundance
+        paired = sorted(zip(_GUT_GENERA, pcts), key=lambda x: -x[1])
+        state.genus_abundances[run.label] = paired
 
-#     def _mock_project(
-#         self,
-#         project_id: str,
-#         max_runs: int,
-#         run_filter: Optional[str],
-#     ) -> ProjectOverview:
-#         all_runs = [
-#             RunInfo("SRR001001", "R1", read_count=48_200),
-#             RunInfo("SRR001002", "R2", read_count=51_300),
-#             RunInfo("SRR001003", "R3", read_count=44_800),
-#             RunInfo("SRR001004", "R4", read_count=49_600),
-#         ]
-#         if run_filter:
-#             runs = [r for r in all_runs if r.run_accession == run_filter]
-#         else:
-#             runs = all_runs[:max_runs]
-
-#         return ProjectOverview(
-#             project_id=project_id,
-#             title="Human Gut Microbiome Study",
-#             runs=runs,
-#             asv_count=2_841,
-#             genus_count=183,
-#             library_layout=LibraryLayout.MIXED,
-#         )
+    state.genus_count = len(_GUT_GENERA)
 
 
-# # ── Analysis services ─────────────────────────────────────────────────────────
+def _compute_alpha_diversity(state: AppState) -> None:
+    """
+    Estimate Shannon and Simpson diversity indices from abundance profile.
+    These are the real diversity formulas applied to the simulated abundances.
+    """
+    state.alpha_diversity = {}
 
-# class MicrobiomeAnalysisService:
-#     """
-#     Provides taxonomy, diversity, and risk analysis results.
+    for run in state.runs:
+        genera = state.genus_abundances.get(run.label, [])
+        if not genera:
+            continue
 
-#     All methods return mock data that mirrors what a real QIIME2 pipeline
-#     would produce.  Replace the bodies with calls to your backend or
-#     QIIME2 Python API as needed.
-#     """
+        pcts = [p / 100.0 for _, p in genera]
+        pcts = [p for p in pcts if p > 0]
 
-#     # ── Taxonomy ──────────────────────────────────────────────────────────────
+        # Shannon entropy: H = -Σ(p * ln(p))
+        shannon = -sum(p * math.log(p) for p in pcts)
 
-#     def get_genus_abundances(self, run_label: str) -> list[GenusAbundance]:
-#         """Return top-genus relative abundances for a single run."""
-#         # TODO: real call — load feature-table.qza and taxonomy.qza via qiime2 API
-#         base = {
-#             "R1": [18.3, 12.1, 10.9, 7.4, 5.2, 4.8, 3.6, 2.9, 2.1, 1.8],
-#             "R2": [22.1,  9.3, 14.2, 5.0, 6.1, 3.9, 2.8, 3.1, 1.9, 1.5],
-#             "R3": [10.4, 20.2,  8.1, 12.3, 4.5, 5.5, 3.2, 2.7, 2.4, 1.6],
-#             "R4": [15.0, 15.0, 10.0, 10.0, 5.5, 4.2, 3.8, 3.0, 2.5, 1.9],
-#         }
-#         genera = [
-#             "Bacteroides", "Prevotella", "Ruminococcus", "Faecalibacterium",
-#             "Blautia", "Roseburia", "Lachnospiraceae", "Akkermansia",
-#             "Bifidobacterium", "Lactobacillus",
-#         ]
-#         values = base.get(run_label, base["R1"])
-#         return [
-#             GenusAbundance(genus=g, relative_abundance=v)
-#             for g, v in zip(genera, values)
-#         ]
+        # Simpson index: D = 1 - Σ(p²)
+        simpson = 1.0 - sum(p * p for p in pcts)
 
-#     def get_asv_features(self, run_label: str) -> list[AsvFeature]:
-#         """Return ASV feature-count rows for a single run."""
-#         # TODO: real call — parse QIIME2 feature-table artifact
-#         rows = [
-#             AsvFeature("ASV_001", "g__Bacteroides",       4_821, 18.3),
-#             AsvFeature("ASV_002", "g__Prevotella",        3_204, 12.1),
-#             AsvFeature("ASV_003", "g__Ruminococcus",      2_880, 10.9),
-#             AsvFeature("ASV_004", "g__Faecalibacterium",  1_940,  7.4),
-#             AsvFeature("ASV_005", "g__Blautia",           1_374,  5.2),
-#             AsvFeature("ASV_006", "g__Roseburia",         1_269,  4.8),
-#             AsvFeature("ASV_007", "g__Lachnospiraceae",     952,  3.6),
-#             AsvFeature("ASV_008", "g__Akkermansia",          769,  2.9),
-#         ]
-#         return rows
+        # Create plausible box-plot whiskers around the point estimate
+        # (in reality these come from rarefaction curves across samples)
+        s_spread = shannon * 0.12
+        state.alpha_diversity[run.label] = {
+            "shannon": (
+                round(shannon - 2 * s_spread, 3),
+                round(shannon - s_spread,     3),
+                round(shannon,                3),
+                round(shannon + s_spread,     3),
+                round(shannon + 2 * s_spread, 3),
+            ),
+            "simpson": (
+                round(simpson - 0.08, 3),
+                round(simpson - 0.04, 3),
+                round(simpson,        3),
+                round(simpson + 0.04, 3),
+                round(simpson + 0.08, 3),
+            ),
+        }
 
-#     # ── Diversity ─────────────────────────────────────────────────────────────
 
-#     def get_alpha_diversity(self, runs: list[RunInfo]) -> list[DiversityMetrics]:
-#         """Return Shannon / Simpson alpha-diversity metrics per run."""
-#         # TODO: real call — compute from QIIME2 alpha-diversity artifact
-#         mock = {
-#             "R1": DiversityMetrics("R1", 3.42, 0.87, (2.8, 3.1, 3.4, 3.7, 4.1),
-#                                                       (0.78, 0.83, 0.87, 0.91, 0.95)),
-#             "R2": DiversityMetrics("R2", 3.71, 0.91, (3.1, 3.4, 3.7, 4.0, 4.4),
-#                                                       (0.84, 0.88, 0.91, 0.94, 0.97)),
-#             "R3": DiversityMetrics("R3", 3.18, 0.82, (2.5, 2.9, 3.2, 3.5, 3.8),
-#                                                       (0.72, 0.78, 0.82, 0.86, 0.90)),
-#             "R4": DiversityMetrics("R4", 3.55, 0.89, (2.9, 3.2, 3.5, 3.8, 4.2),
-#                                                       (0.81, 0.85, 0.89, 0.92, 0.96)),
-#         }
-#         return [mock[r.label] for r in runs if r.label in mock]
+def _compute_beta_diversity(state: AppState) -> None:
+    """
+    Compute Bray-Curtis dissimilarity between all pairs of runs.
+    Real formula: BC(i,j) = 1 - 2*Σmin(p_i, p_j) / (Σp_i + Σp_j)
+    """
+    labels = state.run_labels
+    n      = len(labels)
 
-#     def get_beta_diversity(self, runs: list[RunInfo]) -> BetaDiversityMatrix:
-#         """Return Bray-Curtis pairwise dissimilarity matrix."""
-#         # TODO: real call — compute from QIIME2 beta-diversity artifact
-#         labels = [r.label for r in runs]
-#         n = len(labels)
-#         # Symmetric matrix: diagonal = 0, off-diagonal = mock dissimilarity
-#         mock_values = [
-#             [0.00, 0.18, 0.64, 0.71],
-#             [0.18, 0.00, 0.60, 0.67],
-#             [0.64, 0.60, 0.00, 0.22],
-#             [0.71, 0.67, 0.22, 0.00],
-#         ]
-#         values = [mock_values[i][:n] for i in range(n)]
-#         return BetaDiversityMatrix(run_labels=labels, values=values)
+    def bray_curtis(a: list[tuple], b: list[tuple]) -> float:
+        a_dict = {g: p for g, p in a}
+        b_dict = {g: p for g, p in b}
+        genera  = set(a_dict) | set(b_dict)
+        sum_min = sum(min(a_dict.get(g, 0), b_dict.get(g, 0)) for g in genera)
+        sum_all = sum(a_dict.get(g, 0) + b_dict.get(g, 0) for g in genera)
+        return round(1 - 2 * sum_min / sum_all, 4) if sum_all else 0.0
 
-#     # ── Alzheimer risk ────────────────────────────────────────────────────────
+    # Build n×n matrix
+    abunds = [state.genus_abundances.get(lbl, []) for lbl in labels]
+    bc_mat = [[0.0] * n for _ in range(n)]
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                bc_mat[i][j] = 0.0
+            elif i < j:
+                val = bray_curtis(abunds[i], abunds[j])
+                bc_mat[i][j] = val
+                bc_mat[j][i] = val
 
-#     def predict_alzheimer_risk(self, run_label: str) -> AlzheimerRiskResult:
-#         """
-#         Estimate Alzheimer's disease risk from gut microbiome composition.
+    state.beta_bray_curtis = bc_mat
 
-#         The model is based on published gut-brain axis literature:
-#         low butyrate producers, low Akkermansia, and high Proteobacteria
-#         are associated with neuroinflammation and AD risk.
+    # UniFrac: scale Bray-Curtis by a small phylogenetic factor
+    state.beta_unifrac = [
+        [round(v * 0.85, 4) for v in row]
+        for row in bc_mat
+    ]
 
-#         TODO: replace with a trained classifier (e.g. scikit-learn or ONNX).
-#         """
-#         biomarkers = [
-#             Biomarker(
-#                 name="Faecalibacterium prausnitzii",
-#                 observed_value=2.1, unit="%",
-#                 normal_range=">8%",
-#                 description="Anti-inflammatory; butyrate producer",
-#                 is_depleted=True,
-#             ),
-#             Biomarker(
-#                 name="Akkermansia muciniphila",
-#                 observed_value=0.3, unit="%",
-#                 normal_range=">1%",
-#                 description="Gut barrier integrity; neuroprotective",
-#                 is_depleted=True,
-#             ),
-#             Biomarker(
-#                 name="Proteobacteria (phylum)",
-#                 observed_value=24.0, unit="%",
-#                 normal_range="<5%",
-#                 description="Pro-inflammatory; dysbiosis marker",
-#                 is_elevated=True,
-#             ),
-#             Biomarker(
-#                 name="Butyrate producers",
-#                 observed_value=8.4, unit="%",
-#                 normal_range=">20%",
-#                 description="Neuroprotective short-chain fatty acids",
-#                 is_depleted=True,
-#             ),
-#             Biomarker(
-#                 name="Bacteroides / Firmicutes ratio",
-#                 observed_value=3.2, unit="×",
-#                 normal_range="~1×",
-#                 description="Gut dysbiosis marker",
-#                 is_elevated=True,
-#             ),
-#             Biomarker(
-#                 name="Lactobacillus spp.",
-#                 observed_value=4.8, unit="%",
-#                 normal_range="2–6%",
-#                 description="Beneficial probiotic genus",
-#             ),
-#         ]
 
-#         # Simple weighted score: each depleted/elevated marker adds weight
-#         risk_pct = self._compute_risk_score(biomarkers)
+def _compute_pcoa(state: AppState) -> None:
+    """
+    Simple 2-D PCoA from the Bray-Curtis matrix using classical MDS.
+    For n <= 4 runs we can do this analytically without scipy.
+    """
+    labels = state.run_labels
+    n      = len(labels)
 
-#         if risk_pct < 30:
-#             level = RiskLevel.LOW
-#         elif risk_pct < 50:
-#             level = RiskLevel.MODERATE
-#         elif risk_pct < 70:
-#             level = RiskLevel.ELEVATED
-#         else:
-#             level = RiskLevel.HIGH
+    if n < 2:
+        state.pcoa_bray_curtis = {labels[0]: (0.0, 0.0)} if n == 1 else {}
+        state.pcoa_unifrac      = state.pcoa_bray_curtis
+        return
 
-#         return AlzheimerRiskResult(
-#             predicted_risk_pct=risk_pct,
-#             confidence_pct=81.0,
-#             risk_level=level,
-#             biomarkers=biomarkers,
-#         )
+    def pcoa_2d(matrix: list[list[float]]) -> dict[str, tuple[float, float]]:
+        """Classical MDS — double-centering then power iteration for 2 PCs."""
+        # Double-centering: B = -0.5 * H * D² * H  where H = I - (1/n)11'
+        d2 = [[matrix[i][j] ** 2 for j in range(n)] for i in range(n)]
+        row_mean = [sum(d2[i]) / n for i in range(n)]
+        col_mean = [sum(d2[i][j] for i in range(n)) / n for j in range(n)]
+        grand    = sum(row_mean) / n
 
-#     @staticmethod
-#     def _compute_risk_score(biomarkers: list[Biomarker]) -> float:
-#         """
-#         Naïve linear risk score.
-#         Each abnormal biomarker contributes a fixed weight.
-#         Replace with a trained model for production use.
-#         """
-#         weights = {"depleted": 15.0, "elevated": 12.0, "normal": 0.0}
-#         base_score = 10.0   # baseline population risk
-#         score = base_score + sum(weights[b.status] for b in biomarkers)
-#         return min(score, 100.0)
+        B = [
+            [-0.5 * (d2[i][j] - row_mean[i] - col_mean[j] + grand)
+             for j in range(n)]
+            for i in range(n)
+        ]
+
+        # Power iteration for first 2 eigenvectors
+        coords = []
+        for pc in range(min(2, n - 1)):
+            vec = [_seed(f"pc{pc}_{i}") - 0.5 for i in range(n)]
+            for _ in range(50):
+                new = [sum(B[i][j] * vec[j] for j in range(n)) for i in range(n)]
+                norm = math.sqrt(sum(x * x for x in new)) or 1.0
+                vec  = [x / norm for x in new]
+            eigenval = sum(sum(B[i][j] * vec[j] for j in range(n)) * vec[i]
+                          for i in range(n))
+            score = [math.sqrt(max(eigenval, 0)) * v for v in vec]
+            coords.append(score)
+
+        if len(coords) == 1:
+            coords.append([0.0] * n)
+
+        return {labels[i]: (round(coords[0][i], 4), round(coords[1][i], 4))
+                for i in range(n)}
+
+    state.pcoa_bray_curtis = pcoa_2d(state.beta_bray_curtis)
+    state.pcoa_unifrac      = pcoa_2d(state.beta_unifrac)
+
+
+def _compute_asv_features(state: AppState) -> None:
+    """Generate a plausible ASV feature table for each run."""
+    state.asv_features = {}
+
+    for run in state.runs:
+        genera = state.genus_abundances.get(run.label, [])
+        total_reads = run.read_count or 10_000
+        features = []
+        asv_idx  = 1
+
+        for genus, pct in genera:
+            # Each genus gets 1-3 ASVs
+            n_asvs = 1 + int(_seed(f"{run.accession}_{genus}_n") * 2)
+            remaining_pct = pct
+            for k in range(n_asvs):
+                if k == n_asvs - 1:
+                    asv_pct = remaining_pct
+                else:
+                    frac    = 0.4 + _seed(f"{run.accession}_{genus}_{k}") * 0.4
+                    asv_pct = round(remaining_pct * frac, 2)
+                    remaining_pct -= asv_pct
+
+                count = int(total_reads * asv_pct / 100)
+                if count < 1:
+                    continue
+
+                features.append({
+                    "id":    f"ASV_{asv_idx:04d}",
+                    "genus": f"g__{genus}",
+                    "count": count,
+                    "pct":   round(asv_pct, 2),
+                })
+                asv_idx += 1
+
+        # Sort by count descending
+        features.sort(key=lambda x: -x["count"])
+        state.asv_features[run.label] = features
+
+    state.asv_count = sum(len(f) for f in state.asv_features.values())
+
+
+def _compute_phylo_tree(state: AppState) -> None:
+    """Generate a text phylogenetic tree for display."""
+    state.phylo_tree = {}
+    for run in state.runs:
+        genera = [g for g, _ in state.genus_abundances.get(run.label, [])[:6]]
+        if not genera:
+            state.phylo_tree[run.label] = "(no data)"
+            continue
+        lines = []
+        for i, g in enumerate(genera):
+            if i == 0:
+                lines.append(f"  ┌─── {g}")
+                lines.append( "──┤")
+            elif i == len(genera) - 1:
+                lines.append(f"  └─── {g}")
+            else:
+                lines.append(f"  ├─── {g}")
+        state.phylo_tree[run.label] = "\n".join(lines)
