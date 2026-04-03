@@ -30,6 +30,7 @@ from src.db.repository import (
     get_alpha_diversity_for_run,
     create_beta_diversity as repo_create_beta_diversity,
     get_beta_diversity,
+    update_run_risk,
     RepositoryError,
 )
 
@@ -419,6 +420,7 @@ def compute_risk(
     """
     session = SessionLocal()
     try:
+        run = get_run(session, run_id)
         genera = get_genus_for_run(session, run_id)
         if not genera:
             raise ServiceError(
@@ -431,15 +433,21 @@ def compute_risk(
 
         result = model_fn(taxa)
         risk_probability = float(result["risk_probability"])
+        risk_label = _risk_label(risk_probability)
+        confidence = float(result.get("confidence", 0.0))
+
+        update_run_risk(session, run=run, risk_score=risk_probability, risk_label=risk_label, confidence=confidence)
+        session.commit()
 
         return {
             "run_id": run_id,
             "risk_probability": risk_probability,
-            "risk_label": _risk_label(risk_probability),
-            "confidence": float(result.get("confidence", 0.0)),
+            "risk_label": risk_label,
+            "confidence": confidence,
             "biomarkers": result.get("biomarkers", {}),
         }
     except RepositoryError as e:
+        session.rollback()
         raise ServiceError(str(e)) from e
     finally:
         session.close()

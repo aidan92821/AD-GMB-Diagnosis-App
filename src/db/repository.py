@@ -114,6 +114,22 @@ def get_run_by_srr(session: Session, srr_accession: str) -> Run:
     return run
 
 
+def update_run_risk(
+        session: Session,
+        *,
+        run: Run,
+        risk_score: float,
+        risk_label: str,
+        confidence: float,
+) -> Run:
+    """Write risk assessment results onto the Run row."""
+    run.risk_score = risk_score
+    run.risk_label = risk_label
+    run.confidence = confidence
+    session.flush()
+    return run
+
+
 def list_runs_for_project(session: Session, project_id: int) -> list[Run]:
     """Return all runs for a project, newest first."""
     stmt = (

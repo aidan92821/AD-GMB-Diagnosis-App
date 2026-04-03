@@ -60,6 +60,9 @@ class Run(Base):
     library_layout     = Column(String(32))   # e.g. PAIRED, SINGLE
     source             = Column(String(16), nullable=False)  # "upload" or "ncbi"
     created_at         = Column(DateTime(timezone=True), default=utcnow)
+    risk_score         = Column(Float)       # 0-100
+    risk_label         = Column(String(32))  # "Low", "Moderate", "High"
+    confidence         = Column(Float)       # 0-100
 
     project           = relationship("Project", back_populates="runs")
     genus_data        = relationship("Genus",         back_populates="run", cascade="all, delete-orphan")
