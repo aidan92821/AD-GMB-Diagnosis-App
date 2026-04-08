@@ -32,6 +32,9 @@ from src.db.repository import (
     get_beta_diversity,
     update_run_risk,
     RepositoryError,
+    hash_password,
+    verify_password,
+    username_exists,
 )
 
 
@@ -58,6 +61,32 @@ def get_or_create_user(username: str) -> dict:
     finally:
         session.close()
 
+def register_user(username: str, password: str) -> dict:
+    session = SessionLocal()
+    try:
+        if username_exists(session, username):
+            raise ServiceError(f"Username {username!r} is already taken")
+        hashed = hash_password(password)
+        user = repo_create_user(session, username=username, password_hash=hashed)
+        session.commit()
+        return {"user_id": user.user_id, "username": user.username}
+    except RepositoryError as e:
+        session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+def login_user(username: str, password: str) -> dict:
+    session = SessionLocal()
+    try:
+        user = get_user_by_username(session, username)
+        if not verify_password(password, user.password_hash):
+            raise ServiceError("Incorrect password")
+        return {"user_id": user.user_id, "username": user.username}
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
 
 # ==== Project & Run setup ====
 def create_project(user_id: int, name: str) -> dict:

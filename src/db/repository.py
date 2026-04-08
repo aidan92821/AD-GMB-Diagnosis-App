@@ -14,6 +14,11 @@ from src.db.db_models import (
     Tree, AlphaDiversity, BetaDiversity,
 )
 
+from argon2 import PasswordHasher
+from argon2.exceptions import VerifyMismatchError
+
+ph = PasswordHasher()
+
 
 # ==== Custom errors ====
 class RepositoryError(Exception):
@@ -27,12 +32,25 @@ class IntegrityError(RepositoryError):
 
 
 # ==== USER ====
-def create_user(session: Session, *, username: str) -> User:
-    user = User(username=username)  # build python object in memory
-    session.add(user)               # stage it
-    session.flush()                 # send SQL to DB without committing for immediate use (can be rolledback)
-    return user                     # return the object
+def create_user(session: Session, *, username: str, password_hash: str) -> User:
+    user = User(username=username, password_hash=password_hash) # build python object in memory   
+    session.add(user)                                           # stage it
+    session.flush()                                             # send SQL to DB without committing for immediate use (can be rolledback)
+    return user                                                 # return the object
 
+def hash_password(plain_password) -> str:
+    return ph.hash(plain_password)          # Creates password hash using Argonid2
+
+def verify_password(plain_password, password_hash) -> bool:
+    try:
+        ph.verify(password_hash, plain_password)        # Verify hashed plain password input to stored password hash
+        return True
+    except VerifyMismatchError:
+        return False
+
+def username_exists(session: Session, username: str) -> bool:
+    stmt = select(User).where(User.username == username)
+    return session.execute(stmt).scalar_one_or_none() is not None
 
 def get_user(session: Session, user_id: int) -> User:
     stmt = select(User).where(User.user_id == user_id)  # build SELECT query
