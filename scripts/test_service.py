@@ -20,6 +20,8 @@ from src.services.assessment_service import (
     store_beta_diversity,
     get_beta_diversity_matrix,
     compute_risk,
+    register_user,
+    login_user,
     ServiceError,
 )
 
@@ -31,7 +33,7 @@ Base.metadata.create_all(engine)
 
 # ── Shared setup: create a user directly via repository ─────────────────────────
 session = SessionLocal()
-user = create_user(session, username="testuser")
+user = create_user(session, username="testuser", password_hash="placeholder")
 session.commit()
 user_id = user.user_id
 session.close()
@@ -150,5 +152,33 @@ try:
 except ServiceError:
     pass
 print("Test 12 PASS — ServiceError on compute_risk with no genus data")
+
+# ── Test 13: register_user ───────────────────────────────────────────────────────
+new_user = register_user("emma", "securepassword123")
+assert "user_id" in new_user
+assert new_user["username"] == "emma"
+print("Test 13 PASS — register_user")
+
+# ── Test 14: login_user ──────────────────────────────────────────────────────────
+logged_in = login_user("emma", "securepassword123")
+assert logged_in["user_id"] == new_user["user_id"]
+assert logged_in["username"] == "emma"
+print("Test 14 PASS — login_user correct password")
+
+# ── Test 14b: login_user wrong password ──────────────────────────────────────────
+try:
+    login_user("emma", "wrongpassword")
+    assert False, "Should have raised ServiceError"
+except ServiceError:
+    pass
+print("Test 14b PASS — login_user rejects wrong password")
+
+# ── Test 15: register_user duplicate username ─────────────────────────────────────
+try:
+    register_user("emma", "anotherpassword")
+    assert False, "Should have raised ServiceError"
+except ServiceError:
+    pass
+print("Test 15 PASS — register_user rejects duplicate username")
 
 print("\nAll tests passed.")
