@@ -30,7 +30,11 @@ from src.db.repository import (
     get_alpha_diversity_for_run,
     create_beta_diversity as repo_create_beta_diversity,
     get_beta_diversity,
+    update_run_risk,
     RepositoryError,
+    hash_password,
+    verify_password,
+    username_exists,
 )
 
 
@@ -57,6 +61,32 @@ def get_or_create_user(username: str) -> dict:
     finally:
         session.close()
 
+def register_user(username: str, password: str) -> dict:
+    session = SessionLocal()
+    try:
+        if username_exists(session, username):
+            raise ServiceError(f"Username {username!r} is already taken")
+        hashed = hash_password(password)
+        user = repo_create_user(session, username=username, password_hash=hashed)
+        session.commit()
+        return {"user_id": user.user_id, "username": user.username}
+    except RepositoryError as e:
+        session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+def login_user(username: str, password: str) -> dict:
+    session = SessionLocal()
+    try:
+        user = get_user_by_username(session, username)
+        if not verify_password(password, user.password_hash):
+            raise ServiceError("Incorrect password")
+        return {"user_id": user.user_id, "username": user.username}
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
 
 # ==== Project & Run setup ====
 def create_project(user_id: int, name: str) -> dict:
@@ -419,6 +449,7 @@ def compute_risk(
     """
     session = SessionLocal()
     try:
+        run = get_run(session, run_id)
         genera = get_genus_for_run(session, run_id)
         if not genera:
             raise ServiceError(
@@ -431,15 +462,21 @@ def compute_risk(
 
         result = model_fn(taxa)
         risk_probability = float(result["risk_probability"])
+        risk_label = _risk_label(risk_probability)
+        confidence = float(result.get("confidence", 0.0))
+
+        update_run_risk(session, run=run, risk_score=risk_probability, risk_label=risk_label, confidence=confidence)
+        session.commit()
 
         return {
             "run_id": run_id,
             "risk_probability": risk_probability,
-            "risk_label": _risk_label(risk_probability),
-            "confidence": float(result.get("confidence", 0.0)),
+            "risk_label": risk_label,
+            "confidence": confidence,
             "biomarkers": result.get("biomarkers", {}),
         }
     except RepositoryError as e:
+        session.rollback()
         raise ServiceError(str(e)) from e
     finally:
         session.close()

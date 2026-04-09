@@ -1,2 +1,5 @@
 # database
 sqlalchemy>=2.0
+
+# security
+argon2-cffi>=23.1
