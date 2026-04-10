@@ -7,7 +7,7 @@ Every widget imports from here; nothing is hard-coded in panel files.
 
 # ── Colour tokens ─────────────────────────────────────────────────────────────
 WHITE        = "#FFFFFF"
-BLACK        = ""
+BLACK        = "#000000"
 BG_PAGE      = "#F4F5F7"
 BG_CARD      = "#FFFFFF"
 BG_INPUT     = "#F9FAFB"
@@ -15,10 +15,11 @@ BG_INPUT     = "#F9FAFB"
 BORDER       = "#E5E7EB"
 BORDER_FOCUS = "#6366F1"
 
-TEXT_H    = "#111827"
-TEXT_B    = "#374151"
-TEXT_M    = "#6B7280"
-TEXT_HINT = "#9CA3AF"
+TEXT_H        = "#111827"
+TEXT_B        = "#374151"
+TEXT_M        = "#6B7280"
+TEXT_HINT     = "#9CA3AF"
+TEXT_SECONDARY = "#9CA3AF"
 
 ACCENT       = "#6366F1"
 ACCENT_DARK  = "#4F46E5"
@@ -63,7 +64,7 @@ QWidget {{
 /* ── Scrollbars ── */
 QScrollBar:vertical {{
     background: transparent;
-    width: 6px;
+    width: 5px;
     margin: 0;
 }}
 QScrollBar::handle:vertical {{
@@ -71,16 +72,22 @@ QScrollBar::handle:vertical {{
     border-radius: 3px;
     min-height: 30px;
 }}
+QScrollBar::handle:vertical:hover {{
+    background: #9CA3AF;
+}}
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
     height: 0;
 }}
 QScrollBar:horizontal {{
     background: transparent;
-    height: 6px;
+    height: 5px;
 }}
 QScrollBar::handle:horizontal {{
     background: #D1D5DB;
     border-radius: 3px;
+}}
+QScrollBar::handle:horizontal:hover {{
+    background: #9CA3AF;
 }}
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
     width: 0;
@@ -90,53 +97,57 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
 QFrame#sidebar {{
     background: {SB_BG};
     border: none;
+    border-right: 1px solid #2D3748;
 }}
 
 QLabel#sb_logo {{
     color: {WHITE};
-    font-size: 15px;
-    font-weight: 700;
+    font-size: 16px;
+    font-weight: 800;
     background: transparent;
+    letter-spacing: -0.3px;
     padding: 0;
 }}
 
 QLabel#sb_sub {{
-    color: {SB_SECTION};
-    font-size: 11px;
+    color: #475569;
+    font-size: 10px;
     background: transparent;
+    letter-spacing: 0.3px;
 }}
 
 QLabel#sb_section {{
-    color: {SB_SECTION};
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 1px;
+    color: #475569;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1.2px;
+    text-transform: uppercase;
     background: transparent;
-    padding: 14px 20px 4px 20px;
+    padding: 16px 20px 5px 20px;
 }}
 
 QPushButton#nav_btn {{
     background: transparent;
     border: none;
-    border-radius: 6px;
+    border-radius: 7px;
     color: {SB_IDLE_TEXT};
     font-size: 13px;
     text-align: left;
-    padding: 9px 16px;
-    margin: 1px 8px;
+    padding: 9px 14px;
+    margin: 1px 10px;
 }}
 QPushButton#nav_btn:hover {{
     background: {SB_HOVER_BG};
-    color: {WHITE};
+    color: #E2E8F0;
 }}
 QPushButton#nav_btn[active=true] {{
-    background: {SB_ACTIVE_BG};
+    background: #6366F1;
     color: {WHITE};
     font-weight: 600;
 }}
 
 QLabel#sb_footer {{
-    color: {SB_SECTION};
+    color: #374151;
     font-size: 10px;
     background: transparent;
     padding: 10px 20px;
@@ -152,6 +163,7 @@ QLabel#topbar_title {{
     font-weight: 700;
     color: {TEXT_H};
     background: transparent;
+    letter-spacing: -0.2px;
 }}
 QLabel#topbar_sub {{
     font-size: 12px;
@@ -164,7 +176,7 @@ QLabel#badge_green {{
     background: {SUCCESS_BG};
     color: {SUCCESS_FG};
     border-radius: 10px;
-    padding: 2px 10px;
+    padding: 3px 10px;
     font-size: 11px;
     font-weight: 600;
 }}
@@ -172,7 +184,7 @@ QLabel#badge_yellow {{
     background: {WARN_BG};
     color: {WARN_FG};
     border-radius: 10px;
-    padding: 2px 10px;
+    padding: 3px 10px;
     font-size: 11px;
     font-weight: 600;
 }}
@@ -180,7 +192,7 @@ QLabel#badge_red {{
     background: {DANGER_BG};
     color: {DANGER_FG};
     border-radius: 10px;
-    padding: 2px 10px;
+    padding: 3px 10px;
     font-size: 11px;
     font-weight: 600;
 }}
@@ -198,29 +210,30 @@ QWidget#content_host {{
 QFrame#card {{
     background: {BG_CARD};
     border: 1px solid {BORDER};
-    border-radius: 10px;
+    border-radius: 12px;
 }}
 QFrame#card_flat {{
     background: {BG_CARD};
     border: 1px solid {BORDER};
-    border-radius: 8px;
+    border-radius: 10px;
 }}
 
-/* ── Section heading inside a page ── */
+/* ── Page / section headings ── */
 QLabel#page_title {{
-    font-size: 18px;
+    font-size: 20px;
+    font-weight: 800;
+    color: {TEXT_H};
+    background: transparent;
+    letter-spacing: -0.4px;
+}}
+QLabel#section_title {{
+    font-size: 13px;
     font-weight: 700;
     color: {TEXT_H};
     background: transparent;
 }}
-QLabel#section_title {{
-    font-size: 13px;
-    font-weight: 600;
-    color: {TEXT_H};
-    background: transparent;
-}}
 QLabel#label_muted {{
-    font-size: 11px;
+    font-size: 12px;
     color: {TEXT_M};
     background: transparent;
 }}
@@ -234,18 +247,22 @@ QLabel#label_hint {{
 QFrame#stat_card {{
     background: {BG_PAGE};
     border: 1px solid {BORDER};
-    border-radius: 8px;
+    border-radius: 10px;
 }}
 QLabel#stat_value {{
-    font-size: 22px;
-    font-weight: 700;
+    font-size: 24px;
+    font-weight: 800;
     color: {TEXT_H};
     background: transparent;
+    letter-spacing: -0.5px;
 }}
 QLabel#stat_label {{
     font-size: 11px;
+    font-weight: 600;
     color: {TEXT_M};
     background: transparent;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
 }}
 QLabel#stat_sub {{
     font-size: 10px;
@@ -255,40 +272,42 @@ QLabel#stat_sub {{
 
 /* ── Inputs ── */
 QLineEdit {{
-    background: {BG_CARD};
-    border: 1px solid {BORDER};
-    border-radius: 6px;
-    padding: 7px 10px;
+    background: {BG_PAGE};
+    border: 1.5px solid {BORDER};
+    border-radius: 8px;
+    padding: 8px 12px;
     font-size: 13px;
     color: {TEXT_H};
     selection-background-color: {ACCENT_LIGHT};
 }}
 QLineEdit:focus {{
-    border: 1.5px solid {ACCENT};
+    border-color: {ACCENT};
     background: {WHITE};
 }}
 QLineEdit[state=ok] {{
-    border: 1.5px solid #10B981;
-    color: #065F46;
+    border-color: #10B981;
 }}
 QLineEdit[state=err] {{
-    border: 1.5px solid #EF4444;
+    border-color: #EF4444;
 }}
 QLineEdit:disabled {{
     background: {BG_PAGE};
     color: {TEXT_HINT};
 }}
+QLineEdit::placeholder {{
+    color: {TEXT_HINT};
+}}
 
 QComboBox {{
-    background: {BG_CARD};
-    border: 1px solid {BORDER};
-    border-radius: 6px;
-    padding: 6px 10px;
+    background: {BG_PAGE};
+    border: 1.5px solid {BORDER};
+    border-radius: 8px;
+    padding: 7px 12px;
     font-size: 13px;
     color: {TEXT_H};
 }}
 QComboBox:focus {{
-    border: 1.5px solid {ACCENT};
+    border-color: {ACCENT};
 }}
 QComboBox::drop-down {{
     border: none;
@@ -297,75 +316,92 @@ QComboBox::drop-down {{
 QComboBox QAbstractItemView {{
     background: {BG_CARD};
     border: 1px solid {BORDER};
+    border-radius: 6px;
     selection-background-color: {ACCENT_LIGHT};
     selection-color: {ACCENT_DARK};
     outline: none;
+    padding: 4px;
 }}
 
 /* ── Buttons ── */
 QPushButton#btn_primary {{
-    background: {TEXT_H};
+    background: {ACCENT};
     color: {WHITE};
     border: none;
-    border-radius: 6px;
-    padding: 8px 20px;
+    border-radius: 8px;
+    padding: 9px 20px;
     font-size: 13px;
-    font-weight: 600;
+    font-weight: 700;
 }}
 QPushButton#btn_primary:hover {{
-    background: #1F2937;
+    background: {ACCENT_DARK};
 }}
 QPushButton#btn_primary:pressed {{
-    background: #374151;
+    background: #4338CA;
+}}
+QPushButton#btn_primary:disabled {{
+    background: #C7D2FE;
+    color: #818CF8;
 }}
 
 QPushButton#btn_outline {{
     background: transparent;
-    border: 1px solid {BORDER};
-    border-radius: 6px;
-    padding: 6px 14px;
+    border: 1.5px solid {BORDER};
+    border-radius: 8px;
+    padding: 7px 14px;
     font-size: 12px;
+    font-weight: 500;
     color: {TEXT_B};
 }}
 QPushButton#btn_outline:hover {{
     background: {BG_PAGE};
     border-color: #9CA3AF;
+    color: {TEXT_H};
+}}
+QPushButton#btn_outline:pressed {{
+    background: #E5E7EB;
 }}
 
 /* Run pill buttons */
 QPushButton#pill {{
     background: transparent;
-    border: 1px solid {BORDER};
-    border-radius: 12px;
+    border: 1.5px solid {BORDER};
+    border-radius: 14px;
     padding: 3px 12px;
     font-size: 11px;
+    font-weight: 500;
     color: {TEXT_M};
 }}
 QPushButton#pill:hover {{
     border-color: {ACCENT};
     color: {ACCENT};
+    background: {ACCENT_LIGHT};
 }}
 QPushButton#pill[active=true] {{
     background: {TEXT_H};
     border-color: {TEXT_H};
     color: {WHITE};
-    font-weight: 600;
+    font-weight: 700;
 }}
 
-/* Metric-switch pills (Bray-Curtis / UniFrac, Shannon / Simpson) */
+/* Metric-switch pills */
 QPushButton#metric_pill {{
     background: transparent;
-    border: 1px solid {BORDER};
-    border-radius: 12px;
+    border: 1.5px solid {BORDER};
+    border-radius: 14px;
     padding: 3px 10px;
     font-size: 11px;
     color: {TEXT_M};
+}}
+QPushButton#metric_pill:hover {{
+    border-color: {ACCENT};
+    color: {ACCENT};
 }}
 QPushButton#metric_pill[active=true] {{
     background: {TEXT_H};
     border-color: {TEXT_H};
     color: {WHITE};
-    font-weight: 600;
+    font-weight: 700;
 }}
 
 /* ── Tables ── */
@@ -378,7 +414,7 @@ QTableWidget {{
     alternate-background-color: #FAFAFA;
 }}
 QTableWidget::item {{
-    padding: 5px 8px;
+    padding: 6px 10px;
     border: none;
 }}
 QTableWidget::item:selected {{
@@ -389,8 +425,9 @@ QHeaderView::section {{
     background: {BG_PAGE};
     color: {TEXT_M};
     font-size: 11px;
-    font-weight: 600;
-    padding: 5px 8px;
+    font-weight: 700;
+    letter-spacing: 0.4px;
+    padding: 7px 10px;
     border: none;
     border-bottom: 1px solid {BORDER};
 }}
@@ -417,9 +454,13 @@ QLabel#banner_text_ok   {{ color: {SUCCESS_FG};font-size: 12px; background: tran
 
 /* ── Upload zone ── */
 QFrame#upload_zone {{
-    background: {BG_CARD};
-    border: 2px dashed {BORDER};
-    border-radius: 8px;
+    background: {ACCENT_LIGHT};
+    border: 2px dashed #C7D2FE;
+    border-radius: 10px;
+}}
+QFrame#upload_zone:hover {{
+    background: #E0E7FF;
+    border-color: {ACCENT};
 }}
 
 /* ── Dividers ── */
@@ -434,21 +475,24 @@ QFrame#vdivider {{
     border: none;
 }}
 
-/* ── Alzheimer risk big number ── */
+/* ── Alzheimer risk number ── */
 QLabel#risk_number {{
-    font-size: 38px;
+    font-size: 42px;
     font-weight: 800;
     color: #DC2626;
     background: transparent;
+    letter-spacing: -1px;
 }}
 QLabel#risk_level {{
     font-size: 12px;
+    font-weight: 700;
     color: #DC2626;
     background: transparent;
+    letter-spacing: 0.5px;
 }}
 QLabel#conf_number {{
-    font-size: 22px;
-    font-weight: 700;
+    font-size: 24px;
+    font-weight: 800;
     color: {TEXT_H};
     background: transparent;
 }}
@@ -457,19 +501,20 @@ QLabel#conf_number {{
 QFrame#bm_card {{
     background: {BG_PAGE};
     border: 1px solid {BORDER};
-    border-radius: 8px;
+    border-radius: 10px;
 }}
 QLabel#bm_name  {{ font-size: 12px; color: {TEXT_M}; background: transparent; }}
-QLabel#bm_val_low  {{ font-size: 15px; font-weight: 700; color: #DC2626; background: transparent; }}
-QLabel#bm_val_high {{ font-size: 15px; font-weight: 700; color: #DC2626; background: transparent; }}
-QLabel#bm_val_ok   {{ font-size: 15px; font-weight: 700; color: #065F46; background: transparent; }}
+QLabel#bm_val_low  {{ font-size: 16px; font-weight: 700; color: #DC2626; background: transparent; }}
+QLabel#bm_val_high {{ font-size: 16px; font-weight: 700; color: #DC2626; background: transparent; }}
+QLabel#bm_val_ok   {{ font-size: 16px; font-weight: 700; color: #065F46; background: transparent; }}
 QLabel#bm_ref   {{ font-size: 10px; color: {TEXT_HINT}; background: transparent; }}
 
 /* ── Monospace tree ── */
 QLabel#tree_text {{
-    font-family: "Consolas", "Courier New", monospace;
+    font-family: "JetBrains Mono", "Fira Code", "Consolas", "Courier New", monospace;
     font-size: 12px;
     color: {TEXT_B};
     background: transparent;
+    line-height: 1.6;
 }}
 """

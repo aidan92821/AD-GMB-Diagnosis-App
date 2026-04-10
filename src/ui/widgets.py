@@ -176,57 +176,84 @@ class BoxPlotWidget(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        W, H    = self.width(), self.height()
-        pad_b   = 20   # label space
-        pad_t   = 8
-        chart_h = H - pad_b - pad_t
+        W, H     = self.width(), self.height()
+        pad_l    = 46   # y-axis label space
+        pad_b    = 24
+        pad_t    = 12
+        pad_r    = 12
+        chart_w  = W - pad_l - pad_r
+        chart_h  = H - pad_b - pad_t
 
-        runs    = list(self._data.keys())
-        n       = len(runs)
-        slot_w  = W // n
-        box_w   = max(20, slot_w // 2)
+        runs     = list(self._data.keys())
+        n        = len(runs)
+        slot_w   = chart_w // max(n, 1)
+        box_w    = max(18, slot_w * 2 // 5)
 
-        # Global value range
         all_vals = [v for tup in self._data.values() for v in tup]
         lo, hi   = min(all_vals), max(all_vals)
         span     = hi - lo or 1.0
+        # Pad the range slightly
+        lo -= span * 0.05
+        hi += span * 0.05
+        span = hi - lo
 
         def vy(val: float) -> int:
-            """Map a data value to a y pixel (top = high)."""
             return pad_t + int(chart_h * (1 - (val - lo) / span))
 
-        font = QFont(); font.setPointSize(8)
-        p.setFont(font)
+        font_sm = QFont(); font_sm.setPointSize(7)
+        font_md = QFont(); font_md.setPointSize(8)
 
+        # ── Horizontal grid lines + y-axis ticks ──────────────────────────
+        n_ticks = 4
+        for k in range(n_ticks + 1):
+            tick_val = lo + span * k / n_ticks
+            ty = vy(tick_val)
+            p.setPen(QPen(_color("#E5E7EB"), 1, Qt.PenStyle.DotLine))
+            p.drawLine(pad_l, ty, W - pad_r, ty)
+            p.setPen(_color("#9CA3AF"))
+            p.setFont(font_sm)
+            p.drawText(0, ty - 7, pad_l - 4, 14,
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                       f"{tick_val:.2f}")
+
+        # ── Boxes ──────────────────────────────────────────────────────────
         for i, run in enumerate(runs):
             mn, q1, med, q3, mx = self._data[run]
-            cx = slot_w * i + slot_w // 2
-            bx = cx - box_w // 2
-            color = _color(self._colors[i % len(self._colors)])
-            light = _color(self._colors[i % len(self._colors)], 60)
+            cx   = pad_l + slot_w * i + slot_w // 2
+            bx   = cx - box_w // 2
+            col  = _color(self._colors[i % len(self._colors)])
+            fill = _color(self._colors[i % len(self._colors)], 55)
 
-            # Whiskers
-            p.setPen(QPen(_color("#9CA3AF"), 1))
+            # Whisker line
+            p.setPen(QPen(_color("#9CA3AF"), 1.5))
             p.drawLine(cx, vy(mn), cx, vy(q1))
             p.drawLine(cx, vy(q3), cx, vy(mx))
             # Whisker caps
             cap = box_w // 3
+            p.setPen(QPen(_color("#9CA3AF"), 1.5))
             p.drawLine(cx - cap, vy(mn), cx + cap, vy(mn))
             p.drawLine(cx - cap, vy(mx), cx + cap, vy(mx))
 
-            # Box (IQR)
-            p.setBrush(QBrush(light))
-            p.setPen(QPen(color, 1))
-            p.drawRect(bx, vy(q3), box_w, vy(q1) - vy(q3))
+            # IQR box
+            box_top = vy(q3); box_bot = vy(q1)
+            p.setBrush(QBrush(fill))
+            p.setPen(QPen(col, 1.5))
+            p.drawRoundedRect(bx, box_top, box_w, box_bot - box_top, 3, 3)
 
             # Median line
-            p.setPen(QPen(color, 2))
+            p.setPen(QPen(col, 2.5))
             p.drawLine(bx, vy(med), bx + box_w, vy(med))
+
+            # Median value annotation
+            p.setPen(col)
+            p.setFont(font_sm)
+            p.drawText(cx - 20, vy(med) - 14, 40, 12,
+                       Qt.AlignmentFlag.AlignCenter, f"{med:.3f}")
 
             # Run label
             p.setPen(_color(TEXT_M))
-            p.setFont(font)
-            p.drawText(cx - 16, H - pad_b + 4, 32, 16,
+            p.setFont(font_md)
+            p.drawText(cx - 20, H - pad_b + 4, 40, 16,
                        Qt.AlignmentFlag.AlignCenter, run)
 
         p.end()
@@ -260,70 +287,118 @@ class PCoAWidget(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        W, H    = self.width(), self.height()
-        pad     = 30
-        chart_w = W - pad * 2
-        chart_h = H - pad * 2
+        W, H     = self.width(), self.height()
+        pad_l    = 48
+        pad_r    = 16
+        pad_t    = 16
+        pad_b    = 36
+        chart_w  = W - pad_l - pad_r
+        chart_h  = H - pad_t - pad_b
 
         xs = [v[0] for v in self._coords.values()]
         ys = [v[1] for v in self._coords.values()]
-        x_lo, x_hi = min(xs) - 0.1, max(xs) + 0.1
-        y_lo, y_hi = min(ys) - 0.1, max(ys) + 0.1
+        margin = max((max(xs) - min(xs)) * 0.2, 0.05)
+        x_lo = min(xs) - margin;  x_hi = max(xs) + margin
+        y_lo = min(ys) - margin;  y_hi = max(ys) + margin
         x_span = x_hi - x_lo or 1.0
         y_span = y_hi - y_lo or 1.0
 
-        def px(v: float) -> int:
-            return pad + int(chart_w * (v - x_lo) / x_span)
+        def sx(v: float) -> int:
+            return pad_l + int(chart_w * (v - x_lo) / x_span)
 
-        def py(v: float) -> int:
-            return pad + int(chart_h * (1 - (v - y_lo) / y_span))
+        def sy(v: float) -> int:
+            return pad_t + int(chart_h * (1 - (v - y_lo) / y_span))
 
-        # Axes
+        font_sm = QFont(); font_sm.setPointSize(7)
+        font_md = QFont(); font_md.setPointSize(8)
+
+        # ── Plot border ───────────────────────────────────────────────────
         p.setPen(QPen(_color(BORDER), 1))
-        cx = px(0.0); cy = py(0.0)
-        p.drawLine(pad, cy, W - pad, cy)
-        p.drawLine(cx, pad, cx, H - pad)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawRect(pad_l, pad_t, chart_w, chart_h)
 
-        font = QFont(); font.setPointSize(8)
-        p.setFont(font)
-        p.setPen(_color(TEXT_HINT))
-        p.drawText(2, cy - 8, "PC2")
-        p.drawText(W - pad - 4, cy + 12, "PC1")
+        # ── Grid lines ────────────────────────────────────────────────────
+        n_grid = 4
+        p.setPen(QPen(_color("#E5E7EB"), 1, Qt.PenStyle.DotLine))
+        for k in range(1, n_grid):
+            gx = pad_l + chart_w * k // n_grid
+            gy = pad_t + chart_h * k // n_grid
+            p.drawLine(gx, pad_t, gx, pad_t + chart_h)
+            p.drawLine(pad_l, gy, pad_l + chart_w, gy)
 
-        # Cluster ellipses: group R1+R2 and R3+R4
-        groups = [
-            [r for r in ["R1", "R2"] if r in self._coords],
-            [r for r in ["R3", "R4"] if r in self._coords],
-        ]
-        group_colors = ["#10B981", "#F59E0B"]
+        # ── Zero axes (bold) ──────────────────────────────────────────────
+        p.setPen(QPen(_color("#9CA3AF"), 1))
+        zero_x = sx(0.0); zero_y = sy(0.0)
+        if pad_l <= zero_x <= pad_l + chart_w:
+            p.drawLine(zero_x, pad_t, zero_x, pad_t + chart_h)
+        if pad_t <= zero_y <= pad_t + chart_h:
+            p.drawLine(pad_l, zero_y, pad_l + chart_w, zero_y)
 
-        for grp, gcol in zip(groups, group_colors):
+        # ── Axis tick labels ──────────────────────────────────────────────
+        p.setFont(font_sm)
+        p.setPen(_color("#9CA3AF"))
+        for k in range(n_grid + 1):
+            xv = x_lo + x_span * k / n_grid
+            gx = pad_l + chart_w * k // n_grid
+            p.drawText(gx - 18, pad_t + chart_h + 4, 36, 14,
+                       Qt.AlignmentFlag.AlignCenter, f"{xv:.2f}")
+        for k in range(n_grid + 1):
+            yv = y_lo + y_span * k / n_grid
+            gy = pad_t + chart_h - chart_h * k // n_grid
+            p.drawText(0, gy - 7, pad_l - 4, 14,
+                       Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter,
+                       f"{yv:.2f}")
+
+        # ── Axis titles ───────────────────────────────────────────────────
+        p.setFont(font_md)
+        p.setPen(_color(TEXT_M))
+        p.drawText(pad_l, H - 16, chart_w, 14,
+                   Qt.AlignmentFlag.AlignCenter, "PC1 (Axis 1)")
+        # Rotated "PC2" on left
+        p.save()
+        p.translate(10, pad_t + chart_h // 2)
+        p.rotate(-90)
+        p.drawText(-30, -5, 60, 14, Qt.AlignmentFlag.AlignCenter, "PC2")
+        p.restore()
+
+        # ── Cluster ellipses (one per pair of runs) ───────────────────────
+        all_runs = list(self._coords.keys())
+        half     = max(len(all_runs) // 2, 1)
+        groups   = [all_runs[:half], all_runs[half:]]
+        g_cols   = ["#6366F1", "#10B981"]
+
+        for grp, gcol in zip(groups, g_cols):
             if len(grp) < 2:
                 continue
-            gxs = [px(self._coords[r][0]) for r in grp]
-            gys = [py(self._coords[r][1]) for r in grp]
-            cx_e = sum(gxs) // len(gxs)
-            cy_e = sum(gys) // len(gys)
-            rx   = max(abs(gx - cx_e) for gx in gxs) + 18
-            ry   = max(abs(gy - cy_e) for gy in gys) + 18
-            ec   = _color(gcol, 40)
-            p.setBrush(QBrush(ec))
-            p.setPen(QPen(_color(gcol, 180), 1))
-            p.drawEllipse(QPointF(cx_e, cy_e), rx, ry)
+            gxs = [sx(self._coords[r][0]) for r in grp]
+            gys = [sy(self._coords[r][1]) for r in grp]
+            cxe = sum(gxs) // len(gxs)
+            cye = sum(gys) // len(gys)
+            rx  = max(abs(gx - cxe) for gx in gxs) + 20
+            ry  = max(abs(gy - cye) for gy in gys) + 20
+            p.setBrush(QBrush(_color(gcol, 28)))
+            p.setPen(QPen(_color(gcol, 160), 1.5, Qt.PenStyle.DashLine))
+            p.drawEllipse(QPointF(cxe, cye), float(rx), float(ry))
 
-        # Dots + labels
-        dot_r = 6
-        for run, (vx, vy_) in self._coords.items():
-            screen_x = px(vx)
-            screen_y = py(vy_)
-            col = _color(self._colors.get(run, "#6366F1"))
+        # ── Points ────────────────────────────────────────────────────────
+        dot_r = 7.0
+        for run, (vx, vy_val) in self._coords.items():
+            screen_x = sx(vx)
+            screen_y = sy(vy_val)
+            col      = _color(self._colors.get(run, "#6366F1"))
+            # Shadow
+            p.setBrush(QBrush(_color("#000000", 20)))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawEllipse(QPointF(screen_x + 1.5, screen_y + 1.5), dot_r, dot_r)
+            # Fill
             p.setBrush(QBrush(col))
-            p.setPen(QPen(_color("#FFFFFF"), 1.5))
+            p.setPen(QPen(_color("#FFFFFF"), 2))
             p.drawEllipse(QPointF(screen_x, screen_y), dot_r, dot_r)
-
-            p.setPen(_color("#374151"))
-            p.setFont(font)
-            p.drawText(screen_x + dot_r + 2, screen_y + 4, run)
+            # Label
+            p.setPen(_color("#1F2937"))
+            p.setFont(font_md)
+            p.drawText(screen_x + int(dot_r) + 3, screen_y - 6, 32, 14,
+                       Qt.AlignmentFlag.AlignLeft, run)
 
         p.end()
 
@@ -344,17 +419,42 @@ class HeatmapWidget(QWidget):
         super().__init__(parent)
         self._labels = labels
         self._values = values
-        n = len(labels)
-        side = n * self.CELL + 28
-        self.setFixedSize(side, side)
+        self._resize()
+
+    def _resize(self) -> None:
+        n = len(self._labels)
+        w = n * self.CELL + 28
+        h = n * self.CELL + 28 + 28   # extra 28 for legend
+        self.setFixedSize(max(w, 60), max(h, 60))
 
     def set_data(self, labels: list[str], values: list[list[float]]) -> None:
         self._labels = labels
         self._values = values
-        n = len(labels)
-        side = n * self.CELL + 28
-        self.setFixedSize(side, side)
+        self._resize()
         self.update()
+
+    @staticmethod
+    def _val_to_color(val: float, diagonal: bool = False) -> QColor:
+        """
+        White → amber → crimson color scale for dissimilarity values.
+          0.0  =  white       (identical — diagonal)
+          0.5  =  amber
+          1.0  =  deep red
+        """
+        if diagonal:
+            return QColor("#E0E7FF")   # light indigo for self-comparisons
+        v = max(0.0, min(val, 1.0))
+        if v <= 0.5:
+            t  = v * 2.0
+            r_ = 255
+            g_ = int(255 - 85 * t)     # 255 → 170
+            b_ = int(255 - 210 * t)    # 255 → 45
+        else:
+            t  = (v - 0.5) * 2.0
+            r_ = int(255 - 75 * t)     # 255 → 180
+            g_ = int(170 - 150 * t)    # 170 → 20
+            b_ = int(45  - 10 * t)     # 45  → 35
+        return QColor(r_, g_, b_)
 
     def paintEvent(self, _):
         if not self._labels:
@@ -363,37 +463,69 @@ class HeatmapWidget(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         n      = len(self._labels)
-        offset = 24
+        offset = 28
 
-        font = QFont(); font.setPointSize(8)
-        p.setFont(font)
+        font_lbl = QFont(); font_lbl.setPointSize(8); font_lbl.setBold(True)
+        font_val = QFont(); font_val.setPointSize(7)
 
-        # Axis labels
+        # ── Axis labels ───────────────────────────────────────────────────
+        p.setFont(font_lbl)
         p.setPen(_color(TEXT_M))
         for i, lbl in enumerate(self._labels):
             x = offset + i * self.CELL + self.CELL // 2
-            p.drawText(x - 12, 0, 24, offset - 2,
+            p.drawText(x - 16, 2, 32, offset - 4,
                        Qt.AlignmentFlag.AlignCenter, lbl)
-            p.drawText(0, offset + i * self.CELL, offset - 2, self.CELL,
+            p.drawText(0, offset + i * self.CELL, offset - 4, self.CELL,
                        Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter, lbl)
 
-        # Cells: dark teal = similar (low), light = dissimilar (high)
+        # ── Cells ─────────────────────────────────────────────────────────
         for row in range(n):
             for col in range(n):
                 val = self._values[row][col] if (
                     row < len(self._values) and col < len(self._values[row])
                 ) else 0.0
-                # Teal gradient: 0→dark, 1→light
-                r_ = int(8   + (236 - 8)   * val)
-                g_ = int(128 + (252 - 128) * val)
-                b_ = int(128 + (232 - 128) * val)
-                color = QColor(r_, g_, b_)
+                is_diag = (row == col)
+                color   = self._val_to_color(val, diagonal=is_diag)
 
                 cx = offset + col * self.CELL
                 cy = offset + row * self.CELL
+
                 p.setBrush(QBrush(color))
-                p.setPen(QPen(_color("#FFFFFF"), 2))
+                p.setPen(QPen(_color("#FFFFFF"), 1.5))
                 p.drawRect(cx, cy, self.CELL - 1, self.CELL - 1)
+
+                # Cell value text — dark on light cells, white on dark cells
+                p.setFont(font_val)
+                brightness = (color.red() * 299 + color.green() * 587
+                              + color.blue() * 114) / 1000
+                text_col = "#1F2937" if brightness > 140 else "#FFFFFF"
+                p.setPen(_color(text_col))
+                label_txt = "—" if is_diag else f"{val:.2f}"
+                p.drawText(cx, cy, self.CELL - 1, self.CELL - 1,
+                           Qt.AlignmentFlag.AlignCenter, label_txt)
+
+        # ── Color scale legend ────────────────────────────────────────────
+        legend_x = offset
+        legend_y = offset + n * self.CELL + 6
+        legend_w = n * self.CELL
+        legend_h = 8
+        if legend_w > 0:
+            grad = QLinearGradient(legend_x, 0, legend_x + legend_w, 0)
+            grad.setColorAt(0.0, self._val_to_color(0.0))
+            grad.setColorAt(0.5, self._val_to_color(0.5))
+            grad.setColorAt(1.0, self._val_to_color(1.0))
+            p.setBrush(QBrush(grad))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawRoundedRect(legend_x, legend_y, legend_w, legend_h, 3, 3)
+            p.setFont(font_val)
+            p.setPen(_color(TEXT_M))
+            p.drawText(legend_x, legend_y + legend_h + 2, 30, 12,
+                       Qt.AlignmentFlag.AlignLeft, "0.0")
+            p.drawText(legend_x + legend_w // 2 - 10, legend_y + legend_h + 2,
+                       20, 12, Qt.AlignmentFlag.AlignCenter, "0.5")
+            p.drawText(legend_x + legend_w - 24, legend_y + legend_h + 2,
+                       24, 12, Qt.AlignmentFlag.AlignRight, "1.0")
+
         p.end()
 
 

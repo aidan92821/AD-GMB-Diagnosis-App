@@ -45,54 +45,63 @@ Research suggests the bacteria living in your gut (the **gut microbiome**) may b
 ## Workflow
 
 ```
-[1] ENTER BioProject ID (e.g. PRJNA1020741)
+[1] LOGIN / REGISTER
+    Each user has their own account and project history
           │
           ▼
-[2] FETCH METADATA from NCBI
+[2] ENTER BioProject ID (e.g. PRJNA1020741)
+    Select max runs (1–20), optionally filter by SRR accession
+          │
+          ▼
+[3] FETCH METADATA from NCBI
     • Call 1: Find all sequencing runs in the project
     • Call 2: Get per-run details (read count, library layout, organism)
     • Call 3: Get project title and description
+    Project saved to your account history automatically
           │
           ▼
-[3] VIEW OVERVIEW
-    Project info + table of runs (accessions, read counts, layout)
-          │
-          ├─── [4A] SIMULATED ANALYSIS (instant, no QIIME2 needed)
-          │         Generates realistic results from run metadata:
-          │         genus abundances, alpha/beta diversity, PCoA,
-          │         phylogenetic tree, Alzheimer risk score
-          │
-          └─── [4B] REAL PIPELINE (requires QIIME2 + FASTQ files)
-                    Upload FASTQ files → click "Run Pipeline"
-                    Step 1: Download raw DNA files from NCBI
-                    Step 2: Download SILVA classifier (~1.4 GB, one-time)
-                    Step 3: QIIME2 pipeline:
-                      • Import FASTQ into QIIME2 format
-                      • QC: Assess read quality, find truncation points
-                      • DADA2: Denoise reads → clean ASVs
-                      • Classify: Match ASVs to SILVA → identify bacteria
-                      • Export: TSV tables (ASV counts, genus abundances)
-                    Results replace simulated data on all pages
+[4] AUTO-DOWNLOAD FASTQ files via fasterq-dump
+    • Each run downloaded to  data/<BioProject>/fastq/<layout>/
+    • QIIME2 manifest files written automatically
+    • Upload Runs page shows ✓ Uploaded for each run
+    (skipped gracefully if SRA Toolkit is not installed)
           │
           ▼
-[5] EXPLORE RESULTS ACROSS PAGES
-    ┌──────────────┬──────────────────────────────────────────────────┐
-    │ Overview     │ Project summary, run status, ASV/genus counts    │
-    │ Upload Runs  │ FASTQ file upload and pipeline trigger           │
-    │ Diversity    │ Alpha boxplots, beta heatmap, PCoA scatter plot  │
-    │ Taxonomy     │ Bar charts of genus abundances per run           │
-    │ ASV Table    │ Full table of detected bacterial sequences       │
-    │ Phylogeny    │ Evolutionary tree of detected bacteria           │
-    │ Alzheimer    │ Risk score + key bacteria driving the prediction │
-    │ Export PDF   │ Save the full report                             │
-    └──────────────┴──────────────────────────────────────────────────┘
+[5] IN-APP ANALYSIS (automatic, no QIIME2 needed)
+    • Genus abundance profiles (based on literature microbiome values)
+    • Alpha diversity: Shannon entropy + Simpson index (with bootstrap)
+    • Beta diversity: Bray-Curtis + UniFrac dissimilarity matrices
+    • PCoA: classical MDS from Bray-Curtis (no scipy needed)
+    • Phylogenetic tree text for top genera
+    • Alzheimer risk score from published biomarker weights
+          │
+          ├─── [6A] EXPLORE RESULTS
+          │    ┌──────────────┬────────────────────────────────────────────┐
+          │    │ Overview     │ Project summary, run status, counts        │
+          │    │ Upload Runs  │ Download status, Run Pipeline button       │
+          │    │ Diversity    │ Alpha boxplots, beta heatmap, PCoA plot    │
+          │    │ Taxonomy     │ Genus abundance bar charts per run         │
+          │    │ ASV Table    │ Full feature table                         │
+          │    │ Phylogeny    │ Evolutionary tree of detected bacteria     │
+          │    │ Alzheimer    │ Risk score + key biomarker bacteria        │
+          │    │ Export PDF   │ Save full report                           │
+          │    │ Profile      │ Account info, project history, past runs   │
+          │    └──────────────┴────────────────────────────────────────────┘
+          │
+          └─── [6B] OPTIONAL: REAL QIIME2 PIPELINE
+                    Click "Run Pipeline" on Upload Runs page
+                    Requires: QIIME2 conda env + downloaded FASTQ files
+                    • Import FASTQ → QC → DADA2 denoising → SILVA classify
+                    • Real ASV counts replace simulated data on all pages
+                    Falls back to in-app analysis if QIIME2 not installed
           │
           ▼
-[6] ALZHEIMER RISK ASSESSMENT
-    ML model takes the genus abundance profile and outputs:
-    • Risk probability (0–100%)
-    • Risk label: Low / Moderate / High
-    • Key biomarker bacteria driving the prediction
+[7] ALZHEIMER RISK ASSESSMENT
+    Literature-based model (Vogt 2017, Liu 2019, Shen 2021):
+    • Protective genera weighted negatively (Faecalibacterium, Akkermansia…)
+    • Risk genera weighted positively (Prevotella, Clostridium, Veillonella…)
+    • Risk probability (0–100%), confidence score, Low/Moderate/High label
+    • Key biomarker breakdown with reference ranges
 ```
 
 ---
@@ -188,23 +197,9 @@ source venv/bin/activate        # Windows: venv\Scripts\activate
 
 ---
 
-### Step 3 — Install Python dependencies
 
-```bash
-pip install -r requirements.txt
-```
 
-This installs:
-- `PyQt6` — the desktop UI framework
-- `matplotlib` — charts and plots
-- `biopython` — NCBI API access
-- `sqlalchemy` — local database
-- `reportlab` — PDF export
-- `pytest` — for running tests
-
----
-
-### Step 4 — Set your NCBI email
+### Step 3 — Set your NCBI email
 
 NCBI requires a valid email address for API access. Open `src/services/ncbi_service.py` and set:
 
@@ -220,7 +215,92 @@ ENTREZ_API_KEY = "your-api-key"
 
 ---
 
-### Step 5 — Run the app
+
+
+### Step 4  — Install QIIME2 for real ASV analysis
+
+QIIME2 is only needed if you want real DADA2-based denoising and SILVA taxonomic classification. The app runs full in-app analysis (diversity, taxonomy, AD risk) without it.
+
+> **Note for Apple Silicon Macs (M1/M2/M3):** The QIIME2 conda packages are built for x86_64 only. You must force Rosetta 2 emulation using `CONDA_SUBDIR=osx-64`. The steps below handle this automatically.
+
+**Step 7a — Set channel priority to flexible** (required to avoid package conflicts):
+
+```bash
+conda config --set channel_priority flexible
+```
+
+**Step 7b — Download the environment file:**
+
+```bash
+curl -L -O https://data.qiime2.org/distro/amplicon/qiime2-amplicon-2024.10-py310-osx-conda.yml
+```
+
+**Step 7c — Remove incompatible packages** (`deblur` and `sortmerna` are not available on macOS):
+
+```bash
+sed -i '' '/deblur/d; /sortmerna/d' qiime2-amplicon-2024.10-py310-osx-conda.yml
+```
+
+**Step 7d — Create the environment** (uses Rosetta emulation on Apple Silicon):
+
+```bash
+CONDA_SUBDIR=osx-64 conda env create -n qiime2-amplicon-2024.10 --file qiime2-amplicon-2024.10-py310-osx-conda.yml
+```
+
+This step downloads ~3–5 GB and takes 10–20 minutes.
+
+**Step 7e — Lock the environment to x86_64:**
+
+```bash
+conda activate qiime2-amplicon-2024.10
+conda config --env --set subdir osx-64
+```
+
+**Step 7f — Verify:**
+
+```bash
+qiime --version
+```
+
+**Windows:** Use WSL2 and follow the Linux instructions (omit `CONDA_SUBDIR=osx-64`).
+
+The SILVA classifier (~1.4 GB) is downloaded automatically on the first pipeline run.
+
+> **Note:** `deblur` (removed above) is an alternative denoising method. The pipeline uses DADA2, so removing deblur has no effect on results.
+
+---
+
+### Step 5 — Install SRA Toolkit (for automatic FASTQ download)
+
+The app automatically downloads FASTQ files from NCBI after fetching a project. This requires `fasterq-dump` from the SRA Toolkit.
+
+```bash
+conda install -c bioconda sra-tools
+```
+
+Verify the install:
+
+```bash
+fasterq-dump --version
+```
+
+### Step 6 — Install Python dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+This installs:
+- `PyQt6` — the desktop UI framework
+- `matplotlib` — charts and plots
+- `biopython` — NCBI API access
+- `sqlalchemy` — local database
+- `reportlab` — PDF export
+- `pytest` — for running tests
+
+---
+
+### Step 7 — Run the app
 
 ```bash
 cd src
@@ -231,50 +311,43 @@ The app opens immediately. You can enter any BioProject accession (e.g. `PRJNA10
 
 ---
 
-### Step 6 (Optional) — Install QIIME2 for the real pipeline
-
-The real pipeline requires QIIME2 installed in a conda environment. This is only needed if you want to process actual FASTQ files.
-
-**macOS / Linux:**
-
-```bash
-conda env create \
-  -n qiime2-amplicon-2024.10 \
-  --file https://data.qiime2.org/distro/amplicon/qiime2-amplicon-2024.10-py310-osx-conda.yml
-```
-
-**Windows:** Use WSL2 (Windows Subsystem for Linux) and follow the Linux instructions.
-
-After installing QIIME2, also install SRA Toolkit (provides `fasterq-dump` for downloading FASTQ files from NCBI):
-
-```bash
-# macOS (via conda)
-conda install -c bioconda sra-tools
-
-# Or download from: https://github.com/ncbi/sra-tools/wiki/01.-Downloading-SRA-Toolkit
-```
-
-The SILVA classifier (~1.4 GB) is downloaded automatically on first pipeline run.
+Once installed, FASTQ files are downloaded automatically to `data/<BioProject>/fastq/` after every fetch. No manual steps needed.
 
 ---
 
 ## Usage
 
-### Simulated analysis (no QIIME2 needed)
+### Standard workflow (SRA Toolkit required, QIIME2 optional)
+
+```
+Fetch NCBI metadata
+      ↓
+Auto-download FASTQ files via fasterq-dump  →  saved to data/<BioProject>/fastq/
+      ↓
+Upload Runs page auto-populates with downloaded files
+      ↓
+In-app analysis runs automatically
+(diversity, taxonomy, PCoA, Alzheimer risk)
+      ↓
+[Optional] Click "Run Pipeline" for real QIIME2 DADA2 analysis
+```
 
 1. Launch the app: `python main.py`
-2. On the **Overview** page, enter a BioProject accession (e.g. `PRJNA1020741`)
-3. Optionally enter a specific Run accession (`SRR...`) or set the max number of runs
-4. Click **Fetch**
-5. The app fetches real metadata from NCBI and populates all pages with analysis
+2. Register or log in
+3. On the **Overview** page, enter a BioProject accession (e.g. `PRJNA1020741`)
+4. Select max runs from the dropdown (1–20) and click **Fetch**
+5. The app fetches metadata from NCBI, then automatically downloads the FASTQ files
+6. The **Upload Runs** page shows download status — all runs marked ✓ Uploaded automatically
+7. In-app analysis completes and all pages (Diversity, Taxonomy, Phylogeny, Alzheimer Risk) populate
+8. If QIIME2 is installed, click **Run Pipeline** on the Upload Runs page for real DADA2 results
 
-### Real pipeline (requires QIIME2)
+### Without SRA Toolkit (metadata + simulated analysis only)
 
-1. Complete the fetch step above
-2. Go to the **Upload Runs** page
-3. Select the FASTQ file for each run
-4. Once all files are uploaded, click **Run Pipeline**
-5. QIIME2 processes the data in the background — all pages update when done
+If `fasterq-dump` is not installed, the app still works — it fetches NCBI metadata and runs in-app analysis with biologically realistic simulated profiles. A warning appears on the Upload Runs page with install instructions.
+
+### Without QIIME2
+
+The **Run Pipeline** button checks for QIIME2 before starting. If not found, it falls back to in-app analysis automatically — no crash, no manual action needed.
 
 ### Example BioProject accessions to try
 
@@ -313,9 +386,9 @@ The UI layers never call the pipeline or database directly — they receive data
 
 ## Two Analysis Modes
 
-| Mode | How it works | When to use |
-|---|---|---|
-| **Simulated** | Derives realistic values from run metadata (read counts, library layout) using deterministic math | Quick exploration, demos, development without QIIME2 |
-| **Real pipeline** | Downloads FASTQ → runs QIIME2 DADA2 → classifies against SILVA | Actual research analysis |
+| Mode | Requires | How it works | When to use |
+|---|---|---|---|
+| **In-app analysis** | Nothing extra | Genus profiles interpolated from published AD microbiome literature; real Shannon/Simpson/Bray-Curtis math; classical MDS PCoA | Default — runs automatically after every fetch |
+| **Real QIIME2 pipeline** | QIIME2 env + fasterq-dump | Downloads FASTQ → DADA2 denoising → SILVA classification → real ASV counts | Research-grade results with actual sequencing data |
 
-When real pipeline results are available they automatically replace the simulated data on all pages.
+When real pipeline results are available they automatically replace the in-app results on all pages. If QIIME2 is not installed, clicking "Run Pipeline" falls back to in-app analysis with an informational message.

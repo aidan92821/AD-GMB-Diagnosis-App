@@ -51,6 +51,21 @@ def _placeholder(msg: str) -> QLabel:
     return lbl
 
 
+def _info_banner(msg: str, kind: str = "info") -> QFrame:
+    """Inline banner used for download / pipeline status messages."""
+    obj = {"ok": "banner_ok", "warn": "banner_warn", "err": "banner_err"}.get(kind, "banner_warn")
+    txt_obj = {"ok": "banner_text_ok", "warn": "banner_text_warn", "err": "banner_text_err"}.get(kind, "banner_text_warn")
+    frame = QFrame()
+    frame.setObjectName(obj)
+    lay = QHBoxLayout(frame)
+    lay.setContentsMargins(12, 8, 12, 8)
+    lbl = QLabel(msg)
+    lbl.setObjectName(txt_obj)
+    lbl.setWordWrap(True)
+    lay.addWidget(lbl)
+    return frame
+
+
 # ═════════════════════════════════════════════════════════════════════════════
 #  PAGE 1 – Overview
 # ═════════════════════════════════════════════════════════════════════════════
@@ -109,8 +124,9 @@ class OverviewPage(QWidget):
         col_n = QVBoxLayout(); col_n.setSpacing(4)
         col_n.addWidget(label_muted("Max runs to fetch"))
         self._run_count = QComboBox()
-        for n in ["1", "2", "3", "4"]: self._run_count.addItem(n)
-        self._run_count.setCurrentIndex(3)
+        for n in ["1", "2", "3", "4", "5", "6", "8", "10", "12", "16", "20"]:
+            self._run_count.addItem(n)
+        self._run_count.setCurrentIndex(3)   # default = 4
         col_n.addWidget(self._run_count)
         input_row.addLayout(col_n, 1)
         lay.addLayout(input_row)
@@ -448,17 +464,45 @@ class UploadRunsPage(QWidget):
         # Reconnect to the callback (disconnect old first to avoid double-fire)
         try:
             self._pipeline_btn.clicked.disconnect()
-        except RuntimeError:
+        except (RuntimeError, TypeError):
             pass
         self._pipeline_btn.clicked.connect(callback)
 
+    def auto_mark_uploaded(self, state: "AppState") -> None:
+        """
+        Called by MainWindow after fasterq-dump downloads complete.
+        Refreshes the run list (showing ✓ Uploaded for downloaded runs)
+        and shows the Run Pipeline button ready to fire.
+        """
+        self.load(state)
+        uploaded = [r for r in state.runs if r.uploaded]
+        if uploaded:
+            self.show_download_status(
+                f"✓  {len(uploaded)} of {state.run_count} run"
+                f"{'s' if state.run_count != 1 else ''} downloaded automatically "
+                f"to  data/{state.bioproject_id}/fastq/",
+                kind="ok",
+            )
+
     def show_pipeline_error(self, message: str) -> None:
         """Show a red error banner on the upload page after pipeline failure."""
-        from ui.helpers import banner
+        if hasattr(self, "_dl_info_banner"):
+            self._dl_info_banner.deleteLater()
+            del self._dl_info_banner
         if hasattr(self, "_pipeline_err_banner"):
             self._pipeline_err_banner.deleteLater()
-        self._pipeline_err_banner = banner(f"Pipeline error: {message[:120]}", kind="err")
+        self._pipeline_err_banner = _info_banner(f"Pipeline error: {message[:200]}", kind="err")
         self._root.insertWidget(self._root.count() - 1, self._pipeline_err_banner)
+
+    def show_download_status(self, message: str, kind: str = "info") -> None:
+        """Show a non-blocking info/ok/warn banner about download state."""
+        if hasattr(self, "_dl_info_banner"):
+            try:
+                self._dl_info_banner.deleteLater()
+            except RuntimeError:
+                pass
+        self._dl_info_banner = _info_banner(message, kind=kind)
+        self._root.insertWidget(self._root.count() - 1, self._dl_info_banner)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -874,7 +918,7 @@ class PhylogenyPage(QWidget):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  PAGE 7 – Alzheimer Risk (still uses example data — model is domain-specific)
+#  PAGE 7 – Alzheimer Risk
 # ═════════════════════════════════════════════════════════════════════════════
 
 class AlzheimerPage(QWidget):
@@ -893,22 +937,26 @@ class AlzheimerPage(QWidget):
         hdr.addWidget(label_hint("Based on gut-brain axis biomarkers"))
         root.addLayout(hdr)
 
-        d = ALZHEIMER_RISK
-        summary = card(); root.addWidget(summary)
+        # ── Summary card (mutable labels stored as instance vars) ─────────────
+        summary = card()
+        root.addWidget(summary)
         sum_row = QHBoxLayout(); sum_row.setSpacing(24)
 
         pct_col = QVBoxLayout(); pct_col.setSpacing(2)
         pct_col.addWidget(label_muted("Predicted risk"))
-        pct_lbl = QLabel(f"{d['predicted_pct']:.0f}%")
-        pct_lbl.setObjectName("risk_number"); pct_col.addWidget(pct_lbl)
-        lvl = QLabel(d["risk_level"]); lvl.setObjectName("risk_level")
-        pct_col.addWidget(lvl)
+        self._pct_lbl = QLabel("—")
+        self._pct_lbl.setObjectName("risk_number")
+        pct_col.addWidget(self._pct_lbl)
+        self._lvl_lbl = QLabel("—")
+        self._lvl_lbl.setObjectName("risk_level")
+        pct_col.addWidget(self._lvl_lbl)
         sum_row.addLayout(pct_col)
         sum_row.addWidget(vdivider())
 
         meter_col = QVBoxLayout(); meter_col.setSpacing(6)
         meter_col.addWidget(label_muted("Risk spectrum"))
-        meter_col.addWidget(RiskMeterWidget(d["predicted_pct"]))
+        self._meter_widget = RiskMeterWidget(0)
+        meter_col.addWidget(self._meter_widget)
         scale = QHBoxLayout()
         for t in ("Low", "Moderate", "High"):
             scale.addWidget(label_hint(t))
@@ -919,31 +967,67 @@ class AlzheimerPage(QWidget):
 
         conf_col = QVBoxLayout(); conf_col.setSpacing(2)
         conf_col.addWidget(label_muted("Confidence"))
-        conf_lbl = QLabel(f"{d['confidence_pct']:.0f}%")
-        conf_lbl.setObjectName("conf_number"); conf_col.addWidget(conf_lbl)
+        self._conf_lbl = QLabel("—")
+        self._conf_lbl.setObjectName("conf_number")
+        conf_col.addWidget(self._conf_lbl)
         conf_col.addWidget(label_hint("model certainty"))
         sum_row.addLayout(conf_col)
         summary.layout().addLayout(sum_row)
 
-        bm_card = card()
-        bm_card.layout().addWidget(section_title("Key biomarkers"))
-        root.addWidget(bm_card)
-        grid = QGridLayout(); grid.setSpacing(10)
-        bm_card.layout().addLayout(grid)
-        for idx, bm in enumerate(d["biomarkers"]):
-            f = QFrame(); f.setObjectName("bm_card")
-            lay = QVBoxLayout(f); lay.setContentsMargins(12, 10, 12, 10); lay.setSpacing(3)
-            nm = QLabel(bm["name"]); nm.setObjectName("bm_name"); nm.setWordWrap(True)
-            lay.addWidget(nm)
-            arrow = {"low":"↓","high":"↑","normal":"✓"}.get(bm["status"],"")
-            vl = QLabel(f"{arrow} {bm['value']:.1f}{bm['unit']}")
-            vl.setObjectName(f"bm_val_{bm['status']}"); lay.addWidget(vl)
-            rf = QLabel(f"Normal: {bm['normal']} · {bm['role']}")
-            rf.setObjectName("bm_ref"); rf.setWordWrap(True); lay.addWidget(rf)
-            grid.addWidget(f, idx // 3, idx % 3)
+        # ── Biomarker card (rebuilt on each load) ──────────────────────────────
+        self._bm_card = card()
+        self._bm_card.layout().addWidget(section_title("Key biomarkers"))
+        self._bm_grid_container = QFrame()
+        self._bm_grid_container.setLayout(QVBoxLayout())
+        self._bm_grid_container.layout().setContentsMargins(0, 0, 0, 0)
+        self._bm_card.layout().addWidget(self._bm_grid_container)
+        root.addWidget(self._bm_card)
 
         disc = label_hint(
             "⚠  Research-grade estimate only — NOT a clinical diagnosis. "
             "Consult a physician for clinical assessment.")
-        disc.setWordWrap(True); root.addWidget(disc)
+        disc.setWordWrap(True)
+        root.addWidget(disc)
         root.addStretch()
+
+        # Populate with default/example data on first paint
+        self._render(ALZHEIMER_RISK)
+
+    def load(self, state: AppState):
+        d = state.risk_result if (state and state.risk_result) else ALZHEIMER_RISK
+        self._render(d)
+
+    def _render(self, d: dict):
+        pct   = d.get("predicted_pct", 0)
+        conf  = d.get("confidence_pct", 0)
+        level = d.get("risk_level", "unknown").capitalize()
+
+        self._pct_lbl.setText(f"{pct:.0f}%")
+        self._lvl_lbl.setText(level)
+        self._conf_lbl.setText(f"{conf:.0f}%")
+        self._meter_widget.set_pct(pct)
+
+        # Rebuild biomarker grid
+        old_layout = self._bm_grid_container.layout()
+        while old_layout.count():
+            item = old_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        grid = QGridLayout()
+        grid.setSpacing(10)
+        old_layout.addLayout(grid)
+
+        for idx, bm in enumerate(d.get("biomarkers", [])):
+            f = QFrame(); f.setObjectName("bm_card")
+            lay = QVBoxLayout(f); lay.setContentsMargins(12, 10, 12, 10); lay.setSpacing(3)
+            nm = QLabel(bm["name"]); nm.setObjectName("bm_name"); nm.setWordWrap(True)
+            lay.addWidget(nm)
+            arrow = {"low": "↓", "high": "↑", "normal": "✓"}.get(bm["status"], "")
+            vl = QLabel(f"{arrow} {bm['value']:.1f}{bm['unit']}")
+            vl.setObjectName(f"bm_val_{bm['status']}")
+            lay.addWidget(vl)
+            rf = QLabel(f"Normal: {bm['normal']} · {bm['role']}")
+            rf.setObjectName("bm_ref"); rf.setWordWrap(True)
+            lay.addWidget(rf)
+            grid.addWidget(f, idx // 3, idx % 3)

@@ -1,6 +1,53 @@
-# Local datasets and models
+# ── Local data & databases ────────────────────────────────────────────────────
 *.db
-data/raw/
-data/processed/
+data/
 exports/
+
+# ── Bioinformatics files ──────────────────────────────────────────────────────
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+*.sra
+*.qza
+*.qzv
+*.bam
+*.sam
+
+# ── Downloaded classifiers / large model files ────────────────────────────────
+src/pipeline/taxa_classifier/*.qza
 models/*.pkl
+
+# ── QIIME2 conda environment file (downloaded, not authored) ─────────────────
+qiime2-*.yml
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+src/venv/
+
+# ── Compiled / binary artifacts ───────────────────────────────────────────────
+python3
+*.dylib
+*.so
+
+# ── OS ────────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── IDE ───────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
