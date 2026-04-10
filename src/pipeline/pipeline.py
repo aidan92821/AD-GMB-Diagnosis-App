@@ -1,51 +1,63 @@
-"""
-src/pipeline/pipeline.py  —  FIXED VERSION
-
-Fix vs original:
-  project_id parameter was accepted by run_pipeline() but never used.
-  Removed to keep the interface clean and avoid confusion.
-  If you need project_id as an output directory label in future,
-  add it back and thread it through fetch_ncbi_data().
-"""
-
+'''
+Fetch and Preprocess Pipeline
+This module is what the GUI interacts with upon user request to fetch and preprocess data.
+'''
+from db_import import parse_feat_tax_seqs, parse_feature_counts, parse_genus_table
+from fetch_data import fetch_ncbi_data
 import os
-from pathlib import Path
+from qiime_preproc import qiime_preprocess, download_classifier
+from services import create_project, create_run, ingest_run_data, get_or_create_user, get_project_overview
 
-from src.pipeline.fetch_data      import fetch_ncbi_data
-from src.pipeline.qiime_preproc   import qiime_preprocess, download_classifier
 
 CLASSIFIER = 'silva-138-99-nb-classifier.qza'
-SOURCE      = 'https://data.qiime2.org/classifiers/sklearn-1.4.2/silva'
+SOURCE = 'https://data.qiime2.org/classifiers/sklearn-1.4.2/silva'
 
+def run_pipeline(bioproject: str, project_id, username: str, project_name: str, srr=None, n_runs=1):
 
-def run_pipeline(bioproject: str, srr: str | None = None, n_runs: int = 1) -> None:
-    """
-    Fetch FASTQ data from NCBI and run the full QIIME2 preprocessing pipeline.
+    # get or create user
+    user = get_or_create_user(username=username)
 
-    Parameters
-    ----------
-    bioproject : NCBI BioProject accession (e.g. 'PRJNA1020741')
-    srr        : Optional single Run accession to restrict to one file
-    n_runs     : Max number of runs to fetch (1–4, default 1)
-
-    Steps
-    -----
-    1. Fetch run info and download FASTQ files via fasterq-dump
-    2. Download the SILVA classifier if not already present
-    3. Run QIIME2 preprocessing (import → QC → DADA2 → taxonomy → tables)
-       separately for paired-end and single-end runs if both are present
-    """
-    # Step 1 — fetch FASTQ files and write manifests
-    lib_layout = fetch_ncbi_data(bioproject=bioproject, srr=srr, n_runs=n_runs)
-
-    # Step 2 — download SILVA classifier (~1.4 GB, one-time download)
-    classifier_dir = Path('taxa_classifier')
-    if CLASSIFIER not in os.listdir(classifier_dir) if classifier_dir.exists() else True:
+    # fetch fastq file(s) from ncbi
+    lib_layout = fetch_ncbi_data(bioproject=bioproject,
+                                 srr=srr,
+                                 n_runs=n_runs)
+    
+    # download classifier if it does not exist yet
+    if CLASSIFIER not in os.listdir('taxa_classifier'):
         download_classifier(classifier_url=f"{SOURCE}/{CLASSIFIER}")
 
-    # Step 3 — QIIME2 preprocessing per library layout
+    # paired ends
     if lib_layout['paired']:
-        qiime_preprocess(bioproject=bioproject, lib_layout='paired')
-
+        prepocess_parse_import(bioproject=bioproject, project_id=project_id, project_name=project_name, lib_layout='paired')
+    
+    # single ends
     if lib_layout['single']:
-        qiime_preprocess(bioproject=bioproject, lib_layout='single')
+        prepocess_parse_import(bioproject=bioproject, project_id=project_id, project_name=project_name, lib_layout='single')
+
+
+def prepocess_parse_import(bioproject: str, project_id, project_name: str, lib_layout: str, user: dict):
+    
+    data_dir = f"data/{bioproject}/"
+    
+    # preprocess
+    qiime_preprocess(bioproject=bioproject,
+                    lib_layout=lib_layout)
+    
+    # parse the data tables for db
+    abundances = parse_genus_table(genus=f"{data_dir}/qiime/{lib_layout}/genus-table.tsv")
+    feature_seqs = parse_feat_tax_seqs(tax=f"{data_dir}/qiime/{lib_layout}/taxonomy.tsv",
+                        seqs=f"{data_dir}/reps-tree/{lib_layout}/dna-sequences.fasta")
+    feature_counts = parse_feature_counts(feat=f"{data_dir}/qiime/{lib_layout}/feature-table.tsv")
+
+    # import to database
+    # if project does not exist, make one and add runs
+    if project_id is None:
+        project = create_project(user_id=user['user_id'], name=project_name)
+    # otherwise, use existing project to add runs
+    else:
+        project = get_project_overview(project_id=project_id)
+    # add runs and import bulk processed data to database
+    for run, row in abundances.items():
+        db_run = create_run(project_id=project['project_id'], source='ncbi', srr_accession=run,
+                            bio_proj_accession=bioproject, library_layout=lib_layout)
+        ingest_run_data(run_id=db_run['run_id'], genus_rows=row, features=feature_seqs, feature_counts=feature_counts)
