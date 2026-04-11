@@ -1,5 +1,5 @@
 """
-GutSeq – example data.
+Axis – example data.
 
 All sample values live here so every panel can import realistic data
 without touching any network or file I/O.  Swap these out with real

@@ -1,4 +1,4 @@
-# GutSeq — src/
+# Axis — src/
 
 This directory contains all application source code. See the [root README](../README.md) for the full project overview, workflow explanation, glossary, and setup guide.
 

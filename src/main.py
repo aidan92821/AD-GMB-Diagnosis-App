@@ -1,5 +1,5 @@
 """
-GutSeq – entry point.
+Axis – entry point.
 
 Run:
     python main.py
@@ -17,7 +17,7 @@ from db.init_db      import init_db
 def main() -> None:
     init_db()
     app = QApplication(sys.argv)
-    app.setApplicationName("GutSeq")
+    app.setApplicationName("Axis")
     #app.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps)
     window = MainWindow()
     window.show()

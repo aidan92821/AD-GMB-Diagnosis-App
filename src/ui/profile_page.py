@@ -17,6 +17,8 @@ from resources.styles import (
     SUCCESS_BG, SUCCESS_FG, WARN_BG, WARN_FG, DANGER_BG, DANGER_FG, SB_BG, WHITE,
 )
 
+from services.assessment_service import list_user_projects
+
 
 def _fmt_date(iso: str | None) -> str:
     if not iso:
@@ -151,7 +153,7 @@ class ProfilePage(QWidget):
         self._user = user
         self._username_lbl.setText(user.get("username", ""))
         joined = _fmt_date(user.get("created_at"))
-        self._joined_lbl.setText(f"Member since {joined}" if joined else "GutSeq member")
+        self._joined_lbl.setText(f"Member since {joined}" if joined else "Axis member")
         self._refresh_projects()
 
     def refresh(self) -> None:
@@ -178,7 +180,6 @@ class ProfilePage(QWidget):
                 item.widget().deleteLater()
 
         try:
-            from services.assessment_service import list_user_projects
             projects = list_user_projects(self._user["user_id"])
         except Exception:
             projects = []

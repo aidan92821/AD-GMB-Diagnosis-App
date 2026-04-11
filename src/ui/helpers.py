@@ -1,5 +1,5 @@
 """
-GutSeq – layout helpers.
+Axis – layout helpers.
 
 Factory functions that produce correctly-named/styled Qt widgets so that
 the app stylesheet selectors actually match.  Every panel imports from here

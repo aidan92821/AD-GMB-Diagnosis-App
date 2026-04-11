@@ -1,5 +1,5 @@
 """
-GutSeq – MainWindow.
+Axis – MainWindow.
 
 Start-up flow:
   1. App shows AuthPage (login / register)
@@ -467,7 +467,7 @@ class _DownloadWorker(QObject):
             f"?accession={srr}&result=read_run&fields=fastq_ftp"
         )
         try:
-            req = urllib.request.Request(api, headers={"User-Agent": "GutSeq/1.0"})
+            req = urllib.request.Request(api, headers={"User-Agent": "Axis/1.0"})
             with urllib.request.urlopen(req, timeout=30) as resp:
                 text = resp.read().decode()
             lines = text.strip().split("\n")
@@ -497,7 +497,7 @@ class _DownloadWorker(QObject):
     def _download_url(url: str, dest: "Path", progress_cb=None) -> None:
         """Stream-download *url* to *dest*, calling progress_cb(bytes_done) periodically."""
         import urllib.request
-        req = urllib.request.Request(url, headers={"User-Agent": "GutSeq/1.0"})
+        req = urllib.request.Request(url, headers={"User-Agent": "Axis/1.0"})
         with urllib.request.urlopen(req, timeout=3600) as resp:
             total = int(resp.headers.get("Content-Length", 0))
             done  = 0
@@ -730,7 +730,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("GutSeq — Microbiome Analytics")
+        self.setWindowTitle("Axis — Microbiome Analytics")
         self.resize(1280, 880)
         self.setMinimumSize(900, 600)
         self.setStyleSheet(APP_QSS)
@@ -788,7 +788,7 @@ class MainWindow(QMainWindow):
 
         logo_block = QWidget(); logo_block.setStyleSheet(f"background:{SB_BG};")
         lb = QVBoxLayout(logo_block); lb.setContentsMargins(20, 20, 20, 14); lb.setSpacing(2)
-        lb.addWidget(_sb_label("GutSeq", "sb_logo"))
+        lb.addWidget(_sb_label("Axis", "sb_logo"))
         lb.addWidget(_sb_label("microbiome analytics", "sb_sub"))
         lay.addWidget(logo_block)
 
@@ -825,7 +825,7 @@ class MainWindow(QMainWindow):
         bar = QFrame(); bar.setObjectName("topbar"); bar.setFixedHeight(52)
         lay = QHBoxLayout(bar); lay.setContentsMargins(24, 0, 24, 0); lay.setSpacing(10)
 
-        self._topbar_title = QLabel("GutSeq — Microbiome Analytics")
+        self._topbar_title = QLabel("Axis — Microbiome Analytics")
         self._topbar_title.setObjectName("topbar_title")
         lay.addWidget(self._topbar_title)
         lay.addStretch()
@@ -927,7 +927,7 @@ class MainWindow(QMainWindow):
         # Reset topbar
         self._user_lbl.hide()
         self._signout_btn.hide()
-        self._topbar_title.setText("GutSeq — Microbiome Analytics")
+        self._topbar_title.setText("Axis — Microbiome Analytics")
         self._status_badge.setText("No project loaded")
         self._status_badge.setObjectName("badge_yellow")
         self._status_badge.style().unpolish(self._status_badge)

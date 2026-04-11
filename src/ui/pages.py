@@ -1,5 +1,5 @@
 """
-GutSeq – page panels.
+Axis – page panels.
 
 Every page has a  load(state: AppState)  method called by MainWindow
 whenever the shared state changes.  No page imports from example_data.
@@ -931,6 +931,7 @@ class AlzheimerPage(QWidget):
         root.setContentsMargins(28, 24, 28, 24)
         root.setSpacing(16)
 
+        # ── Page header (static) ──────────────────────────────────────────────
         hdr = QHBoxLayout()
         hdr.addWidget(page_title("Alzheimer Risk"))
         hdr.addStretch()
@@ -974,23 +975,14 @@ class AlzheimerPage(QWidget):
         sum_row.addLayout(conf_col)
         summary.layout().addLayout(sum_row)
 
-        # ── Biomarker card (rebuilt on each load) ──────────────────────────────
-        self._bm_card = card()
-        self._bm_card.layout().addWidget(section_title("Key biomarkers"))
-        self._bm_grid_container = QFrame()
-        self._bm_grid_container.setLayout(QVBoxLayout())
-        self._bm_grid_container.layout().setContentsMargins(0, 0, 0, 0)
-        self._bm_card.layout().addWidget(self._bm_grid_container)
-        root.addWidget(self._bm_card)
+        # ── Scrollable biomarker area ─────────────────────────────────────────
+        self._scroll = QScrollArea()
+        self._scroll.setObjectName("content_scroll")
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        root.addWidget(self._scroll, 1)
 
-        disc = label_hint(
-            "⚠  Research-grade estimate only — NOT a clinical diagnosis. "
-            "Consult a physician for clinical assessment.")
-        disc.setWordWrap(True)
-        root.addWidget(disc)
-        root.addStretch()
-
-        # Populate with default/example data on first paint
+        # Initial render with example data
         self._render(ALZHEIMER_RISK)
 
     def load(self, state: AppState):
@@ -1007,27 +999,61 @@ class AlzheimerPage(QWidget):
         self._conf_lbl.setText(f"{conf:.0f}%")
         self._meter_widget.set_pct(pct)
 
-        # Rebuild biomarker grid
-        old_layout = self._bm_grid_container.layout()
-        while old_layout.count():
-            item = old_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+        # Build a fresh inner widget — avoids stale child widget accumulation
+        inner = QWidget()
+        inner_lay = QVBoxLayout(inner)
+        inner_lay.setContentsMargins(0, 0, 0, 0)
+        inner_lay.setSpacing(12)
 
+        # ── Biomarker grid ────────────────────────────────────────────────────
+        bm_section = card()
+        bm_section.layout().addWidget(section_title("Key biomarkers"))
+
+        biomarkers = d.get("biomarkers", [])
+        cols = 3
         grid = QGridLayout()
         grid.setSpacing(10)
-        old_layout.addLayout(grid)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 1)
 
-        for idx, bm in enumerate(d.get("biomarkers", [])):
-            f = QFrame(); f.setObjectName("bm_card")
-            lay = QVBoxLayout(f); lay.setContentsMargins(12, 10, 12, 10); lay.setSpacing(3)
-            nm = QLabel(bm["name"]); nm.setObjectName("bm_name"); nm.setWordWrap(True)
+        for idx, bm in enumerate(biomarkers):
+            row, col = divmod(idx, cols)
+            f = QFrame()
+            f.setObjectName("bm_card")
+            f.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+            lay = QVBoxLayout(f)
+            lay.setContentsMargins(12, 10, 12, 10)
+            lay.setSpacing(4)
+
+            nm = QLabel(bm["name"])
+            nm.setObjectName("bm_name")
+            nm.setWordWrap(True)
             lay.addWidget(nm)
-            arrow = {"low": "↓", "high": "↑", "normal": "✓"}.get(bm["status"], "")
+
+            arrow  = {"low": "↓", "high": "↑", "normal": "✓"}.get(bm["status"], "")
+            # map "normal" → "ok" to match the QSS object name
+            style_key = "ok" if bm["status"] == "normal" else bm["status"]
             vl = QLabel(f"{arrow} {bm['value']:.1f}{bm['unit']}")
-            vl.setObjectName(f"bm_val_{bm['status']}")
+            vl.setObjectName(f"bm_val_{style_key}")
             lay.addWidget(vl)
-            rf = QLabel(f"Normal: {bm['normal']} · {bm['role']}")
-            rf.setObjectName("bm_ref"); rf.setWordWrap(True)
+
+            rf = QLabel(f"Normal: {bm['normal']}  ·  {bm['role']}")
+            rf.setObjectName("bm_ref")
+            rf.setWordWrap(True)
             lay.addWidget(rf)
-            grid.addWidget(f, idx // 3, idx % 3)
+
+            grid.addWidget(f, row, col)
+
+        bm_section.layout().addLayout(grid)
+        inner_lay.addWidget(bm_section)
+
+        # ── Disclaimer ────────────────────────────────────────────────────────
+        disc = label_hint(
+            "⚠  Research-grade estimate only — NOT a clinical diagnosis. "
+            "Consult a physician for clinical assessment.")
+        disc.setWordWrap(True)
+        inner_lay.addWidget(disc)
+        inner_lay.addStretch()
+
+        self._scroll.setWidget(inner)

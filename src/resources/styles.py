@@ -1,5 +1,5 @@
 """
-GutSeq – styles.
+Axis – styles.
 
 Single source of truth for colours and the application stylesheet.
 Every widget imports from here; nothing is hard-coded in panel files.

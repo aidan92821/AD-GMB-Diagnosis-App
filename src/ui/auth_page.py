@@ -74,7 +74,7 @@ class AuthPage(QWidget):
         lay.addSpacing(16)
 
         # App name
-        app_name = QLabel("GutSeq")
+        app_name = QLabel("Axis")
         app_name.setStyleSheet(
             f"font-size: 32px; font-weight: 800; color: {_WHITE}; background: transparent;"
         )
@@ -154,7 +154,7 @@ class AuthPage(QWidget):
         heading.setStyleSheet(
             f"font-size: 22px; font-weight: 800; color: {_TH}; background: transparent;"
         )
-        sub = QLabel("Sign in to your GutSeq account")
+        sub = QLabel("Sign in to your Axis account")
         sub.setStyleSheet(
             f"font-size: 13px; color: {_TM}; background: transparent; padding-bottom: 28px;"
         )

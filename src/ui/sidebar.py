@@ -1,5 +1,5 @@
 """
-GutSeq — left sidebar navigation.
+Axis — left sidebar navigation.
 
 The sidebar owns the list of nav items and emits *page_changed(index)*
 when the user clicks a different section.  The main window listens to
@@ -52,7 +52,7 @@ class Sidebar(QFrame):
         layout.setSpacing(0)
 
         # ── Logo / app title ──
-        logo = QLabel("GutSeq")
+        logo = QLabel("Axis")
         logo.setStyleSheet(
             "font-size: 15px; font-weight: 700; padding: 14px 16px 4px;"
         )

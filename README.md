@@ -1,4 +1,4 @@
-# GutSeq — Gut Microbiome Analytics for Alzheimer's Research
+# Axis — Gut Microbiome Analytics for Alzheimer's Research
 
 A desktop application that fetches real gut microbiome sequencing data from public research databases, processes it through a bioinformatics pipeline, and generates diversity analysis and an experimental Alzheimer's disease risk assessment.
 
@@ -6,7 +6,7 @@ A desktop application that fetches real gut microbiome sequencing data from publ
 
 ## What This App Does
 
-Research suggests the bacteria living in your gut (the **gut microbiome**) may be connected to brain health and Alzheimer's disease. GutSeq lets researchers:
+Research suggests the bacteria living in your gut (the **gut microbiome**) may be connected to brain health and Alzheimer's disease.  lets researchers:
 
 1. Look up any public gut microbiome study by its database ID
 2. Automatically download and process the raw DNA sequencing data

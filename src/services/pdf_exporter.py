@@ -1,5 +1,5 @@
 """
-GutSeq – PDF export service.
+Axis – PDF export service.
 
 Generates a polished, multi-section PDF report from the in-memory
 analysis results.  Uses ReportLab Platypus for flowing layout and
@@ -123,7 +123,7 @@ class _PageDecorator:
         # Logo text
         canvas.setFillColor(C_WHITE)
         canvas.setFont("Helvetica-Bold", 11)
-        canvas.drawString(20, H - self.HEADER_H + 12, "GutSeq")
+        canvas.drawString(20, H - self.HEADER_H + 12, "Axis")
         canvas.setFont("Helvetica", 9)
         canvas.setFillColor(colors.HexColor("#94A3B8"))
         canvas.drawString(72, H - self.HEADER_H + 12, f"  ·  {self._title}")
@@ -136,7 +136,7 @@ class _PageDecorator:
     def _draw_footer(self, canvas, doc) -> None:
         canvas.setFillColor(C_HINT)
         canvas.setFont("Helvetica", 7.5)
-        canvas.drawString(20, 10, f"GutSeq · {PROJECT['bioproject_id']}")
+        canvas.drawString(20, 10, f"Axis · {PROJECT['bioproject_id']}")
         canvas.drawRightString(
             W - 20, 10, f"Page {doc.page}"
         )
@@ -389,7 +389,7 @@ def _pcoa_drawing(coords: dict, run_colors: dict,
 def _section_cover(story: list, st: dict) -> None:
     """Full cover page."""
     story.append(Spacer(1, 60))
-    # story.append(Paragraph("GutSeq", ParagraphStyle(
+    # story.append(Paragraph("Axis", ParagraphStyle(
     #     "cover_logo", fontName="Helvetica-Bold", fontSize=32,
     #     textColor=C_ACCENT, spaceAfter=4)))
     story.append(Paragraph("Microbiome Analytics Report", ParagraphStyle(
@@ -807,7 +807,7 @@ def _section_alzheimer(story: list, st: dict) -> None:
 
 def build_report(output_path: str | Path) -> Path:
     """
-    Generate the full GutSeq PDF report.
+    Generate the full Axis PDF report.
 
     Parameters
     ----------
@@ -837,8 +837,8 @@ def build_report(output_path: str | Path) -> Path:
         str(output_path),
         pagesize=A4,
         pageTemplates=[template],
-        title=f"GutSeq Report — {PROJECT['project_id']}",
-        author="GutSeq Analytics",
+        title=f"Axis Report — {PROJECT['project_id']}",
+        author="Axis Analytics",
         subject="Microbiome Analysis Report",
         leftMargin=0, rightMargin=0,
         topMargin=0,  bottomMargin=0,

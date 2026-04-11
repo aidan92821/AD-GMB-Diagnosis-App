@@ -1,5 +1,5 @@
 """
-GutSeq – Export page.
+Axis – Export page.
 
 Layout:
   ┌─────────────────────────────────────────────────────┐

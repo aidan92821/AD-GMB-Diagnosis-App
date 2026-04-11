@@ -1,5 +1,5 @@
 """
-GutSeq – primitive reusable widgets.
+Axis – primitive reusable widgets.
 
 All custom-painted widgets live here.  They have zero knowledge of the
 application domain; they accept plain Python lists/dicts and paint them.
