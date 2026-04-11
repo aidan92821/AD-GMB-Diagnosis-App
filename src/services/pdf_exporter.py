@@ -136,7 +136,7 @@ class _PageDecorator:
     def _draw_footer(self, canvas, doc) -> None:
         canvas.setFillColor(C_HINT)
         canvas.setFont("Helvetica", 7.5)
-        canvas.drawString(20, 10, f"Axis · {PROJECT['bioproject_id']}")
+        canvas.drawString(20, 10, f"Axis · {PROJECT.get('bioproject_id', 'Report')}")
         canvas.drawRightString(
             W - 20, 10, f"Page {doc.page}"
         )
@@ -805,23 +805,56 @@ def _section_alzheimer(story: list, st: dict) -> None:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def build_report(output_path: str | Path) -> Path:
+def _apply_state(state) -> None:
+    """
+    Overwrite this module's data globals with live AppState so all
+    section-builder functions see the real analysis results.
+    """
+    g = globals()
+    runs = state.run_labels or []
+
+    g["PROJECT"] = state.to_project_dict()
+
+    all_genera: list[str] = []
+    genus_abundance: dict = {}
+    for lbl in runs:
+        pairs = state.genus_abundances.get(lbl, [])
+        if not all_genera and pairs:
+            all_genera = [gn for gn, _ in pairs]
+        genus_abundance[lbl] = [pct for _, pct in pairs]
+    g["GENERA"]          = all_genera
+    g["GENUS_ABUNDANCE"] = genus_abundance
+    g["ASV_FEATURES"]    = {lbl: state.asv_features.get(lbl, [])    for lbl in runs}
+    g["ALPHA_DIVERSITY"] = {lbl: state.alpha_diversity.get(lbl, {}) for lbl in runs}
+    g["BETA_BRAY_CURTIS"] = state.beta_bray_curtis or []
+    g["BETA_UNIFRAC"]     = state.beta_unifrac     or []
+    g["PCOA_BRAY_CURTIS"] = state.pcoa_bray_curtis or {}
+    if state.risk_result:
+        g["ALZHEIMER_RISK"] = state.risk_result
+
+
+def build_report(output_path: str | Path, state=None) -> Path:
     """
     Generate the full Axis PDF report.
 
     Parameters
     ----------
     output_path : destination file path (str or Path)
+    state       : AppState — if provided, live analysis data is used;
+                  otherwise falls back to built-in example data.
 
     Returns
     -------
     Path to the written PDF file.
     """
+    if state is not None:
+        _apply_state(state)
+
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     decorator = _PageDecorator(
-        f"{PROJECT['project_id']} — {PROJECT['title']}"
+        f"{PROJECT.get('project_id', 'Axis')} — {PROJECT.get('title', 'Report')}"
     )
 
     # Page frame: leave room for header (36pt) and footer (24pt)

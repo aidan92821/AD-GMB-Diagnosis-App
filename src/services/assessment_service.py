@@ -573,6 +573,137 @@ def save_ncbi_project(
         session.close()
 
 
+def save_local_project(user_id: int, name: str) -> dict:
+    """
+    Create a local (non-NCBI) project for a user and return it as a dict.
+    Used when a user creates a project from the Profile page.
+    """
+    session = SessionLocal()
+    try:
+        user = get_user(session, user_id)
+        project = repo_create_project(session, user=user, name=name)
+        session.commit()
+        return {
+            "project_id": project.project_id,
+            "user_id":    project.user_id,
+            "name":       project.name,
+            "created_at": project.created_at.isoformat() if project.created_at else None,
+        }
+    except RepositoryError as e:
+        session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+def save_analysis_to_project(db_project_id: int, state) -> None:
+    """
+    Persist analysis results from an AppState into the database.
+
+    For each run in state.runs:
+      - Finds or creates the matching DB run row (matched by accession string)
+      - Saves genus abundances
+      - Saves risk score
+
+    Safe to call multiple times — genus rows are re-inserted each time
+    (old rows are deleted first if they exist).
+    """
+    session = SessionLocal()
+    try:
+        project = get_project(session, db_project_id)
+        existing_runs = list_runs_for_project(session, db_project_id)
+        existing_by_acc = {(r.srr_accession or ""): r for r in existing_runs}
+
+        risk_result   = state.risk_result or {}
+        risk_score    = float(risk_result.get("predicted_pct", 0.0))
+        risk_label    = (risk_result.get("risk_level") or "").capitalize() or _risk_label(risk_score)
+        confidence    = float(risk_result.get("confidence_pct", 0.0))
+
+        for run_state in state.runs:
+            acc = run_state.accession or run_state.label
+
+            if acc in existing_by_acc:
+                run = existing_by_acc[acc]
+            else:
+                run = repo_create_run(
+                    session,
+                    project=project,
+                    source="upload",
+                    srr_accession=acc,
+                    bio_proj_accession=(
+                        state.bioproject_id
+                        if state.bioproject_id and state.bioproject_id != "LOCAL"
+                        else None
+                    ),
+                    library_layout=run_state.layout,
+                )
+                session.flush()
+
+            # Delete old genus rows before re-inserting
+            from src.db.db_models import Genus
+            session.query(Genus).filter(Genus.run_id == run.run_id).delete()
+            session.flush()
+
+            genera = state.genus_abundances.get(run_state.label, [])
+            if genera:
+                create_genus_bulk(session, run=run, genus_abundances=dict(genera))
+
+            if risk_result:
+                update_run_risk(
+                    session, run=run,
+                    risk_score=risk_score,
+                    risk_label=risk_label,
+                    confidence=confidence,
+                )
+
+        session.commit()
+    except RepositoryError as e:
+        session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+def get_project_full_state(project_id: int) -> dict:
+    """
+    Return all saved analysis data for a project so the GUI can rebuild AppState.
+
+    Returns a dict with:
+      project_id, name, bioproject_id,
+      runs: list of {run_id, accession, layout, risk_score, risk_label, genus_abundances}
+    """
+    session = SessionLocal()
+    try:
+        project = get_project(session, project_id)
+        runs    = list_runs_for_project(session, project_id)
+
+        bioproject_id = None
+        run_data = []
+        for run in runs:
+            if run.bio_proj_accession and not bioproject_id:
+                bioproject_id = run.bio_proj_accession
+            genera = get_genus_for_run(session, run.run_id)
+            run_data.append({
+                "run_id":          run.run_id,
+                "accession":       run.srr_accession or run.bio_proj_accession or f"R{run.run_id}",
+                "layout":          run.library_layout or "PAIRED",
+                "risk_score":      run.risk_score,
+                "risk_label":      run.risk_label,
+                "genus_abundances": [(g.genus, g.relative_abundance) for g in genera],
+            })
+
+        return {
+            "project_id":   project.project_id,
+            "name":         project.name,
+            "bioproject_id": bioproject_id,
+            "runs":         run_data,
+        }
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
 def delete_project(project_id: int) -> None:
     """
     Permanently delete a project and all its runs, genus data, features,

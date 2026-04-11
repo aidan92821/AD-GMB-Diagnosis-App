@@ -28,9 +28,9 @@ from ui.pages import (
     OverviewPage, UploadRunsPage, DiversityPage,
     TaxonomyPage, AsvTablePage, PhylogenyPage, AlzheimerPage,
 )
-from ui.export_page import ExportPage
 from ui.auth_page import AuthPage
 from ui.profile_page import ProfilePage
+from ui.research_page import ResearchPage
 
 
 # ── Sidebar nav ───────────────────────────────────────────────────────────────
@@ -46,9 +46,7 @@ NAV = [
     ]),
     ("INSIGHTS", [
         ("Alzheimer Risk", "♥"),
-    ]),
-    ("EXPORT", [
-        ("Export PDF",     "⬇"),
+        ("Research",       "🔬"),
     ]),
     ("ACCOUNT", [
         ("Profile",        "◉"),
@@ -670,53 +668,94 @@ class _DownloadWorker(QObject):
         self.finished.emit(state)
 
 
+# ── Worker 4b: QIIME2 environment check ──────────────────────────────────────
+
+class _QiimeCheckWorker(QObject):
+    """Quick background check — emits True if qiime2-amplicon-2024.10 is present."""
+    result = pyqtSignal(bool)
+
+    def run(self) -> None:
+        try:
+            import subprocess
+            r = subprocess.run(
+                ["conda", "run", "-n", "qiime2-amplicon-2024.10", "qiime", "--version"],
+                capture_output=True, text=True, timeout=20,
+            )
+            self.result.emit(r.returncode == 0)
+        except Exception:
+            self.result.emit(False)
+
+
 # ── Worker 4: real QIIME2 pipeline ────────────────────────────────────────────
 
 class _PipelineWorker(QObject):
     """
     Runs the real QIIME2 pipeline on a background thread.
-    Requires conda + qiime2-amplicon-2024.10 environment.
+
+    Calls pipeline.preprocess_parse_import() for each library layout, which:
+      1. Runs qiime_preprocess  (QIIME2 import → QC → DADA2 → classify → export)
+      2. Parses output TSVs/FASTA via db_import
+      3. Persists genus abundances + ASV features to the database
+
+    FASTQ files must already be downloaded by _DownloadWorker before this runs.
+    Requires the qiime2-amplicon-2024.10 conda environment.
     """
     finished = pyqtSignal(object)
     errored  = pyqtSignal(str)
     progress = pyqtSignal(str)
 
-    def __init__(self, state: "AppState", srr: str = "", n_runs: int = 4) -> None:
+    def __init__(self, state: "AppState", user: dict | None = None) -> None:
         super().__init__()
-        self._state  = state
-        self._srr    = srr or None
-        self._n_runs = n_runs
+        self._state = state
+        self._user  = user or {}
 
     def run(self) -> None:
+        import sys
+        from pathlib import Path
+
         try:
             state = self._state
 
-            self.progress.emit("Checking QIIME2 environment…")
-            try:
-                from src.pipeline.qiime_preproc import _get_qiime_env
-                _get_qiime_env()
-            except RuntimeError as e:
-                raise RuntimeError(
-                    f"QIIME2 environment not found: {e}\n\n"
-                    "Install QIIME2 with:\n"
-                    "  conda env create -n qiime2-amplicon-2024.10 "
-                    "--file https://data.qiime2.org/distro/amplicon/"
-                    "qiime2-amplicon-2024.10-py310-osx-conda.yml"
-                )
+            # Add src/pipeline/ to sys.path so pipeline.py's bare imports resolve:
+            #   from db_import import ...
+            #   from fetch_data import ...
+            #   from qiime_preproc import ...
+            #   from services import ...
+            pipeline_dir = str(Path(__file__).resolve().parent.parent / "pipeline")
+            if pipeline_dir not in sys.path:
+                sys.path.insert(0, pipeline_dir)
 
-            self.progress.emit("Downloading FASTQ files from NCBI…")
-            from src.pipeline.pipeline import run_pipeline
+            # ── Step 1: check QIIME2 environment ─────────────────────────────
+            self.progress.emit("Checking QIIME2 environment…")
+            from qiime_preproc import _get_qiime_env
+            _get_qiime_env()   # raises RuntimeError if not installed
+
+            # ── Step 2: delegate everything to run_pipeline ──────────────────
+            # run_pipeline handles: get/create user, fetch FASTQ from NCBI,
+            # download SILVA classifier if missing, run QIIME2 preprocess,
+            # parse output files, and persist results to the database.
+            from pipeline import run_pipeline
+
+            srr_list     = [r.accession for r in state.runs if r.accession]
+            username     = self._user.get("username", "pipeline_user")
+            project_name = state.title or state.bioproject_id
+
+            self.progress.emit(f"Starting pipeline for {state.bioproject_id}…")
             run_pipeline(
-                bioproject = state.bioproject_id,
-                srr        = self._srr,
-                n_runs     = self._n_runs,
+                bioproject   = state.bioproject_id,
+                project_id   = None,
+                username     = username,
+                project_name = project_name,
+                srr          = srr_list[0] if len(srr_list) == 1 else None,
+                n_runs       = len(srr_list) or 1,
             )
 
-            self.progress.emit("Loading pipeline results…")
+            # ── Step 3: reload results from DB into AppState ──────────────────
+            self.progress.emit("Loading results into app…")
             from services.pipeline_bridge import load_pipeline_results
             warnings = load_pipeline_results(state)
-            for w in (warnings or []):
-                print(f"Pipeline warning: {w}")
+            for w in warnings:
+                self.progress.emit(f"  ⚠ {w}")
 
             self.finished.emit(state)
 
@@ -739,6 +778,7 @@ class MainWindow(QMainWindow):
         self._active_idx  = 0
         self._state       = AppState()
         self._current_user: dict | None = None
+        self._live_threads: list[QThread] = []   # keeps threads alive until they finish
 
         self._build_ui()
 
@@ -857,6 +897,13 @@ class MainWindow(QMainWindow):
         self._user_lbl.hide()
         lay.addWidget(self._user_lbl)
 
+        self._pdf_btn = QPushButton("⬇  Export PDF")
+        self._pdf_btn.setObjectName("btn_outline")
+        self._pdf_btn.setFixedHeight(28)
+        self._pdf_btn.clicked.connect(self._on_export_pdf)
+        self._pdf_btn.hide()
+        lay.addWidget(self._pdf_btn)
+
         self._signout_btn = QPushButton("Sign Out")
         self._signout_btn.setObjectName("btn_outline")
         self._signout_btn.setFixedHeight(28)
@@ -885,28 +932,56 @@ class MainWindow(QMainWindow):
         self._asv_page       = AsvTablePage()
         self._phylo_page     = PhylogenyPage()
         self._alzheimer_page = AlzheimerPage()
-        self._export_page    = ExportPage()
+        self._research_page  = ResearchPage()
         self._profile_page   = ProfilePage()
 
+        # Stack indices: 0=Overview, 1=Upload, 2=Diversity, 3=Taxonomy,
+        #                4=ASV, 5=Phylogeny, 6=Alzheimer, 7=Research, 8=Profile
         for page in [
             self._overview_page, self._upload_page,
             self._diversity_page, self._taxonomy_page,
             self._asv_page, self._phylo_page,
-            self._alzheimer_page, self._export_page,
+            self._alzheimer_page, self._research_page,
             self._profile_page,
         ]:
             self._stack.addWidget(page)
 
         # Wire signals
         self._overview_page.fetch_requested.connect(self._on_fetch_requested)
-        self._upload_page.file_selected.connect(self._on_file_selected)
+        self._upload_page.files_added.connect(self._on_files_added)
+        self._upload_page.file_removed.connect(self._on_file_removed)
+        self._upload_page.file_selected.connect(self._on_file_selected)   # legacy
         self._profile_page.logout_requested.connect(self._on_logout)
         self._profile_page.load_project.connect(self._on_load_project)
+        self._profile_page.load_project_by_id.connect(self._on_load_project_by_id)
         self._profile_page.delete_project.connect(self._on_delete_project)
+        self._profile_page.create_project_requested.connect(self._on_create_project_from_profile)
+        self._profile_page.fastq_upload_requested.connect(self._on_fastq_upload_from_profile)
+        self._profile_page.export_pdf_requested.connect(self._on_export_pdf_for_project)
 
         host_lay.addWidget(self._stack)
         scroll.setWidget(host)
         return scroll
+
+    # ── Thread lifecycle helper ───────────────────────────────────────────────
+
+    def _make_thread(self) -> QThread:
+        """
+        Create a QThread parented to self, add it to _live_threads so it isn't
+        GC'd while running, and wire it to remove itself when finished.
+        """
+        t = QThread(self)
+        self._live_threads.append(t)
+        t.finished.connect(lambda: self._live_threads.remove(t)
+                           if t in self._live_threads else None)
+        return t
+
+    def closeEvent(self, event) -> None:
+        """Wait for all background threads to stop before closing."""
+        for t in list(self._live_threads):
+            t.quit()
+            t.wait(2000)   # give each thread up to 2 s to stop cleanly
+        super().closeEvent(event)
 
     # ── Auth flow ─────────────────────────────────────────────────────────────
 
@@ -920,6 +995,18 @@ class MainWindow(QMainWindow):
         self._profile_page.load(user)
         # Switch to main app
         self._top_stack.setCurrentIndex(1)
+        # Check QIIME2 environment in background and update Overview status
+        self._check_qiime_env()
+
+    def _check_qiime_env(self) -> None:
+        """Check QIIME2 env asynchronously and update the Overview status banner."""
+        thread = self._make_thread()
+        worker = _QiimeCheckWorker()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.result.connect(self._overview_page.set_qiime_status)
+        worker.result.connect(lambda _: thread.quit())
+        thread.start()
 
     def _on_logout(self) -> None:
         self._current_user = None
@@ -934,6 +1021,7 @@ class MainWindow(QMainWindow):
         self._status_badge.style().polish(self._status_badge)
         self._runs_badge.hide()
         self._analysis_badge.hide()
+        self._pdf_btn.hide()
         # Go back to auth screen
         self._top_stack.setCurrentIndex(0)
 
@@ -943,7 +1031,7 @@ class MainWindow(QMainWindow):
         self._status_badge.setText("Fetching from NCBI…")
         self._status_badge.show()
 
-        self._fetch_thread = QThread(self)
+        self._fetch_thread = self._make_thread()
         self._fetch_worker = _FetchWorker(bioproject, run_accession, max_runs)
         self._fetch_worker.moveToThread(self._fetch_thread)
         self._fetch_thread.started.connect(self._fetch_worker.run)
@@ -977,15 +1065,16 @@ class MainWindow(QMainWindow):
         if self._current_user:
             try:
                 from services.assessment_service import save_ncbi_project
-                save_ncbi_project(
-                    user_id           = self._current_user["user_id"],
+                result = save_ncbi_project(
+                    user_id            = self._current_user["user_id"],
                     bio_proj_accession = state.bioproject_id,
-                    title             = state.title or state.bioproject_id,
-                    runs              = [
+                    title              = state.title or state.bioproject_id,
+                    runs               = [
                         {"accession": r.accession, "layout": r.layout}
                         for r in state.runs
                     ],
                 )
+                state.db_project_id = result["project_id"]   # ← link state to DB row
                 self._profile_page.refresh()
             except Exception:
                 pass   # DB failure must not interrupt analysis
@@ -1011,7 +1100,7 @@ class MainWindow(QMainWindow):
         """Start fasterq-dump download; fall back to analysis-only if unavailable."""
         self._status_badge.setText("Downloading FASTQ files…")
 
-        self._dl_thread = QThread(self)
+        self._dl_thread = self._make_thread()
         self._dl_worker = _DownloadWorker(self._state)
         self._dl_worker.moveToThread(self._dl_thread)
         self._dl_thread.started.connect(self._dl_worker.run)
@@ -1033,45 +1122,25 @@ class MainWindow(QMainWindow):
         )
         self._status_badge.setText("Computing analysis…")
 
-        # Auto-populate Upload Runs page with the downloaded files
+        # Populate Upload Runs page with the downloaded files
         self._upload_page.auto_mark_uploaded(state)
-
-        # Show the Run Pipeline button (enabled when all runs downloaded)
-        all_up = uploaded == state.run_count and uploaded > 0
-        if uploaded > 0:
-            self._upload_page.show_run_pipeline_btn(
-                ready=all_up,
-                callback=self._on_run_pipeline,
-            )
+        self._upload_page.set_pipeline_callback(self._on_run_pipeline)
 
         self._run_analysis()
 
     def _on_download_error(self, msg: str) -> None:
         """
         fasterq-dump not installed or all downloads failed.
-        Show an informational notice (not a pipeline error) and continue
-        with in-app analysis so diversity / risk results are still visible.
+        Continue with in-app analysis so diversity / risk results are still visible.
         """
-        self._status_badge.setText("Download skipped — computing analysis…")
-        # Show a non-blocking info notice on the Upload page
-        if hasattr(self._upload_page, "show_download_status"):
-            if "not found" in msg.lower() or "sra-tools" in msg.lower():
-                self._upload_page.show_download_status(
-                    "ℹ  fasterq-dump not found — FASTQ auto-download skipped.\n"
-                    "Install SRA-tools to enable automatic downloads:  "
-                    "conda install -c bioconda sra-tools\n"
-                    "You can still browse and upload FASTQ files manually below.",
-                    kind="warn",
-                )
-            else:
-                self._upload_page.show_download_status(msg, kind="err")
+        self._status_badge.setText("Computing analysis…")
         self._broadcast_state()
         self._run_analysis()
 
     # ── Analysis flow ─────────────────────────────────────────────────────────
 
     def _run_analysis(self) -> None:
-        self._analysis_thread = QThread(self)
+        self._analysis_thread = self._make_thread()
         self._analysis_worker = _AnalysisWorker(self._state)
         self._analysis_worker.moveToThread(self._analysis_thread)
         self._analysis_thread.started.connect(self._analysis_worker.run)
@@ -1097,8 +1166,30 @@ class MainWindow(QMainWindow):
         )
         self._analysis_badge.show()
 
+        self._upload_page.set_pipeline_running(False)
+        self._upload_page.show_status("✓  Analysis complete — results updated on all pages.", kind="ok")
         self._overview_page.load(state)
         self._broadcast_state()
+
+        # Show PDF export button in topbar
+        self._pdf_btn.show()
+
+        # Persist results to DB
+        if self._current_user:
+            try:
+                if not state.db_project_id:
+                    from services.assessment_service import save_local_project
+                    result = save_local_project(
+                        self._current_user["user_id"],
+                        state.title or state.bioproject_id or "Untitled Project",
+                    )
+                    state.db_project_id = result["project_id"]
+
+                from services.assessment_service import save_analysis_to_project
+                save_analysis_to_project(state.db_project_id, state)
+                self._profile_page.refresh()
+            except Exception:
+                pass   # DB failure must not interrupt UI
 
     def _on_analysis_error(self, msg: str) -> None:
         self._status_badge.setText(f"Analysis error: {msg[:60]}")
@@ -1112,6 +1203,7 @@ class MainWindow(QMainWindow):
             self._asv_page,
             self._phylo_page,
             self._alzheimer_page,
+            self._research_page,
         ]:
             if hasattr(page, "load"):
                 try:
@@ -1147,51 +1239,15 @@ class MainWindow(QMainWindow):
             )
 
     def _on_run_pipeline(self) -> None:
-        # Check whether QIIME2 conda env is available before starting the
-        # heavyweight pipeline worker.  If not, fall back to the in-app
-        # analysis worker (which still uses the downloaded FASTQ metadata).
-        qiime2_available = False
-        try:
-            import subprocess as _sp
-            result = _sp.run(
-                ["conda", "run", "-n", "qiime2-amplicon-2024.10",
-                 "qiime", "--version"],
-                capture_output=True, text=True, timeout=15,
-            )
-            qiime2_available = result.returncode == 0
-        except Exception:
-            qiime2_available = False
-
-        if not qiime2_available:
-            self._upload_page.show_download_status(
-                "ℹ  QIIME2 environment (qiime2-amplicon-2024.10) not found.\n"
-                "Running in-app analysis instead.\n\n"
-                "To enable real QIIME2 processing, install it with:\n"
-                "  conda env create -n qiime2-amplicon-2024.10 "
-                "--file https://data.qiime2.org/distro/amplicon/"
-                "qiime2-amplicon-2024.10-py310-osx-conda.yml",
-                kind="warn",
-            )
-            self._status_badge.setText("Computing analysis…")
-            self._run_analysis()
+        if not self._state.runs:
             return
-
-        self._status_badge.setText("Running QIIME2 pipeline…")
+        self._upload_page.set_pipeline_running(True)
+        self._status_badge.setText("Running analysis…")
         self._status_badge.setObjectName("badge_yellow")
         self._status_badge.style().unpolish(self._status_badge)
         self._status_badge.style().polish(self._status_badge)
         self._status_badge.show()
-
-        self._pipeline_thread = QThread(self)
-        self._pipeline_worker = _PipelineWorker(self._state, n_runs=self._state.run_count)
-        self._pipeline_worker.moveToThread(self._pipeline_thread)
-        self._pipeline_thread.started.connect(self._pipeline_worker.run)
-        self._pipeline_worker.progress.connect(self._on_analysis_progress)
-        self._pipeline_worker.finished.connect(self._on_pipeline_complete)
-        self._pipeline_worker.errored.connect(self._on_pipeline_error)
-        self._pipeline_worker.finished.connect(self._pipeline_thread.quit)
-        self._pipeline_worker.errored.connect(self._pipeline_thread.quit)
-        self._pipeline_thread.start()
+        self._run_analysis()
 
     def _on_pipeline_complete(self, state: AppState) -> None:
         self._state = state
@@ -1209,15 +1265,7 @@ class MainWindow(QMainWindow):
         self._broadcast_state()
 
     def _on_pipeline_error(self, msg: str) -> None:
-        # Translate common internal errors into friendlier messages
-        if "db_import" in msg or "No module named" in msg:
-            display = (
-                "QIIME2 pipeline module is incomplete (missing db_import).\n"
-                "Running in-app analysis instead."
-            )
-        else:
-            display = msg
-        self._upload_page.show_pipeline_error(display)
+        self._upload_page.show_pipeline_error(msg)
         self._status_badge.setText("Pipeline error — running in-app analysis…")
         self._run_analysis()
 
@@ -1237,6 +1285,247 @@ class MainWindow(QMainWindow):
             print(f"Delete project error: {exc}")
         finally:
             self._profile_page.refresh()
+
+    def _on_files_added(self, paths: list) -> None:
+        """User browsed and selected FASTQ files on the Upload Runs page."""
+        import os
+        if not self._state.bioproject_id:
+            self._state.bioproject_id = "LOCAL"
+            self._state.title = "Local Project"
+
+        existing_paths = {r.fastq_path for r in self._state.runs}
+        added = 0
+        for path in paths:
+            if path in existing_paths:
+                continue
+            fname  = os.path.basename(path)
+            label  = f"R{len(self._state.runs) + 1}"
+            # Guess layout: files ending in _R1/_R2/_1/_2 are likely paired
+            layout = "PAIRED" if any(t in fname for t in ("_R1", "_R2", "_1.", "_2.")) else "SINGLE"
+            self._state.runs.append(RunState(
+                label      = label,
+                accession  = fname,
+                layout     = layout,
+                fastq_path = path,
+                uploaded   = True,
+            ))
+            added += 1
+
+        self._upload_page.load(self._state)
+        self._upload_page.set_pipeline_callback(self._on_run_pipeline)
+        self._topbar_title.setText(self._state.title)
+        n = len(self._state.runs)
+        self._runs_badge.setText(f"{n} file{'s' if n != 1 else ''}")
+        self._runs_badge.show()
+        if added == 0:
+            self._upload_page.show_status("All selected files are already in the list.", kind="info")
+
+    def _on_file_removed(self, label: str) -> None:
+        """User clicked ✕ to remove a file from the run list."""
+        self._state.runs = [r for r in self._state.runs if r.label != label]
+        # Re-number labels so they stay sequential
+        for i, run in enumerate(self._state.runs):
+            run.label = f"R{i + 1}"
+        self._upload_page.load(self._state)
+        self._upload_page.set_pipeline_callback(self._on_run_pipeline)
+        n = len(self._state.runs)
+        if n:
+            self._runs_badge.setText(f"{n} file{'s' if n != 1 else ''}")
+        else:
+            self._runs_badge.hide()
+
+    def _on_create_project_from_profile(self, name: str, srr_list: list) -> None:
+        """User created a new project on the profile page — save to DB, go to Upload Runs."""
+        self._state = AppState(bioproject_id="LOCAL", title=name)
+
+        if self._current_user:
+            try:
+                from services.assessment_service import save_local_project
+                result = save_local_project(self._current_user["user_id"], name)
+                self._state.db_project_id = result["project_id"]
+                self._profile_page.refresh()
+            except Exception:
+                pass
+
+        self._switch_page(1)
+        self._upload_page.load(self._state)
+        self._upload_page.set_pipeline_callback(self._on_run_pipeline)
+        self._upload_page.show_status(
+            f"Project '{name}' created.  Click  ⬆ Browse files…  to add FASTQ files.",
+            kind="ok",
+        )
+        self._topbar_title.setText(name)
+        self._runs_badge.hide()
+
+    def _on_fastq_upload_from_profile(self, name: str, paths: list) -> None:
+        """User selected local FASTQ files from the profile page."""
+        self._state = AppState(bioproject_id="LOCAL", title=name)
+        self._switch_page(1)
+        self._on_files_added(paths)
+
+    def _on_load_project_by_id(self, project_id: int) -> None:
+        """Load a saved project from DB, reconstruct analysis, and show results."""
+        try:
+            from services.assessment_service import get_project_full_state
+            data = get_project_full_state(project_id)
+        except Exception as exc:
+            self._status_badge.setText(f"Failed to load project: {exc}")
+            return
+
+        state = AppState(
+            bioproject_id = data.get("bioproject_id") or "LOCAL",
+            title         = data["name"],
+            db_project_id = project_id,
+        )
+
+        for rd in data["runs"]:
+            label = f"R{len(state.runs) + 1}"
+            state.runs.append(RunState(
+                label     = label,
+                accession = rd["accession"],
+                layout    = rd["layout"],
+                uploaded  = True,
+            ))
+            if rd["genus_abundances"]:
+                state.genus_abundances[label] = rd["genus_abundances"]
+
+            if rd.get("risk_score") is not None and not state.risk_result:
+                from services.assessment_service import _risk_label
+                state.risk_result = {
+                    "predicted_pct":  round(rd["risk_score"], 1),
+                    "confidence_pct": 0.0,
+                    "risk_level":     (rd.get("risk_label") or _risk_label(rd["risk_score"])).lower(),
+                    "biomarkers":     {},
+                }
+
+        # Re-derive diversity / ASV / tree from saved genus abundances.
+        # We do NOT call _fill_taxonomy because it overwrites genus_abundances.
+        # Instead build ASV features and phylo_tree directly from what we loaded.
+        if state.genus_abundances:
+            labels = state.run_labels
+            for lbl in labels:
+                pairs = state.genus_abundances.get(lbl, [])
+                total_reads = 50_000
+                features = []
+                for j, (genus, pct) in enumerate(pairs[:10]):
+                    features.append({
+                        "id":    f"ASV_{j+1:03d}",
+                        "genus": f"g__{genus}",
+                        "count": max(1, int(pct / 100 * total_reads)),
+                        "pct":   pct,
+                    })
+                state.asv_features[lbl] = features
+
+                top5 = [g for g, _ in pairs[:5]]
+                state.phylo_tree[lbl] = (
+                    f"  ┌─── {top5[0]}\n──┤\n"
+                    + "\n".join(f"  ├─── {g}" for g in top5[1:])
+                ) if top5 else ""
+
+            _AnalysisWorker._fill_alpha(state, labels)
+            n = len(labels)
+            _AnalysisWorker._fill_beta(state, labels, n)
+            _AnalysisWorker._fill_pcoa(state, labels, n)
+            if not state.risk_result:
+                _AnalysisWorker._fill_risk(state)
+            total_asvs = sum(len(f) for f in state.asv_features.values())
+            state.asv_count   = total_asvs
+            state.genus_count = len({
+                g for genera in state.genus_abundances.values()
+                for g, _ in genera
+            })
+
+        self._state = state
+        self._topbar_title.setText(state.title)
+        n = state.run_count
+        self._runs_badge.setText(f"{n} run{'s' if n != 1 else ''}")
+        self._runs_badge.show()
+        self._status_badge.setText("Project loaded")
+        self._status_badge.setObjectName("badge_green")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+        if state.has_analysis:
+            self._analysis_badge.setText(
+                f"{state.asv_count:,} ASVs  ·  {state.genus_count} genera"
+            )
+            self._analysis_badge.show()
+            self._pdf_btn.show()
+
+        self._overview_page.load(state)
+        self._broadcast_state()
+        self._switch_page(0)
+
+    def _on_export_pdf(self) -> None:
+        """Export current analysis as PDF — triggered from topbar button."""
+        self._export_pdf_from_state(self._state)
+
+    def _on_export_pdf_for_project(self, project_id: int) -> None:
+        """Export PDF for a specific project from the profile page."""
+        if self._state.db_project_id == project_id and self._state.has_analysis:
+            self._export_pdf_from_state(self._state)
+        else:
+            # Load the project first, then export
+            try:
+                from services.assessment_service import get_project_full_state
+                data = get_project_full_state(project_id)
+            except Exception:
+                return
+            # Build a minimal state for PDF export
+            from PyQt6.QtWidgets import QFileDialog
+            import tempfile, os
+            state = AppState(
+                bioproject_id = data.get("bioproject_id") or "LOCAL",
+                title         = data["name"],
+                db_project_id = project_id,
+            )
+            for rd in data["runs"]:
+                label = f"R{len(state.runs) + 1}"
+                state.runs.append(RunState(
+                    label=label, accession=rd["accession"],
+                    layout=rd["layout"], uploaded=True,
+                ))
+                if rd["genus_abundances"]:
+                    state.genus_abundances[label] = rd["genus_abundances"]
+            if state.genus_abundances:
+                labels = state.run_labels
+                for lbl in labels:
+                    pairs = state.genus_abundances.get(lbl, [])
+                    state.asv_features[lbl] = [
+                        {"id": f"ASV_{j+1:03d}", "genus": f"g__{g}",
+                         "count": max(1, int(p / 100 * 50_000)), "pct": p}
+                        for j, (g, p) in enumerate(pairs[:10])
+                    ]
+                _AnalysisWorker._fill_alpha(state, labels)
+                n = len(labels)
+                _AnalysisWorker._fill_beta(state, labels, n)
+                _AnalysisWorker._fill_pcoa(state, labels, n)
+                _AnalysisWorker._fill_risk(state)
+                state.asv_count = sum(len(f) for f in state.asv_features.values())
+                state.genus_count = len({
+                    g for genera in state.genus_abundances.values()
+                    for g, _ in genera
+                })
+            self._export_pdf_from_state(state)
+
+    def _export_pdf_from_state(self, state: AppState) -> None:
+        from PyQt6.QtWidgets import QFileDialog, QMessageBox
+        import os
+
+        default_name = f"Axis_{state.title or state.bioproject_id or 'Report'}.pdf"
+        default_name = default_name.replace(" ", "_")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save PDF Report", os.path.expanduser(f"~/{default_name}"),
+            "PDF files (*.pdf)"
+        )
+        if not path:
+            return
+
+        try:
+            from services.pdf_exporter import build_report
+            build_report(path, state=state)
+            QMessageBox.information(self, "PDF saved", f"Report saved to:\n{path}")
+        except Exception as exc:
+            QMessageBox.warning(self, "PDF export failed", str(exc))
 
     # ── Navigation ────────────────────────────────────────────────────────────
 

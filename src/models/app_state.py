@@ -65,6 +65,9 @@ class AppState:
     # ── Risk ──────────────────────────────────────────────────────────────────
     risk_result: Optional[dict] = None
 
+    # ── DB linkage (set when project is saved to database) ────────────────────
+    db_project_id: Optional[int] = None
+
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     @property

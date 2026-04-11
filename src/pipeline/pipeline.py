@@ -28,14 +28,14 @@ def run_pipeline(bioproject: str, project_id, username: str, project_name: str, 
 
     # paired ends
     if lib_layout['paired']:
-        prepocess_parse_import(bioproject=bioproject, project_id=project_id, project_name=project_name, lib_layout='paired')
-    
+        preprocess_parse_import(bioproject=bioproject, project_id=project_id, project_name=project_name, lib_layout='paired', user=user)
+
     # single ends
     if lib_layout['single']:
-        prepocess_parse_import(bioproject=bioproject, project_id=project_id, project_name=project_name, lib_layout='single')
+        preprocess_parse_import(bioproject=bioproject, project_id=project_id, project_name=project_name, lib_layout='single', user=user)
 
 
-def prepocess_parse_import(bioproject: str, project_id, project_name: str, lib_layout: str, user: dict):
+def preprocess_parse_import(bioproject: str, project_id, project_name: str, lib_layout: str, user: dict):
     
     data_dir = f"data/{bioproject}/"
     

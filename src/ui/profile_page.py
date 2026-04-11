@@ -6,9 +6,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
+import re as _re
+
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
-    QMessageBox,
+    QMessageBox, QLineEdit, QFileDialog, QScrollArea,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
@@ -38,9 +40,15 @@ class ProfilePage(QWidget):
         logout_requested()                — user clicked Sign Out
     """
 
-    load_project      = pyqtSignal(str)
-    logout_requested  = pyqtSignal()
-    delete_project    = pyqtSignal(int)   # emits project_id
+    load_project              = pyqtSignal(str)    # re-fetch from NCBI (legacy)
+    load_project_by_id        = pyqtSignal(int)   # load saved project from DB
+    logout_requested          = pyqtSignal()
+    delete_project            = pyqtSignal(int)       # emits project_id
+    create_project_requested  = pyqtSignal(str, list) # (project_name, srr_list)
+    fastq_upload_requested    = pyqtSignal(str, list) # (project_name, file_paths)
+    export_pdf_requested      = pyqtSignal(int)       # emits project_id
+
+    _SRR_RE = _re.compile(r'^[SED]RR\d+$', _re.IGNORECASE)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -74,6 +82,10 @@ class ProfilePage(QWidget):
         self._stats_row = QHBoxLayout()
         self._stats_row.setSpacing(12)
         root.addLayout(self._stats_row)
+
+        # ── Create New Project card ───────────────────────────────────────────
+        new_proj_card = self._build_new_project_card()
+        root.addWidget(new_proj_card)
 
         # ── Projects heading ──────────────────────────────────────────────────
         proj_hdr = QHBoxLayout()
@@ -146,6 +158,69 @@ class ProfilePage(QWidget):
 
         return card
 
+    # ── New-project card ──────────────────────────────────────────────────────
+
+    def _build_new_project_card(self) -> QFrame:
+        card = QFrame()
+        card.setObjectName("card")
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(24, 18, 24, 18)
+        lay.setSpacing(12)
+
+        title = QLabel("New Project")
+        title.setStyleSheet(
+            f"font-size: 14px; font-weight: 800; color: {TEXT_H}; background: transparent;")
+        lay.addWidget(title)
+
+        row = QHBoxLayout(); row.setSpacing(10)
+        self._proj_name_input = QLineEdit()
+        self._proj_name_input.setPlaceholderText("Project name  (e.g. Alzheimer Study 2024)")
+        self._proj_name_input.returnPressed.connect(self._on_create_project)
+        row.addWidget(self._proj_name_input, 1)
+
+        create_btn = QPushButton("  Create  →")
+        create_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {ACCENT}; color: white; border: none;
+                border-radius: 8px; font-size: 13px; font-weight: 700; padding: 8px 20px;
+            }}
+            QPushButton:hover   {{ background: #4F46E5; }}
+            QPushButton:pressed {{ background: #4338CA; }}
+        """)
+        create_btn.clicked.connect(self._on_create_project)
+        row.addWidget(create_btn)
+        lay.addLayout(row)
+
+        hint = QLabel(
+            "Enter a name and click Create — you'll be taken to Upload Runs to add FASTQ files.")
+        hint.setStyleSheet(
+            f"font-size: 11px; color: {TEXT_HINT}; background: transparent;")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
+        self._new_proj_err = QLabel("")
+        self._new_proj_err.setStyleSheet("font-size: 11px; color: #EF4444; background: transparent;")
+        lay.addWidget(self._new_proj_err)
+
+        return card
+
+    def _on_create_project(self) -> None:
+        name = self._proj_name_input.text().strip()
+        if not name:
+            self._new_proj_err.setText("Please enter a project name.")
+            return
+        self._new_proj_err.setText("")
+        self._proj_name_input.clear()
+        self.create_project_requested.emit(name, [])
+
+    def _on_upload_fastq(self) -> None:
+        name = self._proj_name_input.text().strip() or "Local FASTQ project"
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Select FASTQ files", "",
+            "FASTQ files (*.fastq *.fastq.gz);;All files (*)")
+        if paths:
+            self.fastq_upload_requested.emit(name, paths)
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def load(self, user: dict) -> None:
@@ -213,7 +288,7 @@ class ProfilePage(QWidget):
                 f"font-size: 14px; font-weight: 700; color: {TEXT_H}; background: transparent;"
             )
             msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            hint = QLabel("Fetch a BioProject from the Overview page to get started.")
+            hint = QLabel("Create a new project above, or fetch a BioProject from the Overview page.")
             hint.setObjectName("label_hint")
             hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
             hint.setWordWrap(True)
@@ -315,30 +390,53 @@ class ProfilePage(QWidget):
             badge.setStyleSheet(_risk_badge_qss(risk))
             top.addWidget(badge, 0, Qt.AlignmentFlag.AlignVCenter)
 
-        # Load button
-        first_bp   = bio_projs[0] if bio_projs else None
+        # Load button — always shown; opens saved analysis from DB
         project_id = project["project_id"]
-        if first_bp:
-            load_btn = QPushButton("Load →")
-            load_btn.setObjectName("btn_primary")
-            load_btn.setFixedHeight(30)
-            load_btn.setFixedWidth(80)
-            load_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: {ACCENT};
-                    color: white;
-                    border: none;
-                    border-radius: 7px;
-                    font-size: 12px;
-                    font-weight: 700;
-                    padding: 0;
-                }}
-                QPushButton:hover   {{ background: #4F46E5; }}
-                QPushButton:pressed {{ background: #4338CA; }}
-            """)
-            load_btn.setToolTip(f"Re-fetch {first_bp} from NCBI")
-            load_btn.clicked.connect(lambda _, bp=first_bp: self.load_project.emit(bp))
-            top.addWidget(load_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+        first_bp   = bio_projs[0] if bio_projs else None
+
+        load_btn = QPushButton("Open →")
+        load_btn.setFixedHeight(30)
+        load_btn.setFixedWidth(78)
+        load_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {ACCENT};
+                color: white;
+                border: none;
+                border-radius: 7px;
+                font-size: 12px;
+                font-weight: 700;
+                padding: 0;
+            }}
+            QPushButton:hover   {{ background: #4F46E5; }}
+            QPushButton:pressed {{ background: #4338CA; }}
+        """)
+        load_btn.setToolTip("Open this project and view analysis results")
+        load_btn.clicked.connect(
+            lambda _, pid=project_id: self.load_project_by_id.emit(pid)
+        )
+        top.addWidget(load_btn, 0, Qt.AlignmentFlag.AlignVCenter)
+
+        # PDF export button
+        pdf_btn = QPushButton("⬇ PDF")
+        pdf_btn.setFixedHeight(30)
+        pdf_btn.setFixedWidth(66)
+        pdf_btn.setToolTip("Export analysis report as PDF")
+        pdf_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                border: 1.5px solid {ACCENT};
+                border-radius: 7px;
+                color: {ACCENT};
+                font-size: 11px;
+                font-weight: 700;
+            }}
+            QPushButton:hover   {{ background: #EEF2FF; }}
+            QPushButton:pressed {{ background: #E0E7FF; }}
+        """)
+        pdf_btn.clicked.connect(
+            lambda _, pid=project_id: self.export_pdf_requested.emit(pid)
+        )
+        top.addWidget(pdf_btn, 0, Qt.AlignmentFlag.AlignVCenter)
 
         # Delete button
         del_btn = QPushButton("✕")

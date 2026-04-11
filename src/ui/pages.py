@@ -53,8 +53,8 @@ def _placeholder(msg: str) -> QLabel:
 
 def _info_banner(msg: str, kind: str = "info") -> QFrame:
     """Inline banner used for download / pipeline status messages."""
-    obj = {"ok": "banner_ok", "warn": "banner_warn", "err": "banner_err"}.get(kind, "banner_warn")
-    txt_obj = {"ok": "banner_text_ok", "warn": "banner_text_warn", "err": "banner_text_err"}.get(kind, "banner_text_warn")
+    obj = {"ok": "banner_ok", "warn": "banner_warn", "err": "banner_err", "info": "banner_warn"}.get(kind, "banner_warn")
+    txt_obj = {"ok": "banner_text_ok", "warn": "banner_text_warn", "err": "banner_text_err", "info": "banner_text_warn"}.get(kind, "banner_text_warn")
     frame = QFrame()
     frame.setObjectName(obj)
     lay = QHBoxLayout(frame)
@@ -182,6 +182,9 @@ class OverviewPage(QWidget):
         self._runs_card.layout().addLayout(self._runs_body)
 
         root.addStretch()
+
+    def set_qiime_status(self, available: bool) -> None:
+        """No-op kept for backward compat — banner removed."""
 
     def _validate_inputs(self):
         bp  = self._bp_input.text().strip()
@@ -344,12 +347,20 @@ class OverviewPage(QWidget):
 # ═════════════════════════════════════════════════════════════════════════════
 
 class UploadRunsPage(QWidget):
-    file_selected = pyqtSignal(str, str)   # (run_label, file_path)
+    """
+    Users browse local FASTQ files, see them listed, then click Run Pipeline.
+    No QIIME2 knowledge required — analysis runs in-app automatically.
+    """
+    files_added  = pyqtSignal(list)   # list[str] of absolute file paths
+    file_removed = pyqtSignal(str)    # run label to remove
+
+    # kept for callers that haven't been updated yet
+    file_selected      = pyqtSignal(str, str)
+    srr_manually_added = pyqtSignal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._state: AppState | None = None
-        self._row_widgets: dict[str, dict] = {}
         self._build()
 
     def _build(self):
@@ -358,151 +369,225 @@ class UploadRunsPage(QWidget):
         self._root.setSpacing(16)
         self._root.addWidget(page_title("Upload Runs"))
 
-        info = card()
-        info.layout().addWidget(section_title("Upload .fastq or .fastq.gz files"))
-        info.layout().addWidget(label_hint(
-            "Validates 4-line FASTQ format: @SEQID · sequence (ACTG) · + · Phred scores\n"
-            "Fetch a project first to see the run list below."))
-        self._root.addWidget(info)
+        # ── Drop-zone card ────────────────────────────────────────────────────
+        drop_zone = QFrame()
+        drop_zone.setObjectName("drop_zone")
+        drop_zone.setCursor(Qt.CursorShape.PointingHandCursor)
+        drop_zone.setStyleSheet("""
+            QFrame#drop_zone {
+                background: #F0F4FF;
+                border: 2.5px dashed #6366F1;
+                border-radius: 12px;
+                padding: 0px;
+            }
+            QFrame#drop_zone:hover {
+                background: #E8EEFF;
+                border-color: #4F46E5;
+            }
+        """)
+        dz_lay = QVBoxLayout(drop_zone)
+        dz_lay.setContentsMargins(0, 28, 0, 28)
+        dz_lay.setSpacing(10)
+        dz_lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
+        icon_lbl = QLabel("⬆")
+        icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_lbl.setStyleSheet(
+            "font-size: 36px; color: #6366F1; background: transparent;")
+        dz_lay.addWidget(icon_lbl)
+
+        main_lbl = QLabel("Click here to browse FASTQ files")
+        main_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        main_lbl.setStyleSheet(
+            "font-size: 16px; font-weight: 700; color: #3730A3; background: transparent;")
+        dz_lay.addWidget(main_lbl)
+
+        sub_lbl = QLabel("Accepts  .fastq  and  .fastq.gz  — you can select multiple files at once")
+        sub_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sub_lbl.setStyleSheet(
+            f"font-size: 12px; color: #6B7280; background: transparent;")
+        dz_lay.addWidget(sub_lbl)
+
+        browse_btn = QPushButton("  ⬆  Browse files…")
+        browse_btn.setFixedHeight(40)
+        browse_btn.setFixedWidth(180)
+        browse_btn.setStyleSheet("""
+            QPushButton {
+                background: #6366F1; color: white; border: none;
+                border-radius: 8px; font-size: 13px; font-weight: 700;
+            }
+            QPushButton:hover   { background: #4F46E5; }
+            QPushButton:pressed { background: #4338CA; }
+        """)
+        browse_btn.clicked.connect(self._on_browse)
+        dz_lay.addWidget(browse_btn, 0, Qt.AlignmentFlag.AlignCenter)
+
+        # clicking anywhere on the zone also opens the dialog
+        drop_zone.mousePressEvent = lambda _: self._on_browse()
+
+        self._root.addWidget(drop_zone)
+
+        # ── Run files list ────────────────────────────────────────────────────
         self._runs_card = card()
         self._runs_card.layout().addWidget(section_title("Run files"))
         self._runs_body = QVBoxLayout()
         self._runs_body.setSpacing(0)
         self._runs_card.layout().addLayout(self._runs_body)
-        self._runs_body.addWidget(_placeholder("No runs loaded — fetch a project first."))
+        self._empty_lbl = _placeholder(
+            "No files added yet — click  ⬆ Browse files…  above to select FASTQ files.")
+        self._runs_body.addWidget(self._empty_lbl)
         self._root.addWidget(self._runs_card)
 
-        self._error_area = QVBoxLayout()
-        self._root.addLayout(self._error_area)
+        # ── Status banner area ────────────────────────────────────────────────
+        self._status_area = QVBoxLayout()
+        self._root.addLayout(self._status_area)
+
+        # ── Run Pipeline button (hidden until files present) ──────────────────
+        self._pipeline_widget = QWidget()
+        pl_row = QHBoxLayout(self._pipeline_widget)
+        pl_row.setContentsMargins(0, 8, 0, 0)
+        pl_row.addStretch()
+        self._pipeline_btn = QPushButton("  ▶  Run Pipeline")
+        self._pipeline_btn.setFixedHeight(44)
+        self._pipeline_btn.setMinimumWidth(200)
+        self._pipeline_btn.setStyleSheet("""
+            QPushButton {
+                background: #10B981; color: white; border: none;
+                border-radius: 8px; font-size: 14px; font-weight: 700; padding: 0 28px;
+            }
+            QPushButton:hover   { background: #059669; }
+            QPushButton:pressed { background: #047857; }
+            QPushButton:disabled { background: #D1FAE5; color: #6EE7B7; }
+        """)
+        pl_row.addWidget(self._pipeline_btn)
+        self._pipeline_widget.hide()
+        self._root.addWidget(self._pipeline_widget)
+
         self._root.addStretch()
 
+    # ── File browser ──────────────────────────────────────────────────────────
+
+    def _on_browse(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Select FASTQ files", "",
+            "FASTQ files (*.fastq *.fastq.gz);;All files (*)")
+        if paths:
+            self.files_added.emit(paths)
+
+    # ── State loading ─────────────────────────────────────────────────────────
+
     def load(self, state: AppState):
+        import os
         self._state = state
-        self._row_widgets = {}
         _clear(self._runs_body)
-        _clear(self._error_area)
 
-        for run in state.runs:
-            row = QHBoxLayout(); row.setSpacing(12)
-            lbl = QLabel(f"<b>{run.label}</b>  {run.accession}")
-            lbl.setObjectName("label_muted"); lbl.setFixedWidth(180)
-            row.addWidget(lbl)
+        if not state.runs:
+            self._runs_body.addWidget(_placeholder(
+                "No files added yet — click  ⬆ Browse files…  above to select FASTQ files."))
+            self._pipeline_widget.hide()
+            return
 
-            status_lbl = QLabel("✓  Uploaded" if run.uploaded else "○  Pending")
-            status_lbl.setStyleSheet(
-                f"color:{'#065F46' if run.uploaded else '#9CA3AF'}; font-size:12px;")
-            row.addWidget(status_lbl); row.addStretch()
+        # Column header
+        hdr = QHBoxLayout(); hdr.setSpacing(12)
+        for txt, w in [("Run", 38), ("File name", 0), ("Layout", 70), ("Status", 80), ("", 32)]:
+            h = QLabel(txt)
+            h.setStyleSheet(f"font-size:11px;font-weight:600;color:{TEXT_M};padding-bottom:4px;")
+            if w:
+                h.setFixedWidth(w)
+                hdr.addWidget(h)
+            else:
+                hdr.addWidget(h, 1)
+        self._runs_body.addLayout(hdr)
+        rule = QFrame(); rule.setFrameShape(QFrame.Shape.HLine)
+        rule.setStyleSheet(f"background:{BORDER};max-height:1px;")
+        self._runs_body.addWidget(rule)
 
-            browse_btn = btn_outline(f"Browse file for {run.label}…")
-            browse_btn.clicked.connect(
-                lambda _, r=run.label: self._browse(r))
-            row.addWidget(browse_btn)
+        for i, run in enumerate(state.runs):
+            row = QHBoxLayout(); row.setContentsMargins(0, 8, 0, 8); row.setSpacing(12)
+
+            badge = QLabel(run.label)
+            badge.setFixedWidth(38)
+            badge.setStyleSheet(
+                "font-size:11px;font-weight:700;color:#6366F1;"
+                "background:#EEF2FF;border-radius:4px;padding:2px 6px;")
+            row.addWidget(badge)
+
+            display = os.path.basename(run.fastq_path) if run.fastq_path else run.accession
+            name_lbl = QLabel(display)
+            name_lbl.setStyleSheet("font-size:12px;color:#374151;")
+            name_lbl.setToolTip(run.fastq_path or run.accession)
+            row.addWidget(name_lbl, 1)
+
+            layout_lbl = QLabel(run.layout.title())
+            layout_lbl.setFixedWidth(70)
+            layout_lbl.setStyleSheet(f"font-size:11px;color:{TEXT_M};")
+            row.addWidget(layout_lbl)
+
+            status_text  = "✓  Ready"   if run.uploaded else "○  Pending"
+            status_color = SUCCESS_FG   if run.uploaded else TEXT_HINT
+            st = QLabel(status_text)
+            st.setFixedWidth(80)
+            st.setStyleSheet(f"font-size:11px;color:{status_color};")
+            row.addWidget(st)
+
+            rem = QPushButton("✕")
+            rem.setFixedSize(28, 28)
+            rem.setToolTip(f"Remove {run.label}")
+            rem.setStyleSheet(
+                "QPushButton{background:transparent;border:1.5px solid #FECACA;"
+                "border-radius:6px;color:#EF4444;font-size:12px;font-weight:700;}"
+                "QPushButton:hover{background:#FEF2F2;}")
+            rem.clicked.connect(lambda _, lbl=run.label: self.file_removed.emit(lbl))
+            row.addWidget(rem)
 
             self._runs_body.addLayout(row)
-            self._row_widgets[run.label] = {"status": status_lbl}
-            if run != state.runs[-1]:
-                self._runs_body.addWidget(hdivider())
+            if i < len(state.runs) - 1:
+                d = QFrame(); d.setFrameShape(QFrame.Shape.HLine)
+                d.setStyleSheet(f"background:{BORDER};max-height:1px;")
+                self._runs_body.addWidget(d)
 
-        for run in state.runs:
-            if run.qiime_error:
-                b = QFrame(); b.setObjectName("banner_err")
-                bl = QHBoxLayout(b); bl.setContentsMargins(12, 8, 12, 8)
-                l = QLabel(f"{run.label} — {run.qiime_error}")
-                l.setObjectName("banner_text_err"); l.setWordWrap(True)
-                bl.addWidget(l); self._error_area.addWidget(b)
+        self._pipeline_widget.show()
 
-    def update_run_status(self, run_label: str, uploaded: bool, error: str = ""):
-        """Called by MainWindow after FASTQ validation."""
-        if run_label not in self._row_widgets:
-            return
-        lbl = self._row_widgets[run_label]["status"]
-        if error:
-            lbl.setText(f"✗  Error")
-            lbl.setStyleSheet(f"color:{DANGER_FG}; font-size:12px;")
-        else:
-            lbl.setText("✓  Uploaded" if uploaded else "○  Pending")
-            lbl.setStyleSheet(
-                f"color:{'#065F46' if uploaded else '#9CA3AF'}; font-size:12px;")
+    # ── Pipeline button helpers ───────────────────────────────────────────────
 
-    def _browse(self, run_label: str):
-        path, _ = QFileDialog.getOpenFileName(
-            self, f"Select FASTQ for {run_label}", "",
-            "FASTQ files (*.fastq *.fastq.gz);;All files (*)")
-        if path:
-            self.file_selected.emit(run_label, path)
-
-    def show_run_pipeline_btn(self, ready: bool, callback) -> None:
-        """
-        Show the Run Pipeline button once at least one FASTQ is uploaded.
-        'ready' = True means ALL runs have files (button fully enabled).
-        'callback' = function to call when user clicks.
-        """
-        if not hasattr(self, "_pipeline_btn"):
-            from ui.helpers import btn_primary, hdivider
-            self._runs_card.layout().addWidget(hdivider())
-
-            row = QHBoxLayout(); row.setSpacing(12)
-            hint = QLabel("Upload all run files then click Run Pipeline to start QIIME2 preprocessing.")
-            hint.setObjectName("label_hint"); hint.setWordWrap(True)
-            row.addWidget(hint, 1)
-
-            self._pipeline_btn = btn_primary("  ▶  Run Pipeline")
-            self._pipeline_btn.setFixedHeight(40)
-            self._pipeline_btn.setStyleSheet("""
-                QPushButton { background:#10B981; color:white; border:none;
-                  border-radius:8px; font-size:13px; font-weight:700; padding:0 20px; }
-                QPushButton:hover   { background:#059669; }
-                QPushButton:disabled { background:#D1FAE5; color:#6EE7B7; }
-            """)
-            row.addWidget(self._pipeline_btn)
-            self._runs_card.layout().addLayout(row)
-
-        self._pipeline_btn.setEnabled(ready)
-        self._pipeline_btn.setText(
-            "  ▶  Run Pipeline" if ready else "  ▶  Run Pipeline  (waiting for all files)")
-        # Reconnect to the callback (disconnect old first to avoid double-fire)
+    def set_pipeline_callback(self, callback) -> None:
         try:
             self._pipeline_btn.clicked.disconnect()
         except (RuntimeError, TypeError):
             pass
         self._pipeline_btn.clicked.connect(callback)
 
-    def auto_mark_uploaded(self, state: "AppState") -> None:
-        """
-        Called by MainWindow after fasterq-dump downloads complete.
-        Refreshes the run list (showing ✓ Uploaded for downloaded runs)
-        and shows the Run Pipeline button ready to fire.
-        """
-        self.load(state)
-        uploaded = [r for r in state.runs if r.uploaded]
-        if uploaded:
-            self.show_download_status(
-                f"✓  {len(uploaded)} of {state.run_count} run"
-                f"{'s' if state.run_count != 1 else ''} downloaded automatically "
-                f"to  data/{state.bioproject_id}/fastq/",
-                kind="ok",
-            )
+    def set_pipeline_running(self, running: bool) -> None:
+        self._pipeline_btn.setEnabled(not running)
+        self._pipeline_btn.setText(
+            "  ⟳  Running…" if running else "  ▶  Run Pipeline")
 
-    def show_pipeline_error(self, message: str) -> None:
-        """Show a red error banner on the upload page after pipeline failure."""
-        if hasattr(self, "_dl_info_banner"):
-            self._dl_info_banner.deleteLater()
-            del self._dl_info_banner
-        if hasattr(self, "_pipeline_err_banner"):
-            self._pipeline_err_banner.deleteLater()
-        self._pipeline_err_banner = _info_banner(f"Pipeline error: {message[:200]}", kind="err")
-        self._root.insertWidget(self._root.count() - 1, self._pipeline_err_banner)
+    # ── Status banner ─────────────────────────────────────────────────────────
+
+    def show_status(self, message: str, kind: str = "info") -> None:
+        _clear(self._status_area)
+        if message:
+            self._status_area.addWidget(_info_banner(message, kind=kind))
+
+    # ── Backward-compat methods called by MainWindow ──────────────────────────
+
+    def show_run_pipeline_btn(self, ready: bool, callback) -> None:
+        self.set_pipeline_callback(callback)
+        self._pipeline_btn.setEnabled(ready)
+        self._pipeline_widget.show()
+
+    def auto_mark_uploaded(self, state: AppState) -> None:
+        self.load(state)
+
+    def update_run_status(self, run_label: str, uploaded: bool, error: str = "") -> None:
+        if self._state:
+            self.load(self._state)
 
     def show_download_status(self, message: str, kind: str = "info") -> None:
-        """Show a non-blocking info/ok/warn banner about download state."""
-        if hasattr(self, "_dl_info_banner"):
-            try:
-                self._dl_info_banner.deleteLater()
-            except RuntimeError:
-                pass
-        self._dl_info_banner = _info_banner(message, kind=kind)
-        self._root.insertWidget(self._root.count() - 1, self._dl_info_banner)
+        self.show_status(message, kind=kind)
+
+    def show_pipeline_error(self, message: str) -> None:
+        self.show_status(f"Error: {message[:200]}", kind="err")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
