@@ -61,9 +61,9 @@ def get_trunc(bioproject: str, lib_layout: str):
 
     # organize the fastq types
     files = os.listdir(input_dir_fastq)
+    forward, reverse = [], []
     if files:
         # if single, they will all be contained in files list
-        forward, reverse = [], []
         for file in files:
             if '_1.fastq' in file:
                 forward.append(file)

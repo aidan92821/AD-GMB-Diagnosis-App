@@ -1,34 +1,57 @@
 import csv
 import pandas as pd
 from pathlib import Path
-import io, os
+import os
 import shutil
-import subprocess
 
 
 # make sure that in the UI, user knows they can only download max 4 runs at a time
 # this function downloads one run at a time if the run is specified
 # it can download up to 4 runs at a time if no run is specified
 # returns two lists of strings: paired end runs and single end runs (SRR Accessions)
-def get_runs(bioproject: str, srr=None, n_runs=1) -> tuple[list[str], list[str]]:
+def get_runs(email, runner, bioproject: str, srr=None, n_runs=1) -> tuple[list[str], list[str]]:
+
+    env = os.environ.copy()
+    env.update({
+        "EMAIL": email
+    })
 
     # fetch information about the runs in the bioproject into a csv
-    result = subprocess.run(
-        f"esearch -db sra -query {bioproject} | efetch -format runinfo",
-        shell=True,
-        capture_output=True,
-        text=True,
-        check=True )
-    info = pd.read_csv(io.StringIO(result.stdout))
+    esearch = runner.es_run([
+        "esearch", 
+        "-db", "sra",
+        "-query", bioproject
+    ], env=env)
+    result = runner.ef_run([
+        "efetch",
+        "-format", "runinfo"
+    ], es_process=esearch, env=env)
+    # result = runner.run([
+    #     "esearch",
+    #     "-db", "sra",
+    #     "-query", bioproject,
+    #     "|",
+    #     "efetch",
+    #     "-format", "runinfo"
+    # ], env=env)
+    # result = subprocess.run(
+    #     f"esearch -db sra -query {bioproject} | efetch -format runinfo",
+    #     shell=True,
+    #     capture_output=True,
+    #     text=True,
+    #     check=True )
+    info = pd.read_csv(result)
 
     # only bioproject is specified
-    if srr is None:
-        # select the first n_runs runs from the dataset
+    if srr is None or info.loc[info['Run'] == srr] is None:
+        # select the first n_runs runs from the dataset if srr is None
+        # or select the first run from the dataset if srr not associate with this bioproject
+        # (n_runs will == 1 if srr is supplied to GUI)
         info = info.head(n_runs)
     # run id is specified
     else: 
         # get the specific run
-        info = info.loc[info['Run'] == srr]
+        info = info.loc[info['Run'] == srr]            
 
     # determine paired or single end
     paired_runs = info.loc[info['LibraryLayout'] == 'PAIRED', 'Run'].tolist()
@@ -39,10 +62,12 @@ def get_runs(bioproject: str, srr=None, n_runs=1) -> tuple[list[str], list[str]]
 
 # lib_layout = 'paired' or 'single'
 # runs = list of SRR Accessions
-def fetch_runs(bioproject: str, lib_layout: str, runs: list[str]):
-
+def fetch_runs(runner, bioproject: str, lib_layout: str, runs: list[str]):
+    
     # create temporary directory for fetching
-    output_dir_fastq = f"data/{bioproject}/fastq/{lib_layout}"
+    APP_DIR = Path(__file__).parent
+    SRA_BIN = APP_DIR / "bin" / "sratoolkit" / "bin"
+    output_dir_fastq = str((APP_DIR / f"data/{bioproject}/fastq/{lib_layout}").resolve())
     Path(output_dir_fastq).mkdir(parents=True, exist_ok=True)
     
     # get the number of cores from user's machine
@@ -52,20 +77,27 @@ def fetch_runs(bioproject: str, lib_layout: str, runs: list[str]):
 
     # fetch from NCBI and convert to fastq files -> output_dir
     for run in runs:
-        subprocess.run(['fasterq-dump', run, '--split-files', 
-                        '--threads', cores, 
-                        '--outdir', output_dir_fastq],
-                        check=True)
+        runner.fq_run([
+            str(SRA_BIN / "fasterq-dump"), run, "--split-files",
+            "--threads", cores,
+            "--outdir", output_dir_fastq
+        ])
+        
 
 
 # lib_layout = 'paired' or 'single'
 def write_manifest(bioproject: str, lib_layout: str):
 
+    APP_DIR = Path(__file__).parent
+    
     input_dir = f"data/{bioproject}/fastq/{lib_layout}"
-
-    # create the temporary qiime directory
     output_dir = f"data/{bioproject}/qiime/{lib_layout}"
-    Path(output_dir).mkdir(exist_ok=True)
+    
+    # input_dir = str((APP_DIR / f"data/{bioproject}/fastq/{lib_layout}").resolve())
+
+    # # create the temporary qiime directory
+    # output_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     # organize fastq types
     files = os.listdir(input_dir)
@@ -107,19 +139,22 @@ def cleanup(bioproject):
     shutil.rmtree(Path("data") / bioproject / "qiime")
 
 
-def fetch_ncbi_data(bioproject: str, srr=None, n_runs=1) -> dict[str: bool]:
+def fetch_ncbi_data(email, runner, bioproject: str, srr=None, n_runs=1) -> dict[str: bool]:
 
     lib_layout = {
         'paired': False,
         'single': False,
     }
 
-    paired_runs, single_runs = get_runs(bioproject=bioproject,
-                              srr=srr,
-                              n_runs=n_runs)
+    paired_runs, single_runs = get_runs(email,
+                                        runner,
+                                        bioproject=bioproject,
+                                        srr=srr,
+                                        n_runs=n_runs)
     
     if paired_runs:
-        fetch_runs(bioproject=bioproject,
+        fetch_runs(runner,
+                   bioproject=bioproject,
                    lib_layout='paired',
                    runs=paired_runs)
         write_manifest(bioproject=bioproject,
@@ -127,7 +162,8 @@ def fetch_ncbi_data(bioproject: str, srr=None, n_runs=1) -> dict[str: bool]:
         lib_layout['paired'] = True
     
     if single_runs:
-        fetch_runs(bioproject=bioproject,
+        fetch_runs(runner,
+                   bioproject=bioproject,
                    lib_layout='single',
                    runs=single_runs)
         write_manifest(bioproject=bioproject,
