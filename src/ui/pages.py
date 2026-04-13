@@ -216,7 +216,8 @@ class OverviewPage(QWidget):
     def _on_fetch_clicked(self):
         bp  = self._bp_input.text().strip()
         run = self._run_input.text().strip()
-        n   = int(self._run_count.currentText())
+        # When a specific SRR is given there is exactly one run to fetch
+        n   = 1 if run else int(self._run_count.currentText())
         self._fetch_btn.setEnabled(False)
         self._fetch_btn.setText("  ⟳  Fetching…")
         self._bp_input.setEnabled(False)

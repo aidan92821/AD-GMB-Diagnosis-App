@@ -4,6 +4,29 @@ A desktop application that fetches or imports gut microbiome sequencing data, pr
 
 ---
 
+### Login & Register
+![Login page](docs/screenshots/login.png)
+
+### Overview
+![Overview page](docs/screenshots/overview.png)
+
+### Diversity Analysis
+![Diversity page](docs/screenshots/diversity.png)
+
+### Taxonomy
+![Taxonomy page](docs/screenshots/taxonomy.png)
+
+### Alzheimer Risk Assessment
+![Alzheimer risk page](docs/screenshots/alzheimer.png)
+
+### Biomarker and Research
+![Research page](docs/screenshots/biomarker.png)
+
+<!-- ### Profile & Project History
+![Profile page](docs/screenshots/profile.png) --> 
+
+
+
 ## What This App Does
 
 Research suggests the bacteria living in your gut (the **gut microbiome**) may be connected to brain health and Alzheimer's disease. Axis lets researchers:

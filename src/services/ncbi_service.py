@@ -281,8 +281,9 @@ class NcbiService:
             )
  
         # ── Call 2: fetch run metadata as CSV ─────────────────────────────
+        # When a specific run is requested, always limit to exactly 1 run
         runs, project_uid, sra_study_id, organism = self._fetch_runinfo_csv(
-            sra_ids, max_runs
+            sra_ids, 1 if run_filter else max_runs
         )
  
         # ── Call 3: fetch project title from BioProject db ────────────────
