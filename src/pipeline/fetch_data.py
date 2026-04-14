@@ -27,20 +27,8 @@ def get_runs(email, runner, bioproject: str, srr=None, n_runs=1) -> tuple[list[s
         "efetch",
         "-format", "runinfo"
     ], es_process=esearch, env=env)
-    # result = runner.run([
-    #     "esearch",
-    #     "-db", "sra",
-    #     "-query", bioproject,
-    #     "|",
-    #     "efetch",
-    #     "-format", "runinfo"
-    # ], env=env)
-    # result = subprocess.run(
-    #     f"esearch -db sra -query {bioproject} | efetch -format runinfo",
-    #     shell=True,
-    #     capture_output=True,
-    #     text=True,
-    #     check=True )
+    
+    
     info = pd.read_csv(result)
 
     # only bioproject is specified

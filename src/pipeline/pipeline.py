@@ -19,7 +19,7 @@ def run_pipeline(bioproject: str, project_id, username: str, project_name: str, 
     runner = QiimeRunner()
 
     # get or create user
-    # user = get_or_create_user(username=username)
+    user = get_or_create_user(username=username)
 
     # fetch fastq file(s) from ncbi
     lib_layout = fetch_ncbi_data(email,
@@ -36,13 +36,13 @@ def run_pipeline(bioproject: str, project_id, username: str, project_name: str, 
     if lib_layout['paired']:
         prepocess_parse_import(runner, bioproject=bioproject, 
                                project_id=project_id, project_name=project_name, 
-                               lib_layout='paired', user={}) # TODO remove user = {}
+                               lib_layout='paired', user=user)
     
     # single ends
     if lib_layout['single']:
         prepocess_parse_import(runner, bioproject=bioproject, 
                                project_id=project_id, project_name=project_name, 
-                               lib_layout='single', user={}) # TODO remove user = {}
+                               lib_layout='single', user=user)
 
 
 def prepocess_parse_import(runner, bioproject: str, project_id, project_name: str, lib_layout: str, user: dict):
