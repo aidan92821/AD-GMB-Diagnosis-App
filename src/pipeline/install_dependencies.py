@@ -1,7 +1,6 @@
 import os
 from pathlib import Path
 import subprocess
-from qiime2_runner import QiimeRunner
 
 APP_DIR = Path(__file__).parent # gets the current directory 
 ENV_DIR = APP_DIR / "qiime_env"
@@ -71,10 +70,3 @@ def ensure_env(callback=None):
 # TODO placeholder callback function for testing
 def callback(line: str):
     print(line)
-
-
-# # test, do this in the file that calls this
-# success = ensure_env(callback)
-# print("Environment ready" if success else "Failed")
-
-

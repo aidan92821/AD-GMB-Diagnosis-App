@@ -37,8 +37,6 @@ class QiimeRunner:
             bufsize=1
         )
 
-        # output = []
-
         for line in process.stdout:
             # output.append(line)
             if callback:
@@ -46,12 +44,6 @@ class QiimeRunner:
 
         process.wait()
 
-        # # for logging
-        # return {
-        #     "success": process.returncode == 0,
-        #     "output": "".join(output),
-        #     "returncode": process.returncode
-        # }
 
     # for esearch
     def es_run(self, args: list[str], env=None):
