@@ -17,6 +17,7 @@ from src.db.repository import (
     get_project,
     get_run,
     get_run_by_srr,
+    list_projects_for_user,
     list_runs_for_project,
     create_genus_bulk,
     get_genus_for_run,
@@ -30,7 +31,12 @@ from src.db.repository import (
     get_alpha_diversity_for_run,
     create_beta_diversity as repo_create_beta_diversity,
     get_beta_diversity,
+    update_run_risk,
     RepositoryError,
+    NotFoundError,
+    hash_password,
+    verify_password,
+    username_exists,
 )
 
 
@@ -57,6 +63,32 @@ def get_or_create_user(username: str) -> dict:
     finally:
         session.close()
 
+def register_user(username: str, password: str) -> dict:
+    session = SessionLocal()
+    try:
+        if username_exists(session, username):
+            raise ServiceError(f"Username {username!r} is already taken")
+        hashed = hash_password(password)
+        user = repo_create_user(session, username=username, password_hash=hashed)
+        session.commit()
+        return {"user_id": user.user_id, "username": user.username}
+    except RepositoryError as e:
+        session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+def login_user(username: str, password: str) -> dict:
+    session = SessionLocal()
+    try:
+        user = get_user_by_username(session, username)
+        if not verify_password(password, user.password_hash):
+            raise ServiceError("Incorrect password")
+        return {"user_id": user.user_id, "username": user.username}
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
 
 # ==== Project & Run setup ====
 def create_project(user_id: int, name: str) -> dict:
@@ -419,6 +451,7 @@ def compute_risk(
     """
     session = SessionLocal()
     try:
+        run = get_run(session, run_id)
         genera = get_genus_for_run(session, run_id)
         if not genera:
             raise ServiceError(
@@ -431,15 +464,130 @@ def compute_risk(
 
         result = model_fn(taxa)
         risk_probability = float(result["risk_probability"])
+        risk_label = _risk_label(risk_probability)
+        confidence = float(result.get("confidence", 0.0))
+
+        update_run_risk(session, run=run, risk_score=risk_probability, risk_label=risk_label, confidence=confidence)
+        session.commit()
 
         return {
             "run_id": run_id,
             "risk_probability": risk_probability,
-            "risk_label": _risk_label(risk_probability),
-            "confidence": float(result.get("confidence", 0.0)),
+            "risk_label": risk_label,
+            "confidence": confidence,
             "biomarkers": result.get("biomarkers", {}),
         }
     except RepositoryError as e:
+        session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+# ==== User project history ====
+def list_user_projects(user_id: int) -> list[dict]:
+    """
+    Return all projects for a user with run summaries, newest first.
+    Each project dict includes a 'runs' list with risk scores.
+    """
+    session = SessionLocal()
+    try:
+        projects = list_projects_for_user(session, user_id)
+        result = []
+        for p in projects:
+            runs = list_runs_for_project(session, p.project_id)
+            result.append({
+                "project_id": p.project_id,
+                "name": p.name,
+                "created_at": p.created_at.isoformat() if p.created_at else None,
+                "run_count": len(runs),
+                "runs": [
+                    {
+                        "run_id":             r.run_id,
+                        "srr_accession":      r.srr_accession,
+                        "bio_proj_accession": r.bio_proj_accession,
+                        "risk_label":         r.risk_label,
+                        "risk_score":         r.risk_score,
+                        "created_at":         r.created_at.isoformat() if r.created_at else None,
+                    }
+                    for r in runs
+                ],
+            })
+        return result
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+def save_ncbi_project(
+        user_id: int,
+        bio_proj_accession: str,
+        title: str,
+        runs: list[dict],   # [{"accession": str, "layout": str}, ...]
+) -> dict:
+    """
+    Persist an NCBI fetch result to the database.
+
+    Creates a new project under the user and inserts run rows for each SRR
+    accession, skipping any that are already in the database (unique constraint
+    on srr_accession).  Safe to call multiple times for the same project.
+    """
+    session = SessionLocal()
+    try:
+        user = get_user(session, user_id)
+        project = repo_create_project(session, user=user, name=title or bio_proj_accession)
+        session.flush()
+
+        for run in runs:
+            srr = run.get("accession", "").strip()
+            if not srr:
+                continue
+            # Skip runs already registered (unique constraint on srr_accession)
+            try:
+                get_run_by_srr(session, srr)
+                continue          # already exists — skip
+            except NotFoundError:
+                pass              # not found — safe to insert
+
+            repo_create_run(
+                session,
+                project=project,
+                source="ncbi",
+                srr_accession=srr,
+                bio_proj_accession=bio_proj_accession,
+                library_layout=run.get("layout"),
+            )
+
+        session.commit()
+        return {
+            "project_id": project.project_id,
+            "user_id":    project.user_id,
+            "name":       project.name,
+            "created_at": project.created_at.isoformat() if project.created_at else None,
+        }
+    except RepositoryError as e:
+        session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+def delete_project(project_id: int) -> None:
+    """
+    Permanently delete a project and all its runs, genus data, features,
+    trees, and diversity records (cascade delete via ORM).
+    """
+    from src.db.db_models import Project
+    session = SessionLocal()
+    try:
+        proj = session.get(Project, project_id)
+        if proj is None:
+            return   # already gone — treat as success
+        session.delete(proj)
+        session.commit()
+    except Exception as e:
+        session.rollback()
         raise ServiceError(str(e)) from e
     finally:
         session.close()

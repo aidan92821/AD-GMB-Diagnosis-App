@@ -59,12 +59,7 @@ def prepocess_parse_import(runner, bioproject: str, project_id, project_name: st
     feature_seqs = parse_feat_tax_seqs(tax=f"{data_dir}/qiime/{lib_layout}/taxonomy.tsv",
                         seqs=f"{data_dir}/reps-tree/{lib_layout}/dna-sequences.fasta")
     feature_counts = parse_feature_counts(feat=f"{data_dir}/qiime/{lib_layout}/feature-table.tsv")
-
-    if abundances is not None and \
-       feature_counts is not None and \
-       feature_seqs is not None:
-        print("YAY IT WORKED!!!! :D")
-
+    
     # import to database
     # if project does not exist, make one and add runs
     if project_id is None:

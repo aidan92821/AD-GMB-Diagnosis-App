@@ -26,6 +26,7 @@ class User(Base):
 
     user_id  = Column(Integer, primary_key=True)
     username = Column(String(64), nullable=False, unique=True)
+    password_hash = Column(String(256), nullable=False)
     created_at = Column(DateTime(timezone=True), default=utcnow)
 
     # One user owns many projects. Deleting a user deletes all their projects.
@@ -60,6 +61,9 @@ class Run(Base):
     library_layout     = Column(String(32))   # e.g. PAIRED, SINGLE
     source             = Column(String(16), nullable=False)  # "upload" or "ncbi"
     created_at         = Column(DateTime(timezone=True), default=utcnow)
+    risk_score         = Column(Float)       # 0-100
+    risk_label         = Column(String(32))  # "Low", "Moderate", "High"
+    confidence         = Column(Float)       # 0-100
 
     project           = relationship("Project", back_populates="runs")
     genus_data        = relationship("Genus",         back_populates="run", cascade="all, delete-orphan")
