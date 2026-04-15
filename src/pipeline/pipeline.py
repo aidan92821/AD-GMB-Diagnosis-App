@@ -10,16 +10,13 @@ from services.assessment_service import create_project, create_run, ingest_run_d
 from qiime2_runner import QiimeRunner
 
 # get email from user -> db -> retrieve from db to use as argument here
-def run_pipeline(bioproject: str, project_id, username: str, project_name: str, email, srr : str=None, n_runs=1):
+def run_fetch(bioproject: str, email: str, srr: str=None, n_runs=1):
 
     CLASSIFIER = 'silva-138-99-nb-classifier.qza'
     SOURCE = 'https://data.qiime2.org/classifiers/sklearn-1.4.2/silva'
     
     # ensures exact environment is used
     runner = QiimeRunner()
-
-    # get or create user
-    user = get_or_create_user(username=username)
 
     # fetch fastq file(s) from ncbi
     lib_layout = fetch_ncbi_data(email,
@@ -32,20 +29,10 @@ def run_pipeline(bioproject: str, project_id, username: str, project_name: str, 
     if CLASSIFIER not in os.listdir('taxa_classifier'):
         download_classifier(classifier_url=f"{SOURCE}/{CLASSIFIER}")
 
-    # paired ends
-    if lib_layout['paired']:
-        prepocess_parse_import(runner, bioproject=bioproject, 
-                               project_id=project_id, project_name=project_name, 
-                               lib_layout='paired', user=user)
-    
-    # single ends
-    if lib_layout['single']:
-        prepocess_parse_import(runner, bioproject=bioproject, 
-                               project_id=project_id, project_name=project_name, 
-                               lib_layout='single', user=user)
+    return lib_layout # to _on_fetch_request() in main_window.py
 
 
-def prepocess_parse_import(runner, bioproject: str, project_id, project_name: str, lib_layout: str, user: dict):
+def prepocess_parse_import(runner: QiimeRunner, bioproject: str, lib_layout: str, user: dict, project_id, project_name: str=None) -> None:
     
     data_dir = f"data/{bioproject}/"
     
@@ -60,7 +47,6 @@ def prepocess_parse_import(runner, bioproject: str, project_id, project_name: st
                         seqs=f"{data_dir}/reps-tree/{lib_layout}/dna-sequences.fasta")
     feature_counts = parse_feature_counts(feat=f"{data_dir}/qiime/{lib_layout}/feature-table.tsv")
     
-    # import to database
     # if project does not exist, make one and add runs
     if project_id is None:
         project = create_project(user_id=user['user_id'], name=project_name)

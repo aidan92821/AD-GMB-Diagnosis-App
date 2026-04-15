@@ -1,16 +1,19 @@
+from __future__ import annotations
 import csv
 import pandas as pd
 from pathlib import Path
+from typing import TYPE_CHECKING
 import os
 import shutil
 
-
+if TYPE_CHECKING:
+    from models.app_state import AppState
 
 # make sure that in the UI, user knows they can only download max 4 runs at a time
 # this function downloads one run at a time if the run is specified
 # it can download up to 4 runs at a time if no run is specified
 # returns two lists of strings: paired end runs and single end runs (SRR Accessions)
-def get_runs(email, runner, bioproject: str, srr=None, n_runs=1) -> tuple[list[str], list[str]]:
+def fetch_runs(email, runner, bioproject: str, srr=None, n_runs=1) -> tuple[list[str], list[str], dict]:
 
     env = os.environ.copy()
     env.update({
@@ -45,13 +48,50 @@ def get_runs(email, runner, bioproject: str, srr=None, n_runs=1) -> tuple[list[s
     # determine paired or single end
     paired_runs = info.loc[info['LibraryLayout'] == 'PAIRED', 'Run'].tolist()
     single_runs = info.loc[info['LibraryLayout'] == 'SINGLE', 'Run'].tolist()
+
+    # get the run record (using a dict instead of RunRecord class)
+    runs: list[dict] = []
+    for _, row in info.iterrows():
+        layout = str(row.get("LibraryLayout", "")).upper()
+        if layout not in {"PAIRED", "SINGLE"}:
+            layout = "PAIRED"
+
+        runs.append({
+            'run_accession'    : row.get("Run", ""),
+            'read_count'       : int(row.get("spots", 0)),
+            'base_count'       : int(row.get("bases", 0)),
+            'library_layout'   : layout,
+            'library_strategy' : row.get("LibraryStrategy", ""),
+            'platform'         : row.get("Platform", ""),
+            'instrument'       : row.get("Model", ""),
+            'sample_accession' : row.get("BioSample", ""),
+            'organism'         : row.get("ScientificName", ""),
+            'uploaded'         : False
+        })
     
-    return paired_runs, single_runs
+    # get project meta data
+    first       = info.iloc[0]
+    project_uid = str(first.get("ProjectID", "")).strip()
+    sra_study   = str(first.get("SRAStudy", "")).strip()
+    organism    = str(first.get("ScientificName", "")).strip()
+
+    # get the project record (using a dict instead of ProjectRecord class)
+    project = {
+        'bioproject_id' : bioproject,
+        'project_uid'   : project_uid,
+        'sra_study_id'  : sra_study,
+        'title'         : f"{bioproject}",
+        'description'   : "",
+        'organism'      : organism,
+        'runs'          : runs,
+    }
+
+    return paired_runs, single_runs, project
 
 
 # lib_layout = 'paired' or 'single'
 # runs = list of SRR Accessions
-def fetch_runs(runner, bioproject: str, lib_layout: str, runs: list[str]):
+def download_runs(runner, bioproject: str, lib_layout: str, runs: list[str], state: AppState) -> AppState:
     
     # create temporary directory for fetching
     APP_DIR = Path(__file__).parent
@@ -71,21 +111,17 @@ def fetch_runs(runner, bioproject: str, lib_layout: str, runs: list[str]):
             "--threads", cores,
             "--outdir", output_dir_fastq
         ])
-        
+
+    return state   
 
 
 # lib_layout = 'paired' or 'single'
-def write_manifest(bioproject: str, lib_layout: str):
-
-    APP_DIR = Path(__file__).parent
+def write_manifest(bioproject: str, lib_layout: str, state: AppState) -> None:
     
     input_dir = f"data/{bioproject}/fastq/{lib_layout}"
     output_dir = f"data/{bioproject}/qiime/{lib_layout}"
     
-    # input_dir = str((APP_DIR / f"data/{bioproject}/fastq/{lib_layout}").resolve())
-
     # # create the temporary qiime directory
-    # output_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     # organize fastq types
@@ -108,6 +144,7 @@ def write_manifest(bioproject: str, lib_layout: str):
                                  'forward-absolute-filepath', 
                                  'reverse-absolute-filepath'])
                 for f, r in zip(forward, reverse):
+                    state.runs[f[:-8]]['uploaded'] = True
                     writer.writerow([f"{f[:-8]}", 
                                      Path(f"{input_dir}/{f}").resolve(), 
                                      Path(f"{input_dir}/{r}").resolve()]) # -8 removes _#.fastq chars and keeps srr accession only
@@ -116,6 +153,7 @@ def write_manifest(bioproject: str, lib_layout: str):
                 writer.writerow(['sample-id', 
                                  'absolute-filepath'])
                 for s in files:
+                    state.runs[s[:-6]]['uploaded'] = True
                     writer.writerow([f"{s[:-6]}", 
                                      Path(f"{input_dir}/{s}").resolve()]) # -6 removes .fastq chars and keeps srr accession only
 
@@ -128,35 +166,40 @@ def cleanup(bioproject):
     shutil.rmtree(Path("data") / bioproject / "qiime")
 
 
-def fetch_ncbi_data(email, runner, bioproject: str, srr=None, n_runs=1) -> dict[str: bool]:
+'''DEPRECATED'''
+def fetch_ncbi_data(email, runner, bioproject: str, state: AppState, srr=None, n_runs=1) -> dict[str: bool]:
 
     lib_layout = {
         'paired': False,
         'single': False,
     }
 
-    paired_runs, single_runs = get_runs(email,
-                                        runner,
-                                        bioproject=bioproject,
-                                        srr=srr,
-                                        n_runs=n_runs)
+    paired_runs, single_runs, project = fetch_runs(email,
+                                                   runner,
+                                                   bioproject=bioproject,
+                                                   srr=srr,
+                                                   n_runs=n_runs)
     
     if paired_runs:
-        fetch_runs(runner,
-                   bioproject=bioproject,
-                   lib_layout='paired',
-                   runs=paired_runs)
+        state = download_runs(runner,
+                              bioproject=bioproject,
+                              lib_layout='paired',
+                              runs=paired_runs,
+                              state=state)
         write_manifest(bioproject=bioproject,
-                       lib_layout='paired')
+                       lib_layout='paired',
+                       state=state)
         lib_layout['paired'] = True
     
     if single_runs:
-        fetch_runs(runner,
-                   bioproject=bioproject,
-                   lib_layout='single',
-                   runs=single_runs)
+        state = download_runs(runner,
+                              bioproject=bioproject,
+                              lib_layout='single',
+                              runs=single_runs,
+                              state=state)
         write_manifest(bioproject=bioproject,
-                       lib_layout='single')
+                       lib_layout='single',
+                       state=state)
         lib_layout['single'] = True
         
     return lib_layout

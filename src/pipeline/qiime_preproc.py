@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from qc import get_trunc
+from src.pipeline.qc import get_trunc
 import urllib.request
 
 
