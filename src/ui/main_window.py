@@ -209,6 +209,18 @@ class _ParseWorkerReal(QObject):
         except Exception as exc:
             self.errored.emit(str(exc))
 
+class _AnalysisWorkerReal(QObject):
+    finished = pyqtSignal(object)   # emits updated AppState
+    errored  = pyqtSignal(str)
+    progress = pyqtSignal(str)      # status message
+
+    def __init__(self, state: AppState) -> None:
+        super().__init__()
+        self._state = state
+
+    def run(self):
+        pass
+
 # ── Worker 1: NCBI fetch ──────────────────────────────────────────────────────
 
 class _FetchWorker(QObject):
@@ -1459,7 +1471,9 @@ class MainWindow(QMainWindow):
         self._status_badge.style().polish(self._status_badge)
         self._overview_page.load(state)
         self._broadcast_state()
+        
         # hand it off to run analysis
+        self._run_analysis()
 
     def _on_parsing_error(self, msg: str):
         self._upload_page.show_pipeline_error(msg)
