@@ -22,6 +22,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QThread, QObject, pyqtSignal
 
+from src.services.assessment_service import ServiceError
+
 from resources.styles import (
     APP_QSS, SB_BG, SB_SECTION, WHITE, BG_PAGE, BG_CARD, BORDER, TEXT_H, TEXT_M,
     ACCENT,
@@ -43,7 +45,7 @@ from src.pipeline.db_import import (parse_feat_tax_seqs, parse_feature_counts,
 
 from src.services.assessment_service import (save_ncbi_project, create_project, 
                                              get_project_overview,create_run, 
-                                             ingest_run_data)
+                                             ingest_run_data, get_run_id_by_srr)
 
 # ── Sidebar nav ───────────────────────────────────────────────────────────────
 
@@ -178,9 +180,12 @@ class _ParseWorkerReal(QObject):
                 project = create_project(user_id=self._user['user_id'], name=self._state.bioproject_id)
 
                 for run, row in abundances.items():
-                    db_run = create_run(project_id=project['project_id'], source='ncbi', srr_accession=run,
-                                        bio_proj_accession=self._state.bioproject_id, library_layout='paired')
-                    ingest_run_data(run_id=db_run['run_id'], genus_rows=row, features=feature_seqs, feature_counts=feature_counts)
+                    try:
+                        _ = get_run_id_by_srr(run)
+                    except ServiceError:
+                        db_run = create_run(project_id=project['project_id'], source='ncbi', srr_accession=run,
+                                            bio_proj_accession=self._state.bioproject_id, library_layout='paired')
+                        ingest_run_data(run_id=db_run['run_id'], genus_rows=row, features=feature_seqs, feature_counts=feature_counts)
             
             # parse the single end tables
             if self._state.single_runs:
@@ -193,9 +198,12 @@ class _ParseWorkerReal(QObject):
                 project = create_project(user_id=self._user['user_id'], name=self._state.bioproject_id)
 
                 for run, row in abundances.items():
-                    db_run = create_run(project_id=project['project_id'], source='ncbi', srr_accession=run,
-                                        bio_proj_accession=self._state.bioproject_id, library_layout='single')
-                    ingest_run_data(run_id=db_run['run_id'], genus_rows=row, features=feature_seqs, feature_counts=feature_counts)
+                    try:
+                        _ = get_run_id_by_srr(run)
+                    except ServiceError:
+                        db_run = create_run(project_id=project['project_id'], source='ncbi', srr_accession=run,
+                                            bio_proj_accession=self._state.bioproject_id, library_layout='single')
+                        ingest_run_data(run_id=db_run['run_id'], genus_rows=row, features=feature_seqs, feature_counts=feature_counts)
             
             self.finished.emit(self._state)
         except Exception as exc:
