@@ -57,7 +57,6 @@ def create_env(callback=None):
 
     if success:
         (ENV_DIR / ".installed").touch()
-        callback("environment requirements satisfied")
 
     return success
 
@@ -66,6 +65,7 @@ def ensure_env(callback=None):
     if not env_exists():
         callback("setting up environment")
         return create_env(callback)
+    callback("environment requirements satisfied")
     return True
 
 
