@@ -38,7 +38,6 @@ class AppState:
     project_uid:    str = ""           # SRA study ID, e.g. SRP296181
     title:          str = ""
     organism:       str = ""
-    parsed:       dict = field(default_factory=dict) # holds the parsed genus abundance table, feature counts, and feature sequences
     single_runs:  list = field(default_factory=list) # holds the current single end SRRs to download
     paired_runs:  list = field(default_factory=list) # holds the current paired end SRRs to download
     run_count:      int = 0

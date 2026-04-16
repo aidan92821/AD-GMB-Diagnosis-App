@@ -35,10 +35,15 @@ from ui.export_page import ExportPage
 from ui.auth_page import AuthPage
 from ui.profile_page import ProfilePage
 
+from src.pipeline.qiime2_runner import QiimeRunner
 from src.pipeline.qiime_preproc import download_classifier, qiime_preprocess
 from src.pipeline.fetch_data import fetch_runs, download_runs, write_manifest
-from src.pipeline.db_import import parse_feat_tax_seqs, parse_feature_counts, parse_genus_table
-from src.pipeline.qiime2_runner import QiimeRunner
+from src.pipeline.db_import import (parse_feat_tax_seqs, parse_feature_counts,
+                                    parse_genus_table)
+
+from src.services.assessment_service import (save_ncbi_project, create_project, 
+                                             get_project_overview,create_run, 
+                                             ingest_run_data)
 
 # ── Sidebar nav ───────────────────────────────────────────────────────────────
 
@@ -154,16 +159,14 @@ class _ParseWorkerReal(QObject):
     errored  = pyqtSignal(str)
     progress = pyqtSignal(str)
 
-    def __init__(self, bioproject: str, state: AppState):
+    def __init__(self, bioproject: str, state: AppState, user):
         super().__init__()
         self._data_dir = str((Path(__file__).parent.parent / f"pipeline/data/{bioproject}").resolve())
         self._state = state
+        self._user = user
 
     def run(self):
-        try:
-            # keep the parsed data in state
-            self._state.parsed = {}
-            
+        try:            
             # parse the paired end tables
             if self._state.paired_runs:
                 abundances     = parse_genus_table(genus=f"{self._data_dir}/qiime/paired/genus-table.tsv")
@@ -171,7 +174,13 @@ class _ParseWorkerReal(QObject):
                                                    seqs=f"{self._data_dir}/reps-tree/paired/dna-sequences.fasta")
                 feature_counts = parse_feature_counts(feat=f"{self._data_dir}/qiime/paired/feature-table.tsv")
                 
-                self._state.parsed['paired'] = [abundances, feature_seqs, feature_counts]
+                # TODO: allow for project retrieval if just getting more runs for the current project
+                project = create_project(user_id=self._user['user_id'], name=self._state.bioproject_id)
+
+                for run, row in abundances.items():
+                    db_run = create_run(project_id=project['project_id'], source='ncbi', srr_accession=run,
+                                        bio_proj_accession=self._state.bioproject_id, library_layout='paired')
+                    ingest_run_data(run_id=db_run['run_id'], genus_rows=row, features=feature_seqs, feature_counts=feature_counts)
             
             # parse the single end tables
             if self._state.single_runs:
@@ -180,7 +189,13 @@ class _ParseWorkerReal(QObject):
                                                    seqs=f"{self._data_dir}/reps-tree/single/dna-sequences.fasta")
                 feature_counts = parse_feature_counts(feat=f"{self._data_dir}/qiime/single/feature-table.tsv")
                 
-                self._state.parsed['single'] = [abundances, feature_seqs, feature_counts]
+                # TODO: allow for project retrieval if just getting more runs for the current project
+                project = create_project(user_id=self._user['user_id'], name=self._state.bioproject_id)
+
+                for run, row in abundances.items():
+                    db_run = create_run(project_id=project['project_id'], source='ncbi', srr_accession=run,
+                                        bio_proj_accession=self._state.bioproject_id, library_layout='single')
+                    ingest_run_data(run_id=db_run['run_id'], genus_rows=row, features=feature_seqs, feature_counts=feature_counts)
             
             self.finished.emit(self._state)
         except Exception as exc:
@@ -1129,7 +1144,6 @@ class MainWindow(QMainWindow):
         # Persist project to DB so it appears on the profile page
         if self._current_user:
             try:
-                from services.assessment_service import save_ncbi_project
                 save_ncbi_project(
                     user_id            = self._current_user["user_id"],
                     bio_proj_accession = state.bioproject_id,
@@ -1395,7 +1409,7 @@ class MainWindow(QMainWindow):
         self._overview_page.load(state)
         self._broadcast_state()
 
-        self._run_parsing(self._state)
+        self._run_parsing()
 
     def _on_pipeline_error(self, msg: str) -> None:
         # Translate common internal errors into friendlier messages
@@ -1410,7 +1424,7 @@ class MainWindow(QMainWindow):
         self._status_badge.setText("Pipeline error — running in-app analysis…")
         self._run_analysis()
 
-    def _run_parsing(self, state: AppState) -> None:
+    def _run_parsing(self) -> None:
         self._status_badge.setText(
             "Parsing and saving to database..."
         )
@@ -1420,7 +1434,7 @@ class MainWindow(QMainWindow):
         self._status_badge.show()
 
         self._parsing_thread_real = QThread(self)
-        self._parsing_worker_real = _ParseWorkerReal(bioproject=self._state.bioproject_id, state=self._state)
+        self._parsing_worker_real = _ParseWorkerReal(bioproject=self._state.bioproject_id, state=self._state, user=self._current_user)
         self._parsing_worker_real.moveToThread(self._parsing_thread_real)
         self._parsing_thread_real.started.connect(self._parsing_worker_real.run)
         self._parsing_worker_real.progress.connect(self._on_analysis_progress)
