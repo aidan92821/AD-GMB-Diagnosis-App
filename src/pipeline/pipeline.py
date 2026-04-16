@@ -32,7 +32,7 @@ def run_fetch(bioproject: str, email: str, srr: str=None, n_runs=1):
     return lib_layout # to _on_fetch_request() in main_window.py
 
 
-def prepocess_parse_import(runner: QiimeRunner, bioproject: str, lib_layout: str, user: dict, project_id, project_name: str=None) -> None:
+def preprocess_parse_import(runner: QiimeRunner, bioproject: str, lib_layout: str, user: dict, project_id, project_name: str=None) -> None:
     
     data_dir = f"data/{bioproject}/"
     

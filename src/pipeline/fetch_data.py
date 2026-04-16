@@ -51,13 +51,14 @@ def fetch_runs(email, runner, bioproject: str, srr=None, n_runs=1) -> tuple[list
 
     # get the run record (using a dict instead of RunRecord class)
     runs: list[dict] = []
-    for _, row in info.iterrows():
+    for i, (_, row) in enumerate(info.iterrows(), start=1):
         layout = str(row.get("LibraryLayout", "")).upper()
         if layout not in {"PAIRED", "SINGLE"}:
             layout = "PAIRED"
 
         runs.append({
             'run_accession'    : row.get("Run", ""),
+            'label'            : f"R{i}",
             'read_count'       : int(row.get("spots", 0)),
             'base_count'       : int(row.get("bases", 0)),
             'library_layout'   : layout,

@@ -71,7 +71,7 @@ def _info_banner(msg: str, kind: str = "info") -> QFrame:
 # ═════════════════════════════════════════════════════════════════════════════
 
 class OverviewPage(QWidget):
-    fetch_requested = pyqtSignal(str, str, int)
+    fetch_requested = pyqtSignal(str, str, int, str, object)
 
     _BP_RE  = __import__("re").compile(r"^PRJ(NA|EA|DA|EB|DB|NB)\d+$",
                                         __import__("re").IGNORECASE)
@@ -214,6 +214,8 @@ class OverviewPage(QWidget):
         bp  = self._bp_input.text().strip()
         run = self._run_input.text().strip()
         n   = int(self._run_count.currentText())
+        email = 'emmanicolego@gmail.com'
+        user = None
         self._fetch_btn.setEnabled(False)
         self._fetch_btn.setText("  ⟳  Fetching…")
         self._bp_input.setEnabled(False)
@@ -226,7 +228,7 @@ class OverviewPage(QWidget):
             "background:#EEF2FF; border:1px solid #C7D2FE; border-radius:6px;")
         self._status_lbl.setStyleSheet("font-size:12px; color:#4338CA;")
         self._status_bar.show()
-        self.fetch_requested.emit(bp, run, n)
+        self.fetch_requested.emit(bp, run, n, email, user)
 
     # ── called by MainWindow ──────────────────────────────────────────────────
 
@@ -274,7 +276,7 @@ class OverviewPage(QWidget):
         asv_sub   = "unique sequences"      if state.asv_count else "upload FASTQ to compute"
         genus_sub = "bacterial genera"      if state.genus_count else "upload FASTQ to compute"
         for value, label, sub in [
-            (state.project_id or state.bioproject_id, "Project ID",    ""),
+            (state.project_uid or state.bioproject_id, "Project ID",    ""),
             (state.bioproject_id,                     "BioProject ID", "NCBI accession"),
             (str(state.run_count),                    "Runs",          "  ".join(state.run_labels)),
             (asv_val,                                 "ASVs",          asv_sub),

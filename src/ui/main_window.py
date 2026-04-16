@@ -94,10 +94,10 @@ class _DownloadWorkerReal(QObject):
         try:
             # download the single runs + write the manifest file
             download_runs(runner=self._runner, bioproject=self._state.bioproject_id, lib_layout='single', runs=self._state.single_runs)
-            write_manifest(self._state.bioproject_id, lib_layout='single')
+            write_manifest(self._state.bioproject_id, lib_layout='single', state=self._state)
             # download the paired runs + write the manifest file
             download_runs(runner=self._runner, bioproject=self._state.bioproject_id, lib_layout='paired', runs=self._state.paired_runs)
-            write_manifest(self._state.bioproject_id, lib_layout='paired')
+            write_manifest(self._state.bioproject_id, lib_layout='paired', state=self._state)
             
             self.finished.emit(self._state)
         except Exception as exc:
@@ -1067,7 +1067,6 @@ class MainWindow(QMainWindow):
         # emma changes
         self._fetch_real_thread = QThread(self)
         self._fetch_real_worker = _FetchWorkerReal(bioproject=bioproject,
-                                                   username=username,
                                                    email=email,
                                                    runner=self._runner,
                                                    srr=run_accession,
@@ -1103,7 +1102,7 @@ class MainWindow(QMainWindow):
             paired_runs   = paired_runs,
             run_count     = len(single_runs) + len(paired_runs)
         )
-        state.runs = {}
+
         for run in project_dict.get("runs", []):
             state.runs[run['run_accession']] = run
             # state.runs.append(RunState(
@@ -1136,8 +1135,8 @@ class MainWindow(QMainWindow):
 
         # Update topbar
         self._topbar_title.setText(f"{state.bioproject_id}")
-        n = state.run_count
-        self._runs_badge.setText(f"{n} run{'s' if n != 1 else ''} loaded")
+        state.run_count = len(state.runs)
+        self._runs_badge.setText(f"{state.run_count} run{'s' if state.run_count != 1 else ''} loaded")
         self._runs_badge.show()
         self._status_badge.setText("Computing analysis…")
 
@@ -1184,12 +1183,7 @@ class MainWindow(QMainWindow):
         """All (or some) runs downloaded — auto-populate Upload page, then run analysis."""
         self._state = state
         # get number of successfully downloaded runs as fastq files
-        uploaded = sum(
-            2 if run['uploaded'] and run['library_layout'] == 'PAIRED'
-            else 1 if run['uploaded'] and run['library_layout'] == 'SINGLE'
-            else 0
-            for run in state.runs.values()
-        )
+        uploaded = self._state.uploaded_count
 
         self._runs_badge.setText(
             f"{state.run_count} run{'s' if state.run_count != 1 else ''} loaded  ·  "
@@ -1403,7 +1397,7 @@ class MainWindow(QMainWindow):
     def _on_load_project(self, bio_proj_accession: str) -> None:
         """Re-fetch a past project from NCBI and navigate to Overview."""
         self._switch_page(0)
-        self._on_fetch_requested(bio_proj_accession, "", 5)
+        self._on_fetch_requested(bioproject=bio_proj_accession, srr="", max_runs=5, email='emmanicolego@gmail.com', username=self._current_user['user_id'])
 
     def _on_delete_project(self, project_id: int) -> None:
         """Delete a project from the DB and refresh the profile page."""
