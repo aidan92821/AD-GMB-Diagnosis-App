@@ -14,6 +14,8 @@ Start-up flow:
 from __future__ import annotations
 import os
 
+from pathlib import Path
+
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QFrame, QLabel, QHBoxLayout, QVBoxLayout,
     QStackedWidget, QScrollArea, QPushButton, QSizePolicy,
@@ -84,6 +86,7 @@ class _FetchWorkerReal(QObject):
 class _DownloadWorkerReal(QObject):
     finished = pyqtSignal(object)   # emits updated AppState
     errored  = pyqtSignal(str)
+    progress = pyqtSignal(str)
 
     def __init__(self, state: AppState, runner: QiimeRunner) -> None:
         super().__init__()
@@ -93,15 +96,16 @@ class _DownloadWorkerReal(QObject):
     def run(self):
         try:
             # download the single runs + write the manifest file
-            download_runs(runner=self._runner, bioproject=self._state.bioproject_id, lib_layout='single', runs=self._state.single_runs)
+            download_runs(runner=self._runner, bioproject=self._state.bioproject_id, lib_layout='single', runs=self._state.single_runs, state=self._state)
             write_manifest(self._state.bioproject_id, lib_layout='single', state=self._state)
             # download the paired runs + write the manifest file
-            download_runs(runner=self._runner, bioproject=self._state.bioproject_id, lib_layout='paired', runs=self._state.paired_runs)
+            download_runs(runner=self._runner, bioproject=self._state.bioproject_id, lib_layout='paired', runs=self._state.paired_runs, state=self._state)
             write_manifest(self._state.bioproject_id, lib_layout='paired', state=self._state)
             
             self.finished.emit(self._state)
         except Exception as exc:
             self.errored.emit(str(exc))
+            print(exc)
 
 
 class _PipelineWorkerReal(QObject):
@@ -110,30 +114,34 @@ class _PipelineWorkerReal(QObject):
     '''
     finished = pyqtSignal(object)   # emits updated AppState
     errored  = pyqtSignal(str)
+    progress = pyqtSignal(str)
 
-    def __init__(self, runner: QiimeRunner, bioproject: str, state: AppState, srr: str=None, n_runs=1) -> None:
+    def __init__(self, runner: QiimeRunner, bioproject: str, state: AppState) -> None:
         super().__init__()
         self._state = state
         self._bioproject = bioproject
         self._runner = runner
-        self._srr = srr
-        self._n_runs = n_runs
+        self.APP_DIR = Path(__file__).parent.parent
+        self.QIIME_DIR = self.APP_DIR / f"pipeline/data/{self._bioproject}/qiime/"
+        CLF_DIR = self.APP_DIR / f"pipeline/taxa_classifier"
         CLASSIFIER = 'silva-138-99-nb-classifier.qza'
         SOURCE = 'https://data.qiime2.org/classifiers/sklearn-1.4.2/silva'
         
         # get the classifier for annotating taxa
-        if CLASSIFIER not in os.listdir('taxa_classifier'):
+        if CLASSIFIER not in os.listdir(str(CLF_DIR)):
             download_classifier(classifier_url=f"{SOURCE}/{CLASSIFIER}")
     
     def run(self):
         try:
             # preprocess the paired end fastq files
             if self._state.paired_runs:
-                qiime_preprocess(runner=self._runner, bioproject=self._bioproject, lib_layout='paired')
+                if "demux.qza" not in os.listdir(str(self.QIIME_DIR / "single")):
+                    qiime_preprocess(runner=self._runner, bioproject=self._bioproject, lib_layout='paired')
             
             # preprocess the single end fastq files
             if self._state.single_runs:
-                qiime_preprocess(runner=self._runner, bioproject=self._bioproject, lib_layout='single')
+                if "demux.qza" not in os.listdir(str(self.QIIME_DIR / "paired")):
+                    qiime_preprocess(runner=self._runner, bioproject=self._bioproject, lib_layout='single')
             
             self.finished.emit(self._state)
         except Exception as exc:
@@ -142,11 +150,13 @@ class _PipelineWorkerReal(QObject):
 
 class _ParseWorkerReal(QObject):
 
-    finished = pyqtSignal(object)   # emits TODO
+    finished = pyqtSignal(object) # emits updated AppState
     errored  = pyqtSignal(str)
+    progress = pyqtSignal(str)
 
     def __init__(self, bioproject: str, state: AppState):
-        self._data_dir = f"data/{bioproject}"
+        super().__init__()
+        self._data_dir = str((Path(__file__).parent.parent / f"pipeline/data/{bioproject}").resolve())
         self._state = state
 
     def run(self):
@@ -172,7 +182,7 @@ class _ParseWorkerReal(QObject):
                 
                 self._state.parsed['single'] = [abundances, feature_seqs, feature_counts]
             
-            self.finished.emit(self._state) # TODO emits
+            self.finished.emit(self._state)
         except Exception as exc:
             self.errored.emit(str(exc))
 
@@ -1125,7 +1135,7 @@ class MainWindow(QMainWindow):
                     bio_proj_accession = state.bioproject_id,
                     title              = state.title or state.bioproject_id,
                     runs               = [
-                        {"accession": accession, "layout": run_dict['layout']}
+                        {"accession": accession, "layout": run_dict['library_layout']}
                         for accession, run_dict in state.runs.items()
                     ],
                 )
@@ -1138,7 +1148,7 @@ class MainWindow(QMainWindow):
         state.run_count = len(state.runs)
         self._runs_badge.setText(f"{state.run_count} run{'s' if state.run_count != 1 else ''} loaded")
         self._runs_badge.show()
-        self._status_badge.setText("Computing analysis…")
+        # self._status_badge.setText("Computing analysis…")
 
         self._overview_page.load(state)
         self._broadcast_state()
@@ -1189,8 +1199,10 @@ class MainWindow(QMainWindow):
             f"{state.run_count} run{'s' if state.run_count != 1 else ''} loaded  ·  "
             f"{uploaded} FASTQ downloaded"
         )
-        self._status_badge.setText("Computing analysis…")
-
+        self._status_badge.setText("Ready to run QIIME preprocessing")
+        self._status_badge.setObjectName("badge_green")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
         # Auto-populate Upload Runs page with the downloaded files
         self._upload_page.auto_mark_uploaded(state)
 
@@ -1202,7 +1214,8 @@ class MainWindow(QMainWindow):
                 callback=self._on_run_pipeline,
             )
 
-        self._run_analysis()
+        # TODO put in correct spot in flow
+        # self._run_analysis()
 
     def _on_download_error(self, msg: str) -> None:
         """
@@ -1353,7 +1366,9 @@ class MainWindow(QMainWindow):
 
         # emma changes
         self._pipeline_thread_real = QThread(self)
-        self._pipeline_worker_real = _PipelineWorkerReal(self._state, n_runs=self._state.run_count)
+        self._pipeline_worker_real = _PipelineWorkerReal(runner=self._runner,
+                                                         bioproject=self._state.bioproject_id,
+                                                         state=self._state)
         self._pipeline_worker_real.moveToThread(self._pipeline_thread_real)
         self._pipeline_thread_real.started.connect(self._pipeline_worker_real.run)
         self._pipeline_worker_real.progress.connect(self._on_analysis_progress)
@@ -1371,13 +1386,16 @@ class MainWindow(QMainWindow):
         self._status_badge.style().unpolish(self._status_badge)
         self._status_badge.style().polish(self._status_badge)
 
-        self._analysis_badge.setText(
-            f"{state.asv_count:,} ASVs  ·  {state.genus_count} genera  (real QIIME2)"
-        )
-        self._analysis_badge.show()
+        # TODO update this badge
+        # self._analysis_badge.setText(
+        #     f"{state.asv_count:,} ASVs  ·  {state.genus_count} genera  (QIIME2)"
+        # )
+        # self._analysis_badge.show()
 
         self._overview_page.load(state)
         self._broadcast_state()
+
+        self._run_parsing(self._state)
 
     def _on_pipeline_error(self, msg: str) -> None:
         # Translate common internal errors into friendlier messages
@@ -1391,6 +1409,39 @@ class MainWindow(QMainWindow):
         self._upload_page.show_pipeline_error(display)
         self._status_badge.setText("Pipeline error — running in-app analysis…")
         self._run_analysis()
+
+    def _run_parsing(self, state: AppState) -> None:
+        self._status_badge.setText(
+            "Parsing and saving to database..."
+        )
+        self._status_badge.setObjectName("badge_yellow")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+        self._status_badge.show()
+
+        self._parsing_thread_real = QThread(self)
+        self._parsing_worker_real = _ParseWorkerReal(bioproject=self._state.bioproject_id, state=self._state)
+        self._parsing_worker_real.moveToThread(self._parsing_thread_real)
+        self._parsing_thread_real.started.connect(self._parsing_worker_real.run)
+        self._parsing_worker_real.progress.connect(self._on_analysis_progress)
+        self._parsing_worker_real.finished.connect(self._on_parsing_complete)
+        self._parsing_worker_real.errored.connect(self._on_parsing_error)
+        self._parsing_worker_real.finished.connect(self._parsing_thread_real.quit)
+        self._parsing_worker_real.errored.connect(self._parsing_thread_real.quit)
+        self._parsing_thread_real.start()
+
+    def _on_parsing_complete(self, state: AppState):
+        self._status_badge.setText("Parsing complete")
+        self._status_badge.setObjectName("badge_green")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+        self._overview_page.load(state)
+        self._broadcast_state()
+        # hand it off to run analysis
+
+    def _on_parsing_error(self, msg: str):
+        self._upload_page.show_pipeline_error(msg)
+        self._status_badge.setText("Parsing error")
 
     # ── Profile page integration ──────────────────────────────────────────────
 

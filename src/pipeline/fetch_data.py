@@ -67,7 +67,8 @@ def fetch_runs(email, runner, bioproject: str, srr=None, n_runs=1) -> tuple[list
             'instrument'       : row.get("Model", ""),
             'sample_accession' : row.get("BioSample", ""),
             'organism'         : row.get("ScientificName", ""),
-            'uploaded'         : False
+            'uploaded'         : False,
+            'qiime_error'      : ""
         })
     
     # get project meta data
@@ -87,7 +88,7 @@ def fetch_runs(email, runner, bioproject: str, srr=None, n_runs=1) -> tuple[list
         'runs'          : runs,
     }
 
-    return paired_runs, single_runs, project
+    return single_runs, paired_runs, project
 
 
 # lib_layout = 'paired' or 'single'
@@ -119,8 +120,9 @@ def download_runs(runner, bioproject: str, lib_layout: str, runs: list[str], sta
 # lib_layout = 'paired' or 'single'
 def write_manifest(bioproject: str, lib_layout: str, state: AppState) -> None:
     
-    input_dir = f"data/{bioproject}/fastq/{lib_layout}"
-    output_dir = f"data/{bioproject}/qiime/{lib_layout}"
+    APP_DIR = Path(__file__).parent
+    input_dir = str((APP_DIR / f"data/{bioproject}/fastq/{lib_layout}").resolve())
+    output_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
     
     # # create the temporary qiime directory
     Path(output_dir).mkdir(parents=True, exist_ok=True)

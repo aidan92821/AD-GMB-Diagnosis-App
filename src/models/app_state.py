@@ -85,7 +85,7 @@ class AppState:
 
     @property
     def library_layout(self) -> str:
-        layouts = {r['layout'].upper() for r in self.runs.values()}
+        layouts = {r['library_layout'].upper() for r in self.runs.values()}
         if layouts == {"PAIRED"}:  return "Paired-end"
         if layouts == {"SINGLE"}:  return "Single-end"
         if layouts:                return "Paired + Single"
