@@ -21,10 +21,13 @@ from src.db.repository import (
     list_runs_for_project,
     create_genus_bulk,
     get_genus_for_run,
+    get_run_exists_genus_table,
     create_feature,
     list_features_for_run,
     create_feature_count_bulk,
     get_feature_counts_for_run,
+    get_run_exists_feature_table,
+    get_run_exists_feature_count_table,
     create_tree,
     get_tree_for_run,
     create_alpha_diversity,
@@ -237,21 +240,24 @@ def ingest_run_data(
         genus_abundances = dict(genus_rows)
 
         # Insert genus-level relative abundances
-        create_genus_bulk(session, run=run, genus_abundances=genus_abundances)
+        if not get_run_exists_genus_table(session, run_id):
+            create_genus_bulk(session, run=run, genus_abundances=genus_abundances)
 
         # Insert each ASV feature (sequence + taxonomy)
-        for f in features:
-            create_feature(
-                session,
-                run=run,
-                feature_id=f["feature_id"],
-                sequence=f.get("sequence"),
-                taxonomy=f.get("taxonomy"),
-            )
+        if not get_run_exists_feature_table(session, run_id):
+            for f in features:
+                create_feature(
+                    session,
+                    run=run,
+                    feature_id=f["feature_id"],
+                    sequence=f.get("sequence"),
+                    taxonomy=f.get("taxonomy"),
+                )
 
         # Flush features to DB before inserting counts — feature_count has a FK to feature
         session.flush()
-        create_feature_count_bulk(session, run_id=run_id, counts=feature_counts)
+        if not get_run_exists_feature_count_table(session, run_id):
+            create_feature_count_bulk(session, run_id=run_id, counts=feature_counts)
 
         # Tree is optional — only store if a path was provided
         tree = None
@@ -291,6 +297,20 @@ def get_genus_data(run_id: int) -> list[dict]:
         session.close()
 
 
+def get_is_run_in_genus(run_id: int) -> bool:
+    """
+    check if there is already a run_id in genus table
+    """
+    session = SessionLocal()
+    try:
+        in_table = get_run_exists_genus_table(session=session, run_id=run_id)
+        return in_table
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
 # ==== Feature counts ====
 def get_feature_counts(run_id: int) -> list[dict]:
     """
@@ -313,6 +333,46 @@ def get_feature_counts(run_id: int) -> list[dict]:
     finally:
         session.close()
 
+    
+def get_run_feature_ids(run_id: int) -> list:
+    """
+    Return feature ids that are associated with a run
+    """
+    session = SessionLocal()
+    try:
+        feats = list_features_for_run(session=session, run_id=run_id)
+        feat_ids = [feat['feature_id'] for feat in feats]
+        return feat_ids
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+def get_is_run_in_feature(run_id: int) -> bool:
+    """
+    check if there is already a run_id in feature table
+    """
+    session = SessionLocal()
+    try:
+        in_table = get_run_exists_feature_table(session=session, run_id=run_id)
+        return in_table
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+def get_is_run_in_feature_count(run_id: int) -> bool:
+    """
+    check if there is already a run_id in feature count table
+    """
+    session = SessionLocal()
+    try:
+        in_table = get_run_exists_feature_count_table(session=session, run_id=run_id)
+        return in_table
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
 
 # ==== Tree ====
 def get_tree(run_id: int) -> dict | None:

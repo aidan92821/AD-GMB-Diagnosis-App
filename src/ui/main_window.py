@@ -39,13 +39,14 @@ from ui.profile_page import ProfilePage
 
 from src.pipeline.qiime2_runner import QiimeRunner
 from src.pipeline.qiime_preproc import download_classifier, qiime_preprocess
-from src.pipeline.fetch_data import fetch_runs, download_runs, write_manifest
+from src.pipeline.fetch_data import (fetch_runs, download_runs, 
+                                     write_manifest, cleanup)
 from src.pipeline.db_import import (parse_feat_tax_seqs, parse_feature_counts,
                                     parse_genus_table)
 
 from src.services.assessment_service import (save_ncbi_project, create_project, 
-                                             get_project_overview,create_run, 
-                                             ingest_run_data, get_run_id_by_srr)
+                                             create_run,ingest_run_data, 
+                                             get_run_id_by_srr)
 
 # ── Sidebar nav ───────────────────────────────────────────────────────────────
 
@@ -205,6 +206,9 @@ class _ParseWorkerReal(QObject):
                                             bio_proj_accession=self._state.bioproject_id, library_layout='single')
                         run_id = db_run['run_id']
                     ingest_run_data(run_id=run_id, genus_rows=row, features=feature_seqs, feature_counts=feature_counts[run])
+            
+            # remove all the intermediate files
+            cleanup(self._state.bioproject_id)
             
             self.finished.emit(self._state)
         except Exception as exc:

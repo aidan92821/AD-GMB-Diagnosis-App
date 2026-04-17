@@ -164,9 +164,13 @@ def write_manifest(bioproject: str, lib_layout: str, state: AppState) -> None:
 # clean up the temporary files
 # after data tables have been imported to the database, remove them
 # the only files needed after importing are rep-seqs.fasta and tree.nwk
-def cleanup(bioproject):
-    shutil.rmtree(Path("data") / bioproject / "fastq")
-    shutil.rmtree(Path("data") / bioproject / "qiime")
+def cleanup(bioproject: str):
+    APP_DIR = Path(__file__).parent # pipeline/
+    FASTQ_DIR = (APP_DIR / f"data/{bioproject}/fastq")
+    QIIME_DIR = (APP_DIR / f"data/{bioproject}/qiime")
+    
+    shutil.rmtree(FASTQ_DIR, ignore_errors=True)
+    shutil.rmtree(QIIME_DIR, ignore_errors=True)
 
 
 '''DEPRECATED'''
