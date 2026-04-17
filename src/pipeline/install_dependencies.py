@@ -63,7 +63,9 @@ def create_env(callback=None):
 
 def ensure_env(callback=None):
     if not env_exists():
+        callback("setting up environment")
         return create_env(callback)
+    callback("environment requirements satisfied")
     return True
 
 

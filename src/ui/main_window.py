@@ -12,12 +12,17 @@ Start-up flow:
 """
 
 from __future__ import annotations
+import os
+
+from pathlib import Path
 
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QFrame, QLabel, QHBoxLayout, QVBoxLayout,
     QStackedWidget, QScrollArea, QPushButton, QSizePolicy,
 )
 from PyQt6.QtCore import Qt, QThread, QObject, pyqtSignal
+
+from src.services.assessment_service import ServiceError
 
 from resources.styles import (
     APP_QSS, SB_BG, SB_SECTION, WHITE, BG_PAGE, BG_CARD, BORDER, TEXT_H, TEXT_M,
@@ -32,6 +37,15 @@ from ui.export_page import ExportPage
 from ui.auth_page import AuthPage
 from ui.profile_page import ProfilePage
 
+from src.pipeline.qiime2_runner import QiimeRunner
+from src.pipeline.qiime_preproc import download_classifier, qiime_preprocess
+from src.pipeline.fetch_data import fetch_runs, download_runs, write_manifest
+from src.pipeline.db_import import (parse_feat_tax_seqs, parse_feature_counts,
+                                    parse_genus_table)
+
+from src.services.assessment_service import (save_ncbi_project, create_project, 
+                                             get_project_overview,create_run, 
+                                             ingest_run_data, get_run_id_by_srr)
 
 # ── Sidebar nav ───────────────────────────────────────────────────────────────
 
@@ -55,6 +69,158 @@ NAV = [
     ]),
 ]
 
+
+class _FetchWorkerReal(QObject):
+    finished = pyqtSignal(object, object, object)   # emits list of single runs, list of paired runs, and project dictionary
+    errored  = pyqtSignal(str)
+
+    def __init__(self, bioproject: str, email: str, runner: QiimeRunner, srr: str=None, n_runs=1) -> None:
+        super().__init__()
+        self._bioproject = bioproject
+        self._email = email
+        self._srr = srr
+        self._n_runs = n_runs
+        self._runner = runner
+    
+    def run(self):
+        try:
+            single_runs, paired_runs, project = fetch_runs(email=self._email, runner=self._runner, bioproject=self._bioproject, srr=self._srr, n_runs=self._n_runs)
+            self.finished.emit(single_runs, paired_runs, project)
+        except Exception as exc:
+            self.errored.emit(str(exc))
+
+
+class _DownloadWorkerReal(QObject):
+    finished = pyqtSignal(object)   # emits updated AppState
+    errored  = pyqtSignal(str)
+    progress = pyqtSignal(str)
+
+    def __init__(self, state: AppState, runner: QiimeRunner) -> None:
+        super().__init__()
+        self._state = state
+        self._runner = runner
+    
+    def run(self):
+        try:
+            # download the single runs + write the manifest file
+            download_runs(runner=self._runner, bioproject=self._state.bioproject_id, lib_layout='single', runs=self._state.single_runs, state=self._state)
+            write_manifest(self._state.bioproject_id, lib_layout='single', state=self._state)
+            # download the paired runs + write the manifest file
+            download_runs(runner=self._runner, bioproject=self._state.bioproject_id, lib_layout='paired', runs=self._state.paired_runs, state=self._state)
+            write_manifest(self._state.bioproject_id, lib_layout='paired', state=self._state)
+            
+            self.finished.emit(self._state)
+        except Exception as exc:
+            self.errored.emit(str(exc))
+            print(exc)
+
+
+class _PipelineWorkerReal(QObject):
+    '''
+    this worker will run the full qiime2 preprocessing and create the tables ready for parsing
+    '''
+    finished = pyqtSignal(object)   # emits updated AppState
+    errored  = pyqtSignal(str)
+    progress = pyqtSignal(str)
+
+    def __init__(self, runner: QiimeRunner, bioproject: str, state: AppState) -> None:
+        super().__init__()
+        self._state = state
+        self._bioproject = bioproject
+        self._runner = runner
+        self.APP_DIR = Path(__file__).parent.parent
+        self.QIIME_DIR = self.APP_DIR / f"pipeline/data/{self._bioproject}/qiime/"
+        CLF_DIR = self.APP_DIR / f"pipeline/taxa_classifier"
+        CLASSIFIER = 'silva-138-99-nb-classifier.qza'
+        SOURCE = 'https://data.qiime2.org/classifiers/sklearn-1.4.2/silva'
+        
+        # get the classifier for annotating taxa
+        if CLASSIFIER not in os.listdir(str(CLF_DIR)):
+            download_classifier(classifier_url=f"{SOURCE}/{CLASSIFIER}")
+    
+    def run(self):
+        try:
+            # preprocess the paired end fastq files
+            if self._state.paired_runs:
+                if "demux.qza" not in os.listdir(str(self.QIIME_DIR / "single")):
+                    qiime_preprocess(runner=self._runner, bioproject=self._bioproject, lib_layout='paired')
+            
+            # preprocess the single end fastq files
+            if self._state.single_runs:
+                if "demux.qza" not in os.listdir(str(self.QIIME_DIR / "paired")):
+                    qiime_preprocess(runner=self._runner, bioproject=self._bioproject, lib_layout='single')
+            
+            self.finished.emit(self._state)
+        except Exception as exc:
+            self.errored.emit(str(exc))
+
+
+class _ParseWorkerReal(QObject):
+
+    finished = pyqtSignal(object) # emits updated AppState
+    errored  = pyqtSignal(str)
+    progress = pyqtSignal(str)
+
+    def __init__(self, bioproject: str, state: AppState, user):
+        super().__init__()
+        self._data_dir = str((Path(__file__).parent.parent / f"pipeline/data/{bioproject}").resolve())
+        self._state = state
+        self._user = user
+
+    def run(self):
+        try:            
+            # parse the paired end tables
+            if self._state.paired_runs:
+                abundances     = parse_genus_table(genus=f"{self._data_dir}/qiime/paired/genus-table.tsv")
+                feature_seqs   = parse_feat_tax_seqs(tax=f"{self._data_dir}/qiime/paired/taxonomy.tsv",
+                                                   seqs=f"{self._data_dir}/reps-tree/paired/dna-sequences.fasta")
+                feature_counts = parse_feature_counts(feat=f"{self._data_dir}/qiime/paired/feature-table.tsv")
+                
+                # TODO: allow for project retrieval if just getting more runs for the current project
+                project = create_project(user_id=self._user['user_id'], name=self._state.bioproject_id)
+
+                for run, row in abundances.items():
+                    try:
+                        _ = get_run_id_by_srr(run)
+                    except ServiceError:
+                        db_run = create_run(project_id=project['project_id'], source='ncbi', srr_accession=run,
+                                            bio_proj_accession=self._state.bioproject_id, library_layout='paired')
+                        ingest_run_data(run_id=db_run['run_id'], genus_rows=row, features=feature_seqs, feature_counts=feature_counts[run])
+            
+            # parse the single end tables
+            if self._state.single_runs:
+                abundances     = parse_genus_table(genus=f"{self._data_dir}/qiime/single/genus-table.tsv")
+                feature_seqs   = parse_feat_tax_seqs(tax=f"{self._data_dir}/qiime/single/taxonomy.tsv",
+                                                   seqs=f"{self._data_dir}/reps-tree/single/dna-sequences.fasta")
+                feature_counts = parse_feature_counts(feat=f"{self._data_dir}/qiime/single/feature-table.tsv")
+
+                # TODO: allow for project retrieval if just getting more runs for the current project
+                project = create_project(user_id=self._user['user_id'], name=self._state.bioproject_id)
+
+                for run, row in abundances.items():
+                    try:
+                        run_id = get_run_id_by_srr(run)
+                    except ServiceError:
+                        db_run = create_run(project_id=project['project_id'], source='ncbi', srr_accession=run,
+                                            bio_proj_accession=self._state.bioproject_id, library_layout='single')
+                        run_id = db_run['run_id']
+                    ingest_run_data(run_id=run_id, genus_rows=row, features=feature_seqs, feature_counts=feature_counts[run])
+            
+            self.finished.emit(self._state)
+        except Exception as exc:
+            self.errored.emit(str(exc))
+
+class _AnalysisWorkerReal(QObject):
+    finished = pyqtSignal(object)   # emits updated AppState
+    errored  = pyqtSignal(str)
+    progress = pyqtSignal(str)      # status message
+
+    def __init__(self, state: AppState) -> None:
+        super().__init__()
+        self._state = state
+
+    def run(self):
+        pass
 
 # ── Worker 1: NCBI fetch ──────────────────────────────────────────────────────
 
@@ -739,6 +905,7 @@ class MainWindow(QMainWindow):
         self._active_idx  = 0
         self._state       = AppState()
         self._current_user: dict | None = None
+        self._runner = QiimeRunner()
 
         self._build_ui()
 
@@ -939,51 +1106,72 @@ class MainWindow(QMainWindow):
 
     # ── Fetch flow ────────────────────────────────────────────────────────────
 
-    def _on_fetch_requested(self, bioproject: str, run_accession: str, max_runs: int) -> None:
+    def _on_fetch_requested(self, bioproject: str, run_accession: str, max_runs: int, email: str, username: str) -> None:
         self._status_badge.setText("Fetching from NCBI…")
         self._status_badge.show()
 
-        self._fetch_thread = QThread(self)
-        self._fetch_worker = _FetchWorker(bioproject, run_accession, max_runs)
-        self._fetch_worker.moveToThread(self._fetch_thread)
-        self._fetch_thread.started.connect(self._fetch_worker.run)
-        self._fetch_worker.finished.connect(self._on_fetch_complete)
-        self._fetch_worker.errored.connect(self._on_fetch_error)
-        self._fetch_worker.finished.connect(self._fetch_thread.quit)
-        self._fetch_worker.errored.connect(self._fetch_thread.quit)
-        self._fetch_thread.start()
+        # emma changes
+        self._fetch_real_thread = QThread(self)
+        self._fetch_real_worker = _FetchWorkerReal(bioproject=bioproject,
+                                                   email=email,
+                                                   runner=self._runner,
+                                                   srr=run_accession,
+                                                   n_runs=max_runs)
+        self._fetch_real_worker.moveToThread(self._fetch_real_thread)
+        self._fetch_real_thread.started.connect(self._fetch_real_worker.run)
+        self._fetch_real_worker.finished.connect(self._on_fetch_complete)
+        self._fetch_real_worker.errored.connect(self._on_fetch_error)
+        self._fetch_real_worker.finished.connect(self._fetch_real_thread.quit)
+        self._fetch_real_worker.errored.connect(self._fetch_real_thread.quit)
+        self._fetch_real_thread.start()
+        # emma changes
 
-    def _on_fetch_complete(self, project_dict: dict) -> None:
+
+        # self._fetch_thread = QThread(self)
+        # self._fetch_worker = _FetchWorker(bioproject, run_accession, max_runs)
+        # self._fetch_worker.moveToThread(self._fetch_thread)
+        # self._fetch_thread.started.connect(self._fetch_worker.run)
+        # self._fetch_worker.finished.connect(self._on_fetch_complete)
+        # self._fetch_worker.errored.connect(self._on_fetch_error)
+        # self._fetch_worker.finished.connect(self._fetch_thread.quit)
+        # self._fetch_worker.errored.connect(self._fetch_thread.quit)
+        # self._fetch_thread.start()
+
+    def _on_fetch_complete(self, single_runs, paired_runs, project_dict: dict) -> None:
         """Build AppState from NCBI data, save to DB, then run analysis."""
         state = AppState(
             bioproject_id = project_dict["bioproject_id"],
-            project_id    = project_dict.get("project_id", ""),
+            project_uid   = project_dict.get("project_uid", ""),
             title         = project_dict.get("title", ""),
             organism      = project_dict.get("organism", ""),
+            single_runs   = single_runs,
+            paired_runs   = paired_runs,
+            run_count     = len(single_runs) + len(paired_runs)
         )
-        for lbl in project_dict.get("runs", []):
-            state.runs.append(RunState(
-                label       = lbl,
-                accession   = project_dict["run_accessions"].get(lbl, ""),
-                read_count  = project_dict.get("read_counts", {}).get(lbl, 0),
-                base_count  = project_dict.get("base_counts", {}).get(lbl, 0),
-                layout      = project_dict.get("library_layouts", {}).get(lbl, "PAIRED"),
-                instrument  = project_dict.get("instruments", {}).get(lbl, ""),
-                uploaded    = False,
-            ))
+
+        for run in project_dict.get("runs", []):
+            state.runs[run['run_accession']] = run
+            # state.runs.append(RunState(
+            #     label       = lbl,
+            #     accession   = project_dict["run_accessions"].get(lbl, ""),
+            #     read_count  = project_dict.get("read_counts", {}).get(lbl, 0),
+            #     base_count  = project_dict.get("base_counts", {}).get(lbl, 0),
+            #     layout      = project_dict.get("library_layouts", {}).get(lbl, "PAIRED"),
+            #     instrument  = project_dict.get("instruments", {}).get(lbl, ""),
+            #     uploaded    = False,
+            # ))
         self._state = state
 
         # Persist project to DB so it appears on the profile page
         if self._current_user:
             try:
-                from services.assessment_service import save_ncbi_project
                 save_ncbi_project(
-                    user_id           = self._current_user["user_id"],
+                    user_id            = self._current_user["user_id"],
                     bio_proj_accession = state.bioproject_id,
-                    title             = state.title or state.bioproject_id,
-                    runs              = [
-                        {"accession": r.accession, "layout": r.layout}
-                        for r in state.runs
+                    title              = state.title or state.bioproject_id,
+                    runs               = [
+                        {"accession": accession, "layout": run_dict['library_layout']}
+                        for accession, run_dict in state.runs.items()
                     ],
                 )
                 self._profile_page.refresh()
@@ -991,11 +1179,11 @@ class MainWindow(QMainWindow):
                 pass   # DB failure must not interrupt analysis
 
         # Update topbar
-        self._topbar_title.setText(f"{state.bioproject_id}  —  {state.title}")
-        n = state.run_count
-        self._runs_badge.setText(f"{n} run{'s' if n != 1 else ''} loaded")
+        self._topbar_title.setText(f"{state.bioproject_id}")
+        state.run_count = len(state.runs)
+        self._runs_badge.setText(f"{state.run_count} run{'s' if state.run_count != 1 else ''} loaded")
         self._runs_badge.show()
-        self._status_badge.setText("Computing analysis…")
+        # self._status_badge.setText("Computing analysis…")
 
         self._overview_page.load(state)
         self._broadcast_state()
@@ -1011,28 +1199,45 @@ class MainWindow(QMainWindow):
         """Start fasterq-dump download; fall back to analysis-only if unavailable."""
         self._status_badge.setText("Downloading FASTQ files…")
 
-        self._dl_thread = QThread(self)
-        self._dl_worker = _DownloadWorker(self._state)
-        self._dl_worker.moveToThread(self._dl_thread)
-        self._dl_thread.started.connect(self._dl_worker.run)
-        self._dl_worker.progress.connect(self._on_analysis_progress)
-        self._dl_worker.finished.connect(self._on_download_complete)
-        self._dl_worker.errored.connect(self._on_download_error)
-        self._dl_worker.finished.connect(self._dl_thread.quit)
-        self._dl_worker.errored.connect(self._dl_thread.quit)
-        self._dl_thread.start()
+        # emma changes
+        self._dl_thread_real = QThread(self)
+        self._dl_worker_real = _DownloadWorkerReal(state=self._state, runner=self._runner)
+        self._dl_worker_real.moveToThread(self._dl_thread_real)
+        self._dl_thread_real.started.connect(self._dl_worker_real.run)
+        self._dl_worker_real.progress.connect(self._on_analysis_progress)
+        self._dl_worker_real.finished.connect(self._on_download_complete)
+        self._dl_worker_real.errored.connect(self._on_download_error)
+        self._dl_worker_real.finished.connect(self._dl_thread_real.quit)
+        self._dl_worker_real.errored.connect(self._dl_thread_real.quit)
+        self._dl_thread_real.start()
+        # emma changes
+
+
+        # self._dl_thread = QThread(self)
+        # self._dl_worker = _DownloadWorker(self._state)
+        # self._dl_worker.moveToThread(self._dl_thread)
+        # self._dl_thread.started.connect(self._dl_worker.run)
+        # self._dl_worker.progress.connect(self._on_analysis_progress)
+        # self._dl_worker.finished.connect(self._on_download_complete)
+        # self._dl_worker.errored.connect(self._on_download_error)
+        # self._dl_worker.finished.connect(self._dl_thread.quit)
+        # self._dl_worker.errored.connect(self._dl_thread.quit)
+        # self._dl_thread.start()
 
     def _on_download_complete(self, state: "AppState") -> None:
         """All (or some) runs downloaded — auto-populate Upload page, then run analysis."""
         self._state = state
-        uploaded = sum(1 for r in state.runs if r.uploaded)
+        # get number of successfully downloaded runs as fastq files
+        uploaded = self._state.uploaded_count
 
         self._runs_badge.setText(
             f"{state.run_count} run{'s' if state.run_count != 1 else ''} loaded  ·  "
             f"{uploaded} FASTQ downloaded"
         )
-        self._status_badge.setText("Computing analysis…")
-
+        self._status_badge.setText("Ready to run QIIME preprocessing")
+        self._status_badge.setObjectName("badge_green")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
         # Auto-populate Upload Runs page with the downloaded files
         self._upload_page.auto_mark_uploaded(state)
 
@@ -1044,7 +1249,8 @@ class MainWindow(QMainWindow):
                 callback=self._on_run_pipeline,
             )
 
-        self._run_analysis()
+        # TODO put in correct spot in flow
+        # self._run_analysis()
 
     def _on_download_error(self, msg: str) -> None:
         """
@@ -1150,31 +1356,31 @@ class MainWindow(QMainWindow):
         # Check whether QIIME2 conda env is available before starting the
         # heavyweight pipeline worker.  If not, fall back to the in-app
         # analysis worker (which still uses the downloaded FASTQ metadata).
-        qiime2_available = False
-        try:
-            import subprocess as _sp
-            result = _sp.run(
-                ["conda", "run", "-n", "qiime2-amplicon-2024.10",
-                 "qiime", "--version"],
-                capture_output=True, text=True, timeout=15,
-            )
-            qiime2_available = result.returncode == 0
-        except Exception:
-            qiime2_available = False
+        # qiime2_available = False
+        # try:
+        #     import subprocess as _sp
+        #     result = _sp.run(
+        #         ["conda", "run", "-n", "qiime2-amplicon-2024.10",
+        #          "qiime", "--version"],
+        #         capture_output=True, text=True, timeout=15,
+        #     )
+        #     qiime2_available = result.returncode == 0
+        # except Exception:
+        #     qiime2_available = False
 
-        if not qiime2_available:
-            self._upload_page.show_download_status(
-                "ℹ  QIIME2 environment (qiime2-amplicon-2024.10) not found.\n"
-                "Running in-app analysis instead.\n\n"
-                "To enable real QIIME2 processing, install it with:\n"
-                "  conda env create -n qiime2-amplicon-2024.10 "
-                "--file https://data.qiime2.org/distro/amplicon/"
-                "qiime2-amplicon-2024.10-py310-osx-conda.yml",
-                kind="warn",
-            )
-            self._status_badge.setText("Computing analysis…")
-            self._run_analysis()
-            return
+        # if not qiime2_available:
+        #     self._upload_page.show_download_status(
+        #         "ℹ  QIIME2 environment (qiime2-amplicon-2024.10) not found.\n"
+        #         "Running in-app analysis instead.\n\n"
+        #         "To enable real QIIME2 processing, install it with:\n"
+        #         "  conda env create -n qiime2-amplicon-2024.10 "
+        #         "--file https://data.qiime2.org/distro/amplicon/"
+        #         "qiime2-amplicon-2024.10-py310-osx-conda.yml",
+        #         kind="warn",
+        #     )
+        #     self._status_badge.setText("Computing analysis…")
+        #     self._run_analysis()
+        #     return
 
         self._status_badge.setText("Running QIIME2 pipeline…")
         self._status_badge.setObjectName("badge_yellow")
@@ -1182,16 +1388,31 @@ class MainWindow(QMainWindow):
         self._status_badge.style().polish(self._status_badge)
         self._status_badge.show()
 
-        self._pipeline_thread = QThread(self)
-        self._pipeline_worker = _PipelineWorker(self._state, n_runs=self._state.run_count)
-        self._pipeline_worker.moveToThread(self._pipeline_thread)
-        self._pipeline_thread.started.connect(self._pipeline_worker.run)
-        self._pipeline_worker.progress.connect(self._on_analysis_progress)
-        self._pipeline_worker.finished.connect(self._on_pipeline_complete)
-        self._pipeline_worker.errored.connect(self._on_pipeline_error)
-        self._pipeline_worker.finished.connect(self._pipeline_thread.quit)
-        self._pipeline_worker.errored.connect(self._pipeline_thread.quit)
-        self._pipeline_thread.start()
+        # self._pipeline_thread = QThread(self)
+        # self._pipeline_worker = _PipelineWorker(self._state, n_runs=self._state.run_count)
+        # self._pipeline_worker.moveToThread(self._pipeline_thread)
+        # self._pipeline_thread.started.connect(self._pipeline_worker.run)
+        # self._pipeline_worker.progress.connect(self._on_analysis_progress)
+        # self._pipeline_worker.finished.connect(self._on_pipeline_complete)
+        # self._pipeline_worker.errored.connect(self._on_pipeline_error)
+        # self._pipeline_worker.finished.connect(self._pipeline_thread.quit)
+        # self._pipeline_worker.errored.connect(self._pipeline_thread.quit)
+        # self._pipeline_thread.start()
+
+        # emma changes
+        self._pipeline_thread_real = QThread(self)
+        self._pipeline_worker_real = _PipelineWorkerReal(runner=self._runner,
+                                                         bioproject=self._state.bioproject_id,
+                                                         state=self._state)
+        self._pipeline_worker_real.moveToThread(self._pipeline_thread_real)
+        self._pipeline_thread_real.started.connect(self._pipeline_worker_real.run)
+        self._pipeline_worker_real.progress.connect(self._on_analysis_progress)
+        self._pipeline_worker_real.finished.connect(self._on_pipeline_complete)
+        self._pipeline_worker_real.errored.connect(self._on_pipeline_error)
+        self._pipeline_worker_real.finished.connect(self._pipeline_thread_real.quit)
+        self._pipeline_worker_real.errored.connect(self._pipeline_thread_real.quit)
+        self._pipeline_thread_real.start()
+        # emma changes
 
     def _on_pipeline_complete(self, state: AppState) -> None:
         self._state = state
@@ -1200,13 +1421,16 @@ class MainWindow(QMainWindow):
         self._status_badge.style().unpolish(self._status_badge)
         self._status_badge.style().polish(self._status_badge)
 
-        self._analysis_badge.setText(
-            f"{state.asv_count:,} ASVs  ·  {state.genus_count} genera  (real QIIME2)"
-        )
-        self._analysis_badge.show()
+        # TODO update this badge
+        # self._analysis_badge.setText(
+        #     f"{state.asv_count:,} ASVs  ·  {state.genus_count} genera  (QIIME2)"
+        # )
+        # self._analysis_badge.show()
 
         self._overview_page.load(state)
         self._broadcast_state()
+
+        self._run_parsing()
 
     def _on_pipeline_error(self, msg: str) -> None:
         # Translate common internal errors into friendlier messages
@@ -1221,12 +1445,47 @@ class MainWindow(QMainWindow):
         self._status_badge.setText("Pipeline error — running in-app analysis…")
         self._run_analysis()
 
+    def _run_parsing(self) -> None:
+        self._status_badge.setText(
+            "Parsing and saving to database..."
+        )
+        self._status_badge.setObjectName("badge_yellow")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+        self._status_badge.show()
+
+        self._parsing_thread_real = QThread(self)
+        self._parsing_worker_real = _ParseWorkerReal(bioproject=self._state.bioproject_id, state=self._state, user=self._current_user)
+        self._parsing_worker_real.moveToThread(self._parsing_thread_real)
+        self._parsing_thread_real.started.connect(self._parsing_worker_real.run)
+        self._parsing_worker_real.progress.connect(self._on_analysis_progress)
+        self._parsing_worker_real.finished.connect(self._on_parsing_complete)
+        self._parsing_worker_real.errored.connect(self._on_parsing_error)
+        self._parsing_worker_real.finished.connect(self._parsing_thread_real.quit)
+        self._parsing_worker_real.errored.connect(self._parsing_thread_real.quit)
+        self._parsing_thread_real.start()
+
+    def _on_parsing_complete(self, state: AppState):
+        self._status_badge.setText("Parsing complete")
+        self._status_badge.setObjectName("badge_green")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+        self._overview_page.load(state)
+        self._broadcast_state()
+        
+        # hand it off to run analysis
+        self._run_analysis()
+
+    def _on_parsing_error(self, msg: str):
+        self._upload_page.show_pipeline_error(msg)
+        self._status_badge.setText("Parsing error")
+
     # ── Profile page integration ──────────────────────────────────────────────
 
     def _on_load_project(self, bio_proj_accession: str) -> None:
         """Re-fetch a past project from NCBI and navigate to Overview."""
         self._switch_page(0)
-        self._on_fetch_requested(bio_proj_accession, "", 5)
+        self._on_fetch_requested(bioproject=bio_proj_accession, srr="", max_runs=5, email='emmanicolego@gmail.com', username=self._current_user['user_id'])
 
     def _on_delete_project(self, project_id: int) -> None:
         """Delete a project from the DB and refresh the profile page."""

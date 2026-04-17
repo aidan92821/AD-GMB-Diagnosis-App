@@ -1,13 +1,16 @@
 import os
 from pathlib import Path
-from qc import get_trunc
+from src.pipeline.qc import get_trunc
 import urllib.request
 
 
 # lib_layout = 'paired' or 'single'
 def import_samples(runner, bioproject: str, lib_layout: str):
     
-    output_dir = f"data/{bioproject}/qiime/{lib_layout}"
+    APP_DIR = Path(__file__).parent
+    input_dir = str((APP_DIR / f"data/{bioproject}/fastq/{lib_layout}").resolve())
+    output_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
+
     input_type = 'SampleData[PairedEndSequencesWithQuality]' \
                  if lib_layout == 'paired' \
                  else 'SampleData[SequencesWithQuality]'
@@ -16,7 +19,7 @@ def import_samples(runner, bioproject: str, lib_layout: str):
                    else 'SingleEndFastqManifestPhred33V2'
 
     # import runs
-    if os.listdir(f"data/{bioproject}/fastq/{lib_layout}"):
+    if os.listdir(input_dir):
         runner.run([
             'qiime', 'tools', 'import',
             '--type', input_type,
@@ -33,7 +36,8 @@ def import_samples(runner, bioproject: str, lib_layout: str):
 # 2 -> paired with keys: 'forward', 'reverse' in that order
 def qc(runner, bioproject: str, lib_layout: str):
     
-    io_dir = f"data/{bioproject}/qiime/{lib_layout}"
+    APP_DIR = Path(__file__).parent
+    io_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
 
     # calculate summary statistics
     runner.run([
@@ -49,7 +53,8 @@ def qc(runner, bioproject: str, lib_layout: str):
 # lib_layout = 'paired' or 'single'
 def dada2_denoise(runner, bioproject: str, lib_layout: str, trunc_f: int=None, trunc_r: int=None, trunc_s: int=None):
     
-    io_dir = f"data/{bioproject}/qiime/{lib_layout}"
+    APP_DIR = Path(__file__).parent
+    io_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
     
     # get the number of cores from user's machine
     # and calculate how many to use for the process
@@ -92,8 +97,9 @@ source: https://data.qiime2.org/classifiers/sklearn-1.4.2/silva/silva-138-99-nb-
 # lib_layout: 'paired' or 'single'
 def classify_taxa(runner, bioproject: str, lib_layout: str):
     
-    classifier_path = "taxa_classifier/silva-138-99-nb-classifier.qza"
-    io_dir = f"data/{bioproject}/qiime/{lib_layout}"
+    APP_DIR = Path(__file__).parent
+    classifier_path = str((APP_DIR / "taxa_classifier/silva-138-99-nb-classifier.qza").resolve())
+    io_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
 
     # call the classifier on the denoised data
     runner.run([
@@ -107,15 +113,17 @@ def classify_taxa(runner, bioproject: str, lib_layout: str):
 # lib_layout: 'paired' or 'single'
 def create_tables(runner, bioproject: str, lib_layout: str):
     
-    io_dir = f"data/{bioproject}/qiime/{lib_layout}"
+    APP_DIR = Path(__file__).parent
+    io_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
+    reps_tree_dir = str((APP_DIR / f"data/{bioproject}/reps-tree/{lib_layout}").resolve())
 
     # representative sequences (asvs to seqs) (rep-seqs.fasta)
     # this needs to go in a separate directory for conservation
-    Path(f"data/{bioproject}/reps-tree/{lib_layout}").mkdir(parents=True, exist_ok=True)
+    Path(reps_tree_dir).mkdir(parents=True, exist_ok=True)
     runner.run([
         'qiime', 'tools', 'export',
         '--input-path', f"{io_dir}/rep-seqs.qza",
-        '--output-path', f"data/{bioproject}/reps-tree/{lib_layout}"
+        '--output-path', reps_tree_dir
     ])
 
     # feature table (asv counts) (feature-table.tsv)
@@ -173,14 +181,17 @@ def create_tables(runner, bioproject: str, lib_layout: str):
 
 def qiime_preprocess(runner, bioproject: str, lib_layout: str):
     
+    print('importing samples')
     import_samples(runner,
                    bioproject=bioproject,
                    lib_layout=lib_layout)
 
+    print('doing qc')
     trunc = qc(runner,
                bioproject=bioproject, 
                lib_layout=lib_layout)
 
+    print('denoising')
     if lib_layout == 'paired':
         dada2_denoise(runner,
                       bioproject=bioproject,
@@ -193,10 +204,12 @@ def qiime_preprocess(runner, bioproject: str, lib_layout: str):
                       lib_layout=lib_layout,
                       trunc_s=trunc['single'])
 
+    print('classifying taxa')
     classify_taxa(runner,
                   bioproject=bioproject,
                   lib_layout=lib_layout)
 
+    print('creating tables')
     create_tables(runner,
                   bioproject=bioproject,
                   lib_layout=lib_layout)
@@ -204,7 +217,7 @@ def qiime_preprocess(runner, bioproject: str, lib_layout: str):
 
 def download_classifier(classifier_url: str):
 
-    output_dir = Path("taxa_classifier")
+    output_dir = Path("taxa_classifier").resolve()
     output_dir.mkdir(exist_ok=True)
 
     classifier_file = output_dir / classifier_url.split("/")[-1]

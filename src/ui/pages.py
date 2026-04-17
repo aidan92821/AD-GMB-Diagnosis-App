@@ -71,7 +71,7 @@ def _info_banner(msg: str, kind: str = "info") -> QFrame:
 # ═════════════════════════════════════════════════════════════════════════════
 
 class OverviewPage(QWidget):
-    fetch_requested = pyqtSignal(str, str, int)
+    fetch_requested = pyqtSignal(str, str, int, str, object)
 
     _BP_RE  = __import__("re").compile(r"^PRJ(NA|EA|DA|EB|DB|NB)\d+$",
                                         __import__("re").IGNORECASE)
@@ -214,6 +214,8 @@ class OverviewPage(QWidget):
         bp  = self._bp_input.text().strip()
         run = self._run_input.text().strip()
         n   = int(self._run_count.currentText())
+        email = 'emmanicolego@gmail.com'
+        user = None
         self._fetch_btn.setEnabled(False)
         self._fetch_btn.setText("  ⟳  Fetching…")
         self._bp_input.setEnabled(False)
@@ -226,7 +228,7 @@ class OverviewPage(QWidget):
             "background:#EEF2FF; border:1px solid #C7D2FE; border-radius:6px;")
         self._status_lbl.setStyleSheet("font-size:12px; color:#4338CA;")
         self._status_bar.show()
-        self.fetch_requested.emit(bp, run, n)
+        self.fetch_requested.emit(bp, run, n, email, user)
 
     # ── called by MainWindow ──────────────────────────────────────────────────
 
@@ -274,7 +276,7 @@ class OverviewPage(QWidget):
         asv_sub   = "unique sequences"      if state.asv_count else "upload FASTQ to compute"
         genus_sub = "bacterial genera"      if state.genus_count else "upload FASTQ to compute"
         for value, label, sub in [
-            (state.project_id or state.bioproject_id, "Project ID",    ""),
+            (state.project_uid or state.bioproject_id, "Project ID",    ""),
             (state.bioproject_id,                     "BioProject ID", "NCBI accession"),
             (str(state.run_count),                    "Runs",          "  ".join(state.run_labels)),
             (asv_val,                                 "ASVs",          asv_sub),
@@ -298,35 +300,35 @@ class OverviewPage(QWidget):
         rule.setStyleSheet(f"background:{BORDER}; max-height:1px;")
         self._runs_body.addWidget(rule)
 
-        for run in state.runs:
+        for run in state.runs.values():
             row = QHBoxLayout(); row.setContentsMargins(0, 6, 0, 6)
-            badge = QLabel(run.label)
+            badge = QLabel(run['label'])
             badge.setFixedWidth(36)
             badge.setStyleSheet(
                 "font-size:11px;font-weight:700;color:#6366F1;"
                 "background:#EEF2FF;border-radius:4px;padding:2px 4px;")
             row.addWidget(badge)
 
-            acc = QLabel(run.accession)
+            acc = QLabel(run['run_accession'])
             acc.setStyleSheet("font-size:11px;color:#6B7280;font-family:monospace;")
             row.addWidget(acc, 1)
 
-            reads = QLabel(f"{run.read_count:,}" if run.read_count else "—")
+            reads = QLabel(f"{run['read_count']:,}" if run['read_count'] else "—")
             reads.setStyleSheet(f"font-size:12px;color:{TEXT_M};")
             row.addWidget(reads, 1)
 
-            layout_lbl = QLabel(run.layout.title())
+            layout_lbl = QLabel(run['library_layout'].title())
             layout_lbl.setStyleSheet(f"font-size:11px;color:{TEXT_M};")
             row.addWidget(layout_lbl, 1)
 
-            status_text  = "✓  Uploaded" if run.uploaded else "○  Pending"
-            status_color = SUCCESS_FG    if run.uploaded else TEXT_HINT
+            status_text  = "✓  Uploaded" if run['uploaded'] else "○  Pending"
+            status_color = SUCCESS_FG    if run['uploaded'] else TEXT_HINT
             st = QLabel(status_text)
             st.setStyleSheet(f"font-size:11px;color:{status_color};")
             row.addWidget(st, 1)
 
-            if run.qiime_error:
-                qiime_lbl = QLabel(f"⚠  {run.qiime_error[:60]}")
+            if run['qiime_error']:
+                qiime_lbl = QLabel(f"⚠  {run['qiime_error'][:60]}")
                 qiime_lbl.setStyleSheet(f"font-size:10px;color:{DANGER_FG};")
             else:
                 qiime_lbl = QLabel("—")
@@ -383,29 +385,29 @@ class UploadRunsPage(QWidget):
         _clear(self._runs_body)
         _clear(self._error_area)
 
-        for run in state.runs:
+        for i, run in enumerate(state.runs.values(), start=1):
             row = QHBoxLayout(); row.setSpacing(12)
-            lbl = QLabel(f"<b>{run.label}</b>  {run.accession}")
+            lbl = QLabel(f"<b>{run['label']}</b>  {run['run_accession']}")
             lbl.setObjectName("label_muted"); lbl.setFixedWidth(180)
             row.addWidget(lbl)
 
-            status_lbl = QLabel("✓  Uploaded" if run.uploaded else "○  Pending")
+            status_lbl = QLabel("✓  Uploaded" if run['uploaded'] else "○  Pending")
             status_lbl.setStyleSheet(
-                f"color:{'#065F46' if run.uploaded else '#9CA3AF'}; font-size:12px;")
+                f"color:{'#065F46' if run['uploaded'] else '#9CA3AF'}; font-size:12px;")
             row.addWidget(status_lbl); row.addStretch()
 
-            browse_btn = btn_outline(f"Browse file for {run.label}…")
+            browse_btn = btn_outline(f"Browse file for {run['label']}…")
             browse_btn.clicked.connect(
-                lambda _, r=run.label: self._browse(r))
+                lambda _, r=run['label']: self._browse(r))
             row.addWidget(browse_btn)
 
             self._runs_body.addLayout(row)
-            self._row_widgets[run.label] = {"status": status_lbl}
-            if run != state.runs[-1]:
+            self._row_widgets[run['label']] = {"status": status_lbl}
+            if i < state.run_count:
                 self._runs_body.addWidget(hdivider())
 
-        for run in state.runs:
-            if run.qiime_error:
+        for run in state.runs.values():
+            if run['qiime_error']:
                 b = QFrame(); b.setObjectName("banner_err")
                 bl = QHBoxLayout(b); bl.setContentsMargins(12, 8, 12, 8)
                 l = QLabel(f"{run.label} — {run.qiime_error}")
@@ -475,7 +477,7 @@ class UploadRunsPage(QWidget):
         and shows the Run Pipeline button ready to fire.
         """
         self.load(state)
-        uploaded = [r for r in state.runs if r.uploaded]
+        uploaded = [r for r in state.runs.values() if r['uploaded']]
         if uploaded:
             self.show_download_status(
                 f"✓  {len(uploaded)} of {state.run_count} run"

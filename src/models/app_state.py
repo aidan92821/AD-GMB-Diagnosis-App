@@ -35,12 +35,15 @@ class AppState:
     """
     # ── Project-level ─────────────────────────────────────────────────────────
     bioproject_id:  str = ""
-    project_id:     str = ""           # SRA study ID, e.g. SRP296181
+    project_uid:    str = ""           # SRA study ID, e.g. SRP296181
     title:          str = ""
     organism:       str = ""
+    single_runs:  list = field(default_factory=list) # holds the current single end SRRs to download
+    paired_runs:  list = field(default_factory=list) # holds the current paired end SRRs to download
+    run_count:      int = 0
 
     # ── Runs ──────────────────────────────────────────────────────────────────
-    runs: list[RunState] = field(default_factory=list)
+    runs: dict = field(default_factory=dict)
 
     # ── Analysis results (filled after QIIME2 runs) ───────────────────────────
     asv_count:      int  = 0
@@ -69,19 +72,19 @@ class AppState:
 
     @property
     def run_labels(self) -> list[str]:
-        return [r.label for r in self.runs]
-
-    @property
-    def run_count(self) -> int:
-        return len(self.runs)
+        return [r['label'] for r in self.runs.values()]
 
     @property
     def uploaded_count(self) -> int:
-        return sum(1 for r in self.runs if r.uploaded)
+        return sum(
+            2 if run['uploaded'] and run['library_layout'] == 'PAIRED'
+            else 1 if run['uploaded'] and run['library_layout'] == 'SINGLE'
+            else 0
+            for run in self.runs.values())
 
     @property
     def library_layout(self) -> str:
-        layouts = {r.layout.upper() for r in self.runs}
+        layouts = {r['library_layout'].upper() for r in self.runs.values()}
         if layouts == {"PAIRED"}:  return "Paired-end"
         if layouts == {"SINGLE"}:  return "Single-end"
         if layouts:                return "Paired + Single"
@@ -98,15 +101,15 @@ class AppState:
     def run_colors(self) -> dict[str, str]:
         palette = ["#10B981", "#6366F1", "#F59E0B", "#EF4444",
                    "#8B5CF6", "#14B8A6", "#F97316", "#EC4899"]
-        return {r.label: palette[i % len(palette)]
-                for i, r in enumerate(self.runs)}
+        return {r['label']: palette[i % len(palette)]
+                for i, r in enumerate(self.runs.values())}
 
     def to_project_dict(self) -> dict:
         """Return the dict shape OverviewPage.load_project() expects."""
         rc = self.run_colors()
         return {
             "bioproject_id":   self.bioproject_id,
-            "project_id":      self.project_id,
+            "project_uid":     self.project_uid,
             "title":           self.title,
             "runs":            self.run_labels,
             "run_accessions":  {r.label: r.accession   for r in self.runs},
