@@ -1,26 +1,40 @@
+from __future__ import annotations
 import csv
 import pandas as pd
 from pathlib import Path
-import io, os
+from typing import TYPE_CHECKING
+import os
 import shutil
-import subprocess
 
+if TYPE_CHECKING:
+    from models.app_state import AppState
 
 # make sure that in the UI, user knows they can only download max 4 runs at a time
 # this function downloads one run at a time if the run is specified
 # it can download up to 4 runs at a time if no run is specified
 # returns two lists of strings: paired end runs and single end runs (SRR Accessions)
-def get_runs(bioproject: str, srr=None, n_runs=1) -> tuple[list[str], list[str]]:
+def fetch_runs(email, runner, bioproject: str, srr=None, n_runs=1) -> tuple[list[str], list[str], dict]:
+
+    env = os.environ.copy()
+    env.update({
+        "EMAIL": email
+    })
 
     # fetch information about the runs in the bioproject into a csv
-    result = subprocess.run(
-        f"esearch -db sra -query {bioproject} | efetch -format runinfo",
-        shell=True,
-        capture_output=True,
-        text=True,
-        check=True )
-    info = pd.read_csv(io.StringIO(result.stdout))
+    esearch = runner.es_run([
+        "esearch", 
+        "-db", "sra",
+        "-query", bioproject
+    ], env=env)
+    result = runner.ef_run([
+        "efetch",
+        "-format", "runinfo"
+    ], es_process=esearch, env=env)
+    
+    
+    info = pd.read_csv(result)
 
+<<<<<<< HEAD
     if srr:
         filtered = info.loc[info['Run'] == srr]
         info = filtered if not filtered.empty else info.head(n_runs)
@@ -32,20 +46,77 @@ def get_runs(bioproject: str, srr=None, n_runs=1) -> tuple[list[str], list[str]]
             f"No runs found for BioProject '{bioproject}'"
             + (f" with run accession '{srr}'" if srr else "") + "."
         )
+=======
+    # only bioproject is specified
+    if srr is None or info.loc[info['Run'] == srr] is None:
+        # select the first n_runs runs from the dataset if srr is None
+        # or select the first run from the dataset if srr not associate with this bioproject
+        # (n_runs will == 1 if srr is supplied to GUI)
+        info = info.head(n_runs)
+    # run id is specified
+    else: 
+        # get the specific run
+        info = info.loc[info['Run'] == srr]            
+>>>>>>> feature/ui-pipeline
 
     # determine paired or single end
     paired_runs = info.loc[info['LibraryLayout'] == 'PAIRED', 'Run'].tolist()
     single_runs = info.loc[info['LibraryLayout'] == 'SINGLE', 'Run'].tolist()
 
+<<<<<<< HEAD
     return paired_runs, single_runs
+=======
+    # get the run record (using a dict instead of RunRecord class)
+    runs: list[dict] = []
+    for i, (_, row) in enumerate(info.iterrows(), start=1):
+        layout = str(row.get("LibraryLayout", "")).upper()
+        if layout not in {"PAIRED", "SINGLE"}:
+            layout = "PAIRED"
+
+        runs.append({
+            'run_accession'    : row.get("Run", ""),
+            'label'            : f"R{i}",
+            'read_count'       : int(row.get("spots", 0)),
+            'base_count'       : int(row.get("bases", 0)),
+            'library_layout'   : layout,
+            'library_strategy' : row.get("LibraryStrategy", ""),
+            'platform'         : row.get("Platform", ""),
+            'instrument'       : row.get("Model", ""),
+            'sample_accession' : row.get("BioSample", ""),
+            'organism'         : row.get("ScientificName", ""),
+            'uploaded'         : False,
+            'qiime_error'      : ""
+        })
+    
+    # get project meta data
+    first       = info.iloc[0]
+    project_uid = str(first.get("ProjectID", "")).strip()
+    sra_study   = str(first.get("SRAStudy", "")).strip()
+    organism    = str(first.get("ScientificName", "")).strip()
+
+    # get the project record (using a dict instead of ProjectRecord class)
+    project = {
+        'bioproject_id' : bioproject,
+        'project_uid'   : project_uid,
+        'sra_study_id'  : sra_study,
+        'title'         : f"{bioproject}",
+        'description'   : "",
+        'organism'      : organism,
+        'runs'          : runs,
+    }
+
+    return single_runs, paired_runs, project
+>>>>>>> feature/ui-pipeline
 
 
 # lib_layout = 'paired' or 'single'
 # runs = list of SRR Accessions
-def fetch_runs(bioproject: str, lib_layout: str, runs: list[str]):
-
+def download_runs(runner, bioproject: str, lib_layout: str, runs: list[str], state: AppState) -> AppState:
+    
     # create temporary directory for fetching
-    output_dir_fastq = f"data/{bioproject}/fastq/{lib_layout}"
+    APP_DIR = Path(__file__).parent
+    SRA_BIN = APP_DIR / "bin" / "sratoolkit" / "bin"
+    output_dir_fastq = str((APP_DIR / f"data/{bioproject}/fastq/{lib_layout}").resolve())
     Path(output_dir_fastq).mkdir(parents=True, exist_ok=True)
 
     # get the number of cores from user's machine
@@ -55,20 +126,31 @@ def fetch_runs(bioproject: str, lib_layout: str, runs: list[str]):
 
     # fetch from NCBI and convert to fastq files -> output_dir
     for run in runs:
+<<<<<<< HEAD
         subprocess.run(['fasterq-dump', run, '--split-files',
                         '--threads', cores,
                         '--outdir', output_dir_fastq],
                         check=True)
+=======
+        runner.fq_run([
+            str(SRA_BIN / "fasterq-dump"), run, "--split-files",
+            "--threads", cores,
+            "--outdir", output_dir_fastq
+        ])
+
+    return state   
+>>>>>>> feature/ui-pipeline
 
 
 # lib_layout = 'paired' or 'single'
-def write_manifest(bioproject: str, lib_layout: str):
-
-    input_dir = f"data/{bioproject}/fastq/{lib_layout}"
-
-    # create the temporary qiime directory
-    output_dir = f"data/{bioproject}/qiime/{lib_layout}"
-    Path(output_dir).mkdir(exist_ok=True)
+def write_manifest(bioproject: str, lib_layout: str, state: AppState) -> None:
+    
+    APP_DIR = Path(__file__).parent
+    input_dir = str((APP_DIR / f"data/{bioproject}/fastq/{lib_layout}").resolve())
+    output_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
+    
+    # # create the temporary qiime directory
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
 
     # organize fastq types
     files = os.listdir(input_dir)
@@ -90,16 +172,29 @@ def write_manifest(bioproject: str, lib_layout: str):
                                  'forward-absolute-filepath',
                                  'reverse-absolute-filepath'])
                 for f, r in zip(forward, reverse):
+<<<<<<< HEAD
                     writer.writerow([f"{f[:-8]}",
                                      Path(f"{input_dir}/{f}").resolve(),
                                      Path(f"{input_dir}/{r}").resolve()])
+=======
+                    state.runs[f[:-8]]['uploaded'] = True
+                    writer.writerow([f"{f[:-8]}", 
+                                     Path(f"{input_dir}/{f}").resolve(), 
+                                     Path(f"{input_dir}/{r}").resolve()]) # -8 removes _#.fastq chars and keeps srr accession only
+>>>>>>> feature/ui-pipeline
             else:
                 # single end
                 writer.writerow(['sample-id',
                                  'absolute-filepath'])
                 for s in files:
+<<<<<<< HEAD
                     writer.writerow([f"{s[:-6]}",
                                      Path(f"{input_dir}/{s}").resolve()])
+=======
+                    state.runs[s[:-6]]['uploaded'] = True
+                    writer.writerow([f"{s[:-6]}", 
+                                     Path(f"{input_dir}/{s}").resolve()]) # -6 removes .fastq chars and keeps srr accession only
+>>>>>>> feature/ui-pipeline
 
 
 # clean up the temporary files
@@ -110,31 +205,47 @@ def cleanup(bioproject):
     shutil.rmtree(Path("data") / bioproject / "qiime")
 
 
-def fetch_ncbi_data(bioproject: str, srr=None, n_runs=1) -> dict[str: bool]:
+'''DEPRECATED'''
+def fetch_ncbi_data(email, runner, bioproject: str, state: AppState, srr=None, n_runs=1) -> dict[str: bool]:
 
     lib_layout = {
         'paired': False,
         'single': False,
     }
 
+<<<<<<< HEAD
     paired_runs, single_runs = get_runs(bioproject=bioproject,
                               srr=srr,
                               n_runs=n_runs)
 
+=======
+    paired_runs, single_runs, project = fetch_runs(email,
+                                                   runner,
+                                                   bioproject=bioproject,
+                                                   srr=srr,
+                                                   n_runs=n_runs)
+    
+>>>>>>> feature/ui-pipeline
     if paired_runs:
-        fetch_runs(bioproject=bioproject,
-                   lib_layout='paired',
-                   runs=paired_runs)
+        state = download_runs(runner,
+                              bioproject=bioproject,
+                              lib_layout='paired',
+                              runs=paired_runs,
+                              state=state)
         write_manifest(bioproject=bioproject,
-                       lib_layout='paired')
+                       lib_layout='paired',
+                       state=state)
         lib_layout['paired'] = True
 
     if single_runs:
-        fetch_runs(bioproject=bioproject,
-                   lib_layout='single',
-                   runs=single_runs)
+        state = download_runs(runner,
+                              bioproject=bioproject,
+                              lib_layout='single',
+                              runs=single_runs,
+                              state=state)
         write_manifest(bioproject=bioproject,
-                       lib_layout='single')
+                       lib_layout='single',
+                       state=state)
         lib_layout['single'] = True
 
     return lib_layout
