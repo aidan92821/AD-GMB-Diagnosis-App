@@ -112,11 +112,11 @@ class AppState:
             "project_id":      self.project_id,
             "title":           self.title,
             "runs":            self.run_labels,
-            "run_accessions":  {r.label: r.accession   for r in self.runs},
-            "read_counts":     {r.label: r.read_count  for r in self.runs},
-            "uploaded":        {r.label: r.uploaded    for r in self.runs},
-            "qiime_errors":    {r.label: r.qiime_error for r in self.runs
-                                if r.qiime_error},
+            "run_accessions":  {r['label']: r['run_accession'] for r in self.runs.values()},
+            "read_counts":     {r['label']: r['read_count']    for r in self.runs.values()},
+            "uploaded":        {r['label']: r['uploaded']      for r in self.runs.values()},
+            "qiime_errors":    {r['label']: r['qiime_error']   for r in self.runs.values()
+                                if r.get('qiime_error')},
             "asv_count":       self.asv_count,
             "genus_count":     self.genus_count,
             "library":         self.library_layout,

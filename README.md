@@ -3,6 +3,28 @@
 A desktop application that fetches or imports gut microbiome sequencing data, processes it through a bioinformatics pipeline, and generates diversity analysis and an experimental Alzheimer's disease risk assessment.
 
 ---
+### Login & Register
+![Login page](docs/screenshots/login.png)
+
+### Overview
+![Overview page](docs/screenshots/overview.png)
+
+### Diversity Analysis
+![Diversity page](docs/screenshots/diversity.png)
+
+### Taxonomy
+![Taxonomy page](docs/screenshots/taxonomy.png)
+
+### Alzheimer Risk Assessment
+![Alzheimer risk page](docs/screenshots/alzheimer.png)
+
+### Biomarker and Research
+![Research page](docs/screenshots/biomarker.png)
+
+<!-- ### Profile & Project History
+![Profile page](docs/screenshots/profile.png) --> 
+
+---
 
 ### Login & Register
 ![Login page](docs/screenshots/login.png)
@@ -299,9 +321,9 @@ The SILVA classifier (~1.4 GB) downloads automatically on first pipeline run.
 
 ### Example BioProject accessions
 
-| Accession | Description |
-|---|---|
-| `PRJNA1020741` | Human gut microbiome study |
+| Accession | Description |  runs | 
+|---|---|---| 
+| `PRJNA385949` | Human gut microbiome study | 262
 | `PRJNA31257` | Homo sapiens gut microbiome |
 | `PRJNA743840` | Human gut 16S rRNA amplicon study |
 

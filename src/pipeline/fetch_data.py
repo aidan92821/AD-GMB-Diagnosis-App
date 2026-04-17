@@ -21,19 +21,22 @@ def get_runs(bioproject: str, srr=None, n_runs=1) -> tuple[list[str], list[str]]
         check=True )
     info = pd.read_csv(io.StringIO(result.stdout))
 
-    # only bioproject is specified
-    if srr is None:
-        # select the first n_runs runs from the dataset
+    if srr:
+        filtered = info.loc[info['Run'] == srr]
+        info = filtered if not filtered.empty else info.head(n_runs)
+    else:
         info = info.head(n_runs)
-    # run id is specified
-    else: 
-        # get the specific run
-        info = info.loc[info['Run'] == srr]
+
+    if info.empty:
+        raise RuntimeError(
+            f"No runs found for BioProject '{bioproject}'"
+            + (f" with run accession '{srr}'" if srr else "") + "."
+        )
 
     # determine paired or single end
     paired_runs = info.loc[info['LibraryLayout'] == 'PAIRED', 'Run'].tolist()
     single_runs = info.loc[info['LibraryLayout'] == 'SINGLE', 'Run'].tolist()
-    
+
     return paired_runs, single_runs
 
 
@@ -44,7 +47,7 @@ def fetch_runs(bioproject: str, lib_layout: str, runs: list[str]):
     # create temporary directory for fetching
     output_dir_fastq = f"data/{bioproject}/fastq/{lib_layout}"
     Path(output_dir_fastq).mkdir(parents=True, exist_ok=True)
-    
+
     # get the number of cores from user's machine
     # and calculate how many to use for the process
     cores = os.cpu_count()
@@ -52,8 +55,8 @@ def fetch_runs(bioproject: str, lib_layout: str, runs: list[str]):
 
     # fetch from NCBI and convert to fastq files -> output_dir
     for run in runs:
-        subprocess.run(['fasterq-dump', run, '--split-files', 
-                        '--threads', cores, 
+        subprocess.run(['fasterq-dump', run, '--split-files',
+                        '--threads', cores,
                         '--outdir', output_dir_fastq],
                         check=True)
 
@@ -77,26 +80,26 @@ def write_manifest(bioproject: str, lib_layout: str):
                 forward.append(file)
             elif '_2.fastq' in file:
                 reverse.append(file)
-        
+
         # open the manifest file for writing
         with open(f"{output_dir}/manifest.tsv", "w", newline="") as m:
             writer = csv.writer(m, delimiter='\t')
             if forward:
                 # paired end
-                writer.writerow(['sample-id', 
-                                 'forward-absolute-filepath', 
+                writer.writerow(['sample-id',
+                                 'forward-absolute-filepath',
                                  'reverse-absolute-filepath'])
                 for f, r in zip(forward, reverse):
-                    writer.writerow([f"{f[:-8]}", 
-                                     Path(f"{input_dir}/{f}").resolve(), 
-                                     Path(f"{input_dir}/{r}").resolve()]) # -8 removes _#.fastq chars and keeps srr accession only
+                    writer.writerow([f"{f[:-8]}",
+                                     Path(f"{input_dir}/{f}").resolve(),
+                                     Path(f"{input_dir}/{r}").resolve()])
             else:
                 # single end
-                writer.writerow(['sample-id', 
+                writer.writerow(['sample-id',
                                  'absolute-filepath'])
                 for s in files:
-                    writer.writerow([f"{s[:-6]}", 
-                                     Path(f"{input_dir}/{s}").resolve()]) # -6 removes .fastq chars and keeps srr accession only
+                    writer.writerow([f"{s[:-6]}",
+                                     Path(f"{input_dir}/{s}").resolve()])
 
 
 # clean up the temporary files
@@ -117,7 +120,7 @@ def fetch_ncbi_data(bioproject: str, srr=None, n_runs=1) -> dict[str: bool]:
     paired_runs, single_runs = get_runs(bioproject=bioproject,
                               srr=srr,
                               n_runs=n_runs)
-    
+
     if paired_runs:
         fetch_runs(bioproject=bioproject,
                    lib_layout='paired',
@@ -125,7 +128,7 @@ def fetch_ncbi_data(bioproject: str, srr=None, n_runs=1) -> dict[str: bool]:
         write_manifest(bioproject=bioproject,
                        lib_layout='paired')
         lib_layout['paired'] = True
-    
+
     if single_runs:
         fetch_runs(bioproject=bioproject,
                    lib_layout='single',
@@ -133,5 +136,5 @@ def fetch_ncbi_data(bioproject: str, srr=None, n_runs=1) -> dict[str: bool]:
         write_manifest(bioproject=bioproject,
                        lib_layout='single')
         lib_layout['single'] = True
-        
+
     return lib_layout

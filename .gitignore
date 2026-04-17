@@ -2,6 +2,7 @@
 *.db
 data/
 exports/
+logs/
 
 # ── Bioinformatics files ──────────────────────────────────────────────────────
 *.fastq
@@ -13,17 +14,27 @@ exports/
 *.qzv
 *.bam
 *.sam
+*.vcf
+*.bed
 
 # ── Downloaded classifiers / large model files ────────────────────────────────
-src/pipeline/taxa_classifier/*.qza
+src/pipeline/taxa_classifier/
+taxa_classifier/
 models/*.pkl
 
-# ── QIIME2 conda environment file (downloaded, not authored) ─────────────────
+# ── Downloaded tools & environments (large binaries, not authored) ───────────
+src/pipeline/bin/
+src/pipeline/qiime_env/
+src/pipeline/data/
+
+# ── fasterq-dump temporary files ─────────────────────────────────────────────
+fasterq.tmp*/
+
+# ── QIIME2 conda environment files ───────────────────────────────────────────
 qiime2-*.yml
 
 # ── Python ────────────────────────────────────────────────────────────────────
 **/__pycache__/
-__pycache__/
 *.py[cod]
 *.pyo
 .pytest_cache/
@@ -31,6 +42,8 @@ __pycache__/
 dist/
 build/
 .eggs/
+.coverage
+htmlcov/
 
 # ── Virtual environments ──────────────────────────────────────────────────────
 venv/
@@ -39,12 +52,13 @@ env/
 src/venv/
 
 # ── Compiled / binary artifacts ───────────────────────────────────────────────
-python3
 *.dylib
 *.so
+*.o
 
 # ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store
+**/.DS_Store
 Thumbs.db
 
 # ── IDE ───────────────────────────────────────────────────────────────────────
@@ -52,3 +66,13 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+*.orig
+
+# ── Secrets & environment variables ──────────────────────────────────────────
+.env
+.env.*
+*.pem
+*.key
+
+# ── Claude Code session data ──────────────────────────────────────────────────
+.claude/
