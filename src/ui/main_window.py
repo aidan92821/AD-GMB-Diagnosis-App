@@ -943,11 +943,7 @@ class MainWindow(QMainWindow):
         self._active_idx  = 0
         self._state       = AppState()
         self._current_user: dict | None = None
-<<<<<<< HEAD
         self._live_threads: list[QThread] = []   # keeps threads alive until they finish
-=======
-        self._runner = QiimeRunner()
->>>>>>> feature/ui-pipeline
 
         self._build_ui()
 
@@ -1200,7 +1196,6 @@ class MainWindow(QMainWindow):
         self._status_badge.setText("Fetching from NCBI…")
         self._status_badge.show()
 
-<<<<<<< HEAD
         self._fetch_thread = self._make_thread()
         self._fetch_worker = _FetchWorker(bioproject, run_accession, max_runs)
         self._fetch_worker.moveToThread(self._fetch_thread)
@@ -1210,23 +1205,6 @@ class MainWindow(QMainWindow):
         self._fetch_worker.finished.connect(self._fetch_thread.quit)
         self._fetch_worker.errored.connect(self._fetch_thread.quit)
         self._fetch_thread.start()
-=======
-        # emma changes
-        self._fetch_real_thread = QThread(self)
-        self._fetch_real_worker = _FetchWorkerReal(bioproject=bioproject,
-                                                   email=email,
-                                                   runner=self._runner,
-                                                   srr=run_accession,
-                                                   n_runs=max_runs)
-        self._fetch_real_worker.moveToThread(self._fetch_real_thread)
-        self._fetch_real_thread.started.connect(self._fetch_real_worker.run)
-        self._fetch_real_worker.finished.connect(self._on_fetch_complete)
-        self._fetch_real_worker.errored.connect(self._on_fetch_error)
-        self._fetch_real_worker.finished.connect(self._fetch_real_thread.quit)
-        self._fetch_real_worker.errored.connect(self._fetch_real_thread.quit)
-        self._fetch_real_thread.start()
-        # emma changes
->>>>>>> feature/ui-pipeline
 
 
         # self._fetch_thread = QThread(self)
@@ -1267,23 +1245,14 @@ class MainWindow(QMainWindow):
         # Persist project to DB so it appears on the profile page
         if self._current_user:
             try:
-<<<<<<< HEAD
                 from services.assessment_service import save_ncbi_project
                 result = save_ncbi_project(
-=======
-                save_ncbi_project(
->>>>>>> feature/ui-pipeline
                     user_id            = self._current_user["user_id"],
                     bio_proj_accession = state.bioproject_id,
                     title              = state.title or state.bioproject_id,
                     runs               = [
-<<<<<<< HEAD
                         {"accession": r.accession, "layout": r.layout}
                         for r in state.runs
-=======
-                        {"accession": accession, "layout": run_dict['library_layout']}
-                        for accession, run_dict in state.runs.items()
->>>>>>> feature/ui-pipeline
                     ],
                 )
                 state.db_project_id = result["project_id"]   # ← link state to DB row
@@ -1312,7 +1281,6 @@ class MainWindow(QMainWindow):
         """Start fasterq-dump download; fall back to analysis-only if unavailable."""
         self._status_badge.setText("Downloading FASTQ files…")
 
-<<<<<<< HEAD
         self._dl_thread = self._make_thread()
         self._dl_worker = _DownloadWorker(self._state)
         self._dl_worker.moveToThread(self._dl_thread)
@@ -1323,32 +1291,6 @@ class MainWindow(QMainWindow):
         self._dl_worker.finished.connect(self._dl_thread.quit)
         self._dl_worker.errored.connect(self._dl_thread.quit)
         self._dl_thread.start()
-=======
-        # emma changes
-        self._dl_thread_real = QThread(self)
-        self._dl_worker_real = _DownloadWorkerReal(state=self._state, runner=self._runner)
-        self._dl_worker_real.moveToThread(self._dl_thread_real)
-        self._dl_thread_real.started.connect(self._dl_worker_real.run)
-        self._dl_worker_real.progress.connect(self._on_analysis_progress)
-        self._dl_worker_real.finished.connect(self._on_download_complete)
-        self._dl_worker_real.errored.connect(self._on_download_error)
-        self._dl_worker_real.finished.connect(self._dl_thread_real.quit)
-        self._dl_worker_real.errored.connect(self._dl_thread_real.quit)
-        self._dl_thread_real.start()
-        # emma changes
-
-
-        # self._dl_thread = QThread(self)
-        # self._dl_worker = _DownloadWorker(self._state)
-        # self._dl_worker.moveToThread(self._dl_thread)
-        # self._dl_thread.started.connect(self._dl_worker.run)
-        # self._dl_worker.progress.connect(self._on_analysis_progress)
-        # self._dl_worker.finished.connect(self._on_download_complete)
-        # self._dl_worker.errored.connect(self._on_download_error)
-        # self._dl_worker.finished.connect(self._dl_thread.quit)
-        # self._dl_worker.errored.connect(self._dl_thread.quit)
-        # self._dl_thread.start()
->>>>>>> feature/ui-pipeline
 
     def _on_download_complete(self, state: "AppState") -> None:
         """All (or some) runs downloaded — auto-populate Upload page, then run analysis."""
@@ -1360,17 +1302,9 @@ class MainWindow(QMainWindow):
             f"{state.run_count} run{'s' if state.run_count != 1 else ''} loaded  ·  "
             f"{uploaded} FASTQ downloaded"
         )
-<<<<<<< HEAD
         self._status_badge.setText("Computing analysis…")
 
         # Populate Upload Runs page with the downloaded files
-=======
-        self._status_badge.setText("Ready to run QIIME preprocessing")
-        self._status_badge.setObjectName("badge_green")
-        self._status_badge.style().unpolish(self._status_badge)
-        self._status_badge.style().polish(self._status_badge)
-        # Auto-populate Upload Runs page with the downloaded files
->>>>>>> feature/ui-pipeline
         self._upload_page.auto_mark_uploaded(state)
         self._upload_page.set_pipeline_callback(self._on_run_pipeline)
 
@@ -1488,77 +1422,15 @@ class MainWindow(QMainWindow):
             )
 
     def _on_run_pipeline(self) -> None:
-<<<<<<< HEAD
         if not self._state.runs:
             return
         self._upload_page.set_pipeline_running(True)
         self._status_badge.setText("Running analysis…")
-=======
-        # Check whether QIIME2 conda env is available before starting the
-        # heavyweight pipeline worker.  If not, fall back to the in-app
-        # analysis worker (which still uses the downloaded FASTQ metadata).
-        # qiime2_available = False
-        # try:
-        #     import subprocess as _sp
-        #     result = _sp.run(
-        #         ["conda", "run", "-n", "qiime2-amplicon-2024.10",
-        #          "qiime", "--version"],
-        #         capture_output=True, text=True, timeout=15,
-        #     )
-        #     qiime2_available = result.returncode == 0
-        # except Exception:
-        #     qiime2_available = False
-
-        # if not qiime2_available:
-        #     self._upload_page.show_download_status(
-        #         "ℹ  QIIME2 environment (qiime2-amplicon-2024.10) not found.\n"
-        #         "Running in-app analysis instead.\n\n"
-        #         "To enable real QIIME2 processing, install it with:\n"
-        #         "  conda env create -n qiime2-amplicon-2024.10 "
-        #         "--file https://data.qiime2.org/distro/amplicon/"
-        #         "qiime2-amplicon-2024.10-py310-osx-conda.yml",
-        #         kind="warn",
-        #     )
-        #     self._status_badge.setText("Computing analysis…")
-        #     self._run_analysis()
-        #     return
-
-        self._status_badge.setText("Running QIIME2 pipeline…")
->>>>>>> feature/ui-pipeline
         self._status_badge.setObjectName("badge_yellow")
         self._status_badge.style().unpolish(self._status_badge)
         self._status_badge.style().polish(self._status_badge)
         self._status_badge.show()
-<<<<<<< HEAD
         self._run_analysis()
-=======
-
-        # self._pipeline_thread = QThread(self)
-        # self._pipeline_worker = _PipelineWorker(self._state, n_runs=self._state.run_count)
-        # self._pipeline_worker.moveToThread(self._pipeline_thread)
-        # self._pipeline_thread.started.connect(self._pipeline_worker.run)
-        # self._pipeline_worker.progress.connect(self._on_analysis_progress)
-        # self._pipeline_worker.finished.connect(self._on_pipeline_complete)
-        # self._pipeline_worker.errored.connect(self._on_pipeline_error)
-        # self._pipeline_worker.finished.connect(self._pipeline_thread.quit)
-        # self._pipeline_worker.errored.connect(self._pipeline_thread.quit)
-        # self._pipeline_thread.start()
-
-        # emma changes
-        self._pipeline_thread_real = QThread(self)
-        self._pipeline_worker_real = _PipelineWorkerReal(runner=self._runner,
-                                                         bioproject=self._state.bioproject_id,
-                                                         state=self._state)
-        self._pipeline_worker_real.moveToThread(self._pipeline_thread_real)
-        self._pipeline_thread_real.started.connect(self._pipeline_worker_real.run)
-        self._pipeline_worker_real.progress.connect(self._on_analysis_progress)
-        self._pipeline_worker_real.finished.connect(self._on_pipeline_complete)
-        self._pipeline_worker_real.errored.connect(self._on_pipeline_error)
-        self._pipeline_worker_real.finished.connect(self._pipeline_thread_real.quit)
-        self._pipeline_worker_real.errored.connect(self._pipeline_thread_real.quit)
-        self._pipeline_thread_real.start()
-        # emma changes
->>>>>>> feature/ui-pipeline
 
     def _on_pipeline_complete(self, state: AppState) -> None:
         self._state = state
