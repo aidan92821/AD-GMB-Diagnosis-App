@@ -527,9 +527,9 @@ class _DownloadWorker(QObject):
         cores           = str(max((os.cpu_count() or 4) - 1, 1))
         failed_details: list[str] = []
 
-        for run in state.runs.values():
-            srr     = run['run_accession']
-            layout  = (run.get('library_layout') or "PAIRED").lower()
+        for run in state.runs:
+            srr     = run.accession
+            layout  = (run.layout or "PAIRED").lower()
             out_dir = project_dir / "fastq" / layout
             out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -559,8 +559,8 @@ class _DownloadWorker(QObject):
 
                     fastq_files = sorted(out_dir.glob(f"{srr}*.fastq"))
                     if fastq_files:
-                        run['fastq_path'] = str(fastq_files[0])
-                        run['uploaded']   = True
+                        run.fastq_path = str(fastq_files[0])
+                        run.uploaded   = True
                         mb = sum(f.stat().st_size for f in fastq_files) // 1_048_576
                         self.progress.emit(f"✓ {srr} — {len(fastq_files)} file(s), {mb} MB")
                         continue
@@ -622,8 +622,8 @@ class _DownloadWorker(QObject):
 
                 fastq_files = sorted(out_dir.glob(f"{srr}*.fastq"))
                 if fastq_files:
-                    run['fastq_path'] = str(fastq_files[0])
-                    run['uploaded']   = True
+                    run.fastq_path = str(fastq_files[0])
+                    run.uploaded   = True
                     mb = sum(f.stat().st_size for f in fastq_files) // 1_048_576
                     self.progress.emit(f"✓ {srr} (SRA toolkit) — {len(fastq_files)} file(s), {mb} MB")
                 else:
@@ -640,14 +640,14 @@ class _DownloadWorker(QObject):
         # ── Write QIIME2 manifest files ───────────────────────────────────────
         try:
             from pipeline.fetch_data import write_manifest
-            layouts = {(r.get('library_layout') or "PAIRED").lower() for r in state.runs.values() if r['uploaded']}
+            layouts = {(r.layout or "PAIRED").lower() for r in state.runs if r.uploaded}
             for layout in layouts:
                 write_manifest(state.bioproject_id, layout)
         except Exception:
             pass
 
         # ── Final result ──────────────────────────────────────────────────────
-        any_ok = any(r['uploaded'] for r in state.runs.values())
+        any_ok = any(r.uploaded for r in state.runs)
 
         if not any_ok and failed_details:
             diag = "\n".join(f"  • {d}" for d in failed_details[:4])
@@ -662,7 +662,7 @@ class _DownloadWorker(QObject):
         if failed_details:
             self.progress.emit(
                 f"Warning: {len(failed_details)} run(s) failed, "
-                f"{sum(1 for r in state.runs.values() if r['uploaded'])} succeeded"
+                f"{sum(1 for r in state.runs if r.uploaded)} succeeded"
             )
 
         self.finished.emit(state)
@@ -1220,18 +1220,18 @@ class MainWindow(QMainWindow):
         except (ImportError, AttributeError):
             valid, error = True, ""
 
-        for run in self._state.runs.values():
-            if run['label'] == run_label:
-                run['uploaded']    = valid
-                run['fastq_path']  = path if valid else ""
-                run['qiime_error'] = error if not valid else ""
+        for run in self._state.runs:
+            if run.label == run_label:
+                run.uploaded    = valid
+                run.fastq_path  = path if valid else ""
+                run.qiime_error = error if not valid else None
                 break
 
         self._upload_page.update_run_status(run_label, valid, error)
         self._overview_page.load(self._state)
 
-        any_uploaded = any(r['uploaded'] for r in self._state.runs.values())
-        all_uploaded = all(r['uploaded'] for r in self._state.runs.values())
+        any_uploaded = any(r.uploaded for r in self._state.runs)
+        all_uploaded = all(r.uploaded for r in self._state.runs)
         if any_uploaded:
             self._upload_page.show_run_pipeline_btn(
                 ready=all_uploaded,
