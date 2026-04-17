@@ -35,7 +35,7 @@ def clean_genus(tax_string):
 
     return genus
 
-def parse_genus_table(genus: str):
+def parse_genus_table(genus: str): # dictionary of lists of tuples(str, float)
     # reformat the table
     abundance = pd.read_csv(genus, sep="\t", skiprows=1)
     abundance.rename(columns={'#OTU ID': 'genus'}, inplace=True)
@@ -60,7 +60,7 @@ features=[{'sequence': 'TGGGCGAGAGCCTGAACCAGCCAAGTAGCGTG',
            'feature_id': '21f4de567ca86c973a9a0d07ed17e3d2', 
            'taxonomy': 'd__Bacteria;p__Bacteroidota;c__Bacteroidia;o__Bacteroidales;f__Prevotellaceae;g__Prevotella_9;s__'}]
 '''
-def parse_feat_tax_seqs(tax: str, seqs: str):
+def parse_feat_tax_seqs(tax: str, seqs: str) -> list[dict]:
     # get the dataframe
     taxonomy = pd.read_csv(tax, sep='\t')
 
@@ -97,6 +97,9 @@ def parse_feature_counts(feat: str):
     # get a dictionary of column_name (srr): list of tuples (feature_id, raw abundance counts)
     features = {}
     for col in feature_table.columns[1:]:
-        features[col] = [(row['feature_id'], row[col]) for _, row in feature_table.iterrows()]
+        features[col] = { 
+            row['feature_id'] : int(row[col])
+            for _, row in feature_table.iterrows() 
+        }
 
     return features

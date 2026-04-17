@@ -185,7 +185,7 @@ class _ParseWorkerReal(QObject):
                     except ServiceError:
                         db_run = create_run(project_id=project['project_id'], source='ncbi', srr_accession=run,
                                             bio_proj_accession=self._state.bioproject_id, library_layout='paired')
-                        ingest_run_data(run_id=db_run['run_id'], genus_rows=row, features=feature_seqs, feature_counts=feature_counts)
+                        ingest_run_data(run_id=db_run['run_id'], genus_rows=row, features=feature_seqs, feature_counts=feature_counts[run])
             
             # parse the single end tables
             if self._state.single_runs:
@@ -193,17 +193,18 @@ class _ParseWorkerReal(QObject):
                 feature_seqs   = parse_feat_tax_seqs(tax=f"{self._data_dir}/qiime/single/taxonomy.tsv",
                                                    seqs=f"{self._data_dir}/reps-tree/single/dna-sequences.fasta")
                 feature_counts = parse_feature_counts(feat=f"{self._data_dir}/qiime/single/feature-table.tsv")
-                
+
                 # TODO: allow for project retrieval if just getting more runs for the current project
                 project = create_project(user_id=self._user['user_id'], name=self._state.bioproject_id)
 
                 for run, row in abundances.items():
                     try:
-                        _ = get_run_id_by_srr(run)
+                        run_id = get_run_id_by_srr(run)
                     except ServiceError:
                         db_run = create_run(project_id=project['project_id'], source='ncbi', srr_accession=run,
                                             bio_proj_accession=self._state.bioproject_id, library_layout='single')
-                        ingest_run_data(run_id=db_run['run_id'], genus_rows=row, features=feature_seqs, feature_counts=feature_counts)
+                        run_id = db_run['run_id']
+                    ingest_run_data(run_id=run_id, genus_rows=row, features=feature_seqs, feature_counts=feature_counts[run])
             
             self.finished.emit(self._state)
         except Exception as exc:
