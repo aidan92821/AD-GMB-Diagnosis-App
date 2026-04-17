@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # src/services/__init__.py
 #
 # Re-export the functions that pipeline/pipeline.py imports via:
@@ -22,6 +21,3 @@ __all__ = [
     "ingest_run_data",
     "get_project_overview",
 ]
-=======
-from .assessment_service import *
->>>>>>> feature/ui-pipeline

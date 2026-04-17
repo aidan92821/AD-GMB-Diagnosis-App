@@ -216,14 +216,8 @@ class OverviewPage(QWidget):
     def _on_fetch_clicked(self):
         bp  = self._bp_input.text().strip()
         run = self._run_input.text().strip()
-<<<<<<< HEAD
         # When a specific SRR is given there is exactly one run to fetch
         n   = 1 if run else int(self._run_count.currentText())
-=======
-        n   = int(self._run_count.currentText())
-        email = 'emmanicolego@gmail.com'
-        user = None
->>>>>>> feature/ui-pipeline
         self._fetch_btn.setEnabled(False)
         self._fetch_btn.setText("  ⟳  Fetching…")
         self._bp_input.setEnabled(False)
@@ -236,7 +230,7 @@ class OverviewPage(QWidget):
             "background:#EEF2FF; border:1px solid #C7D2FE; border-radius:6px;")
         self._status_lbl.setStyleSheet("font-size:12px; color:#4338CA;")
         self._status_bar.show()
-        self.fetch_requested.emit(bp, run, n, email, user)
+        self.fetch_requested.emit(bp, run, n, "", None)
 
     # ── called by MainWindow ──────────────────────────────────────────────────
 
@@ -488,7 +482,6 @@ class UploadRunsPage(QWidget):
         self._state = state
         _clear(self._runs_body)
 
-<<<<<<< HEAD
         if not state.runs:
             self._runs_body.addWidget(_placeholder(
                 "No files added yet — click  ⬆ Browse files…  above to select FASTQ files."))
@@ -510,29 +503,31 @@ class UploadRunsPage(QWidget):
         rule.setStyleSheet(f"background:{BORDER};max-height:1px;")
         self._runs_body.addWidget(rule)
 
-        for i, run in enumerate(state.runs):
+        for i, run in enumerate(state.runs.values()):
             row = QHBoxLayout(); row.setContentsMargins(0, 8, 0, 8); row.setSpacing(12)
 
-            badge = QLabel(run.label)
+            badge = QLabel(run['label'])
             badge.setFixedWidth(38)
             badge.setStyleSheet(
                 "font-size:11px;font-weight:700;color:#6366F1;"
                 "background:#EEF2FF;border-radius:4px;padding:2px 6px;")
             row.addWidget(badge)
 
-            display = os.path.basename(run.fastq_path) if run.fastq_path else run.accession
+            fastq = run.get('fastq_path', '')
+            accession = run.get('run_accession', '')
+            display = os.path.basename(fastq) if fastq else accession
             name_lbl = QLabel(display)
             name_lbl.setStyleSheet("font-size:12px;color:#374151;")
-            name_lbl.setToolTip(run.fastq_path or run.accession)
+            name_lbl.setToolTip(fastq or accession)
             row.addWidget(name_lbl, 1)
 
-            layout_lbl = QLabel(run.layout.title())
+            layout_lbl = QLabel((run.get('library_layout') or 'PAIRED').title())
             layout_lbl.setFixedWidth(70)
             layout_lbl.setStyleSheet(f"font-size:11px;color:{TEXT_M};")
             row.addWidget(layout_lbl)
 
-            status_text  = "✓  Ready"   if run.uploaded else "○  Pending"
-            status_color = SUCCESS_FG   if run.uploaded else TEXT_HINT
+            status_text  = "✓  Ready"   if run['uploaded'] else "○  Pending"
+            status_color = SUCCESS_FG   if run['uploaded'] else TEXT_HINT
             st = QLabel(status_text)
             st.setFixedWidth(80)
             st.setStyleSheet(f"font-size:11px;color:{status_color};")
@@ -540,12 +535,12 @@ class UploadRunsPage(QWidget):
 
             rem = QPushButton("✕")
             rem.setFixedSize(28, 28)
-            rem.setToolTip(f"Remove {run.label}")
+            rem.setToolTip(f"Remove {run['label']}")
             rem.setStyleSheet(
                 "QPushButton{background:transparent;border:1.5px solid #FECACA;"
                 "border-radius:6px;color:#EF4444;font-size:12px;font-weight:700;}"
                 "QPushButton:hover{background:#FEF2F2;}")
-            rem.clicked.connect(lambda _, lbl=run.label: self.file_removed.emit(lbl))
+            rem.clicked.connect(lambda _, lbl=run['label']: self.file_removed.emit(lbl))
             row.addWidget(rem)
 
             self._runs_body.addLayout(row)
@@ -555,36 +550,6 @@ class UploadRunsPage(QWidget):
                 self._runs_body.addWidget(d)
 
         self._pipeline_widget.show()
-=======
-        for i, run in enumerate(state.runs.values(), start=1):
-            row = QHBoxLayout(); row.setSpacing(12)
-            lbl = QLabel(f"<b>{run['label']}</b>  {run['run_accession']}")
-            lbl.setObjectName("label_muted"); lbl.setFixedWidth(180)
-            row.addWidget(lbl)
-
-            status_lbl = QLabel("✓  Uploaded" if run['uploaded'] else "○  Pending")
-            status_lbl.setStyleSheet(
-                f"color:{'#065F46' if run['uploaded'] else '#9CA3AF'}; font-size:12px;")
-            row.addWidget(status_lbl); row.addStretch()
-
-            browse_btn = btn_outline(f"Browse file for {run['label']}…")
-            browse_btn.clicked.connect(
-                lambda _, r=run['label']: self._browse(r))
-            row.addWidget(browse_btn)
-
-            self._runs_body.addLayout(row)
-            self._row_widgets[run['label']] = {"status": status_lbl}
-            if i < state.run_count:
-                self._runs_body.addWidget(hdivider())
-
-        for run in state.runs.values():
-            if run['qiime_error']:
-                b = QFrame(); b.setObjectName("banner_err")
-                bl = QHBoxLayout(b); bl.setContentsMargins(12, 8, 12, 8)
-                l = QLabel(f"{run.label} — {run.qiime_error}")
-                l.setObjectName("banner_text_err"); l.setWordWrap(True)
-                bl.addWidget(l); self._error_area.addWidget(b)
->>>>>>> feature/ui-pipeline
 
     # ── Pipeline button helpers ───────────────────────────────────────────────
 
@@ -595,28 +560,10 @@ class UploadRunsPage(QWidget):
             pass
         self._pipeline_btn.clicked.connect(callback)
 
-<<<<<<< HEAD
     def set_pipeline_running(self, running: bool) -> None:
         self._pipeline_btn.setEnabled(not running)
         self._pipeline_btn.setText(
             "  ⟳  Running…" if running else "  ▶  Run Pipeline")
-=======
-    def auto_mark_uploaded(self, state: "AppState") -> None:
-        """
-        Called by MainWindow after fasterq-dump downloads complete.
-        Refreshes the run list (showing ✓ Uploaded for downloaded runs)
-        and shows the Run Pipeline button ready to fire.
-        """
-        self.load(state)
-        uploaded = [r for r in state.runs.values() if r['uploaded']]
-        if uploaded:
-            self.show_download_status(
-                f"✓  {len(uploaded)} of {state.run_count} run"
-                f"{'s' if state.run_count != 1 else ''} downloaded automatically "
-                f"to  data/{state.bioproject_id}/fastq/",
-                kind="ok",
-            )
->>>>>>> feature/ui-pipeline
 
     # ── Status banner ─────────────────────────────────────────────────────────
 

@@ -76,8 +76,8 @@ def _compute_taxonomy(state: AppState) -> None:
     """
     state.genus_abundances = {}
 
-    for run in state.runs:
-        seed_base = run.accession
+    for run in state.runs.values():
+        seed_base = run['run_accession']
 
         # Generate raw weights seeded by accession
         weights = []
@@ -92,7 +92,7 @@ def _compute_taxonomy(state: AppState) -> None:
 
         # Sort descending by abundance
         paired = sorted(zip(_GUT_GENERA, pcts), key=lambda x: -x[1])
-        state.genus_abundances[run.label] = paired
+        state.genus_abundances[run['label']] = paired
 
     state.genus_count = len(_GUT_GENERA)
 
@@ -104,8 +104,8 @@ def _compute_alpha_diversity(state: AppState) -> None:
     """
     state.alpha_diversity = {}
 
-    for run in state.runs:
-        genera = state.genus_abundances.get(run.label, [])
+    for run in state.runs.values():
+        genera = state.genus_abundances.get(run['label'], [])
         if not genera:
             continue
 
@@ -121,7 +121,7 @@ def _compute_alpha_diversity(state: AppState) -> None:
         # Create plausible box-plot whiskers around the point estimate
         # (in reality these come from rarefaction curves across samples)
         s_spread = shannon * 0.12
-        state.alpha_diversity[run.label] = {
+        state.alpha_diversity[run['label']] = {
             "shannon": (
                 round(shannon - 2 * s_spread, 3),
                 round(shannon - s_spread,     3),
@@ -230,21 +230,22 @@ def _compute_asv_features(state: AppState) -> None:
     """Generate a plausible ASV feature table for each run."""
     state.asv_features = {}
 
-    for run in state.runs:
-        genera = state.genus_abundances.get(run.label, [])
-        total_reads = run.read_count or 10_000
+    for run in state.runs.values():
+        genera = state.genus_abundances.get(run['label'], [])
+        total_reads = run.get('read_count') or 10_000
         features = []
         asv_idx  = 1
+        srr = run['run_accession']
 
         for genus, pct in genera:
             # Each genus gets 1-3 ASVs
-            n_asvs = 1 + int(_seed(f"{run.accession}_{genus}_n") * 2)
+            n_asvs = 1 + int(_seed(f"{srr}_{genus}_n") * 2)
             remaining_pct = pct
             for k in range(n_asvs):
                 if k == n_asvs - 1:
                     asv_pct = remaining_pct
                 else:
-                    frac    = 0.4 + _seed(f"{run.accession}_{genus}_{k}") * 0.4
+                    frac    = 0.4 + _seed(f"{srr}_{genus}_{k}") * 0.4
                     asv_pct = round(remaining_pct * frac, 2)
                     remaining_pct -= asv_pct
 
@@ -262,7 +263,7 @@ def _compute_asv_features(state: AppState) -> None:
 
         # Sort by count descending
         features.sort(key=lambda x: -x["count"])
-        state.asv_features[run.label] = features
+        state.asv_features[run['label']] = features
 
     state.asv_count = sum(len(f) for f in state.asv_features.values())
 
@@ -270,10 +271,10 @@ def _compute_asv_features(state: AppState) -> None:
 def _compute_phylo_tree(state: AppState) -> None:
     """Generate a text phylogenetic tree for display."""
     state.phylo_tree = {}
-    for run in state.runs:
-        genera = [g for g, _ in state.genus_abundances.get(run.label, [])[:6]]
+    for run in state.runs.values():
+        genera = [g for g, _ in state.genus_abundances.get(run['label'], [])[:6]]
         if not genera:
-            state.phylo_tree[run.label] = "(no data)"
+            state.phylo_tree[run['label']] = "(no data)"
             continue
         lines = []
         for i, g in enumerate(genera):
@@ -284,4 +285,4 @@ def _compute_phylo_tree(state: AppState) -> None:
                 lines.append(f"  └─── {g}")
             else:
                 lines.append(f"  ├─── {g}")
-        state.phylo_tree[run.label] = "\n".join(lines)
+        state.phylo_tree[run['label']] = "\n".join(lines)

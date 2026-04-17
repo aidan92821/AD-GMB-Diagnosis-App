@@ -14,7 +14,7 @@ def run_fetch(bioproject: str, email: str, srr: str=None, n_runs=1):
 
     CLASSIFIER = 'silva-138-99-nb-classifier.qza'
     SOURCE = 'https://data.qiime2.org/classifiers/sklearn-1.4.2/silva'
-    
+
     # ensures exact environment is used
     runner = QiimeRunner()
 
@@ -24,42 +24,29 @@ def run_fetch(bioproject: str, email: str, srr: str=None, n_runs=1):
                                  bioproject=bioproject,
                                  srr=srr,
                                  n_runs=n_runs)
-    
+
     # download classifier if it does not exist yet
     if CLASSIFIER not in os.listdir('taxa_classifier'):
         download_classifier(classifier_url=f"{SOURCE}/{CLASSIFIER}")
 
-<<<<<<< HEAD
-    # paired ends
-    if lib_layout['paired']:
-        preprocess_parse_import(bioproject=bioproject, project_id=project_id, project_name=project_name, lib_layout='paired', user=user)
-
-    # single ends
-    if lib_layout['single']:
-        preprocess_parse_import(bioproject=bioproject, project_id=project_id, project_name=project_name, lib_layout='single', user=user)
-
-
-def preprocess_parse_import(bioproject: str, project_id, project_name: str, lib_layout: str, user: dict):
-=======
     return lib_layout # to _on_fetch_request() in main_window.py
 
 
 def preprocess_parse_import(runner: QiimeRunner, bioproject: str, lib_layout: str, user: dict, project_id, project_name: str=None) -> None:
->>>>>>> feature/ui-pipeline
-    
+
     data_dir = f"data/{bioproject}/"
-    
+
     # preprocess with qiime2
     qiime_preprocess(runner,
                      bioproject=bioproject,
                      lib_layout=lib_layout)
-    
+
     # parse the data tables for db
     abundances = parse_genus_table(genus=f"{data_dir}/qiime/{lib_layout}/genus-table.tsv")
     feature_seqs = parse_feat_tax_seqs(tax=f"{data_dir}/qiime/{lib_layout}/taxonomy.tsv",
                         seqs=f"{data_dir}/reps-tree/{lib_layout}/dna-sequences.fasta")
     feature_counts = parse_feature_counts(feat=f"{data_dir}/qiime/{lib_layout}/feature-table.tsv")
-    
+
     # if project does not exist, make one and add runs
     if project_id is None:
         project = create_project(user_id=user['user_id'], name=project_name)

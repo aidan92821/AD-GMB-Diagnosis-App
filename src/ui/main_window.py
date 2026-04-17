@@ -332,17 +332,17 @@ class _AnalysisWorker(QObject):
             ("Veillonella",       1.5,  5.0, "parvula"),
         ]
 
-        runs = state.runs
+        run_list = list(state.runs.values())
         for i, lbl in enumerate(labels):
-            run = runs[i] if i < len(runs) else None
+            run = run_list[i] if i < len(run_list) else None
 
             # Seed: read_count for reproducibility; mix in FASTQ file size when
             # real data is present so the profile reflects the actual data.
             import os as _os
-            base_seed = run.read_count if run and run.read_count else (i + 1) * 7919
-            if run and run.fastq_path and _os.path.exists(run.fastq_path):
+            base_seed = run.get('read_count') if run and run.get('read_count') else (i + 1) * 7919
+            if run and run.get('fastq_path') and _os.path.exists(run.get('fastq_path', '')):
                 try:
-                    fsize = _os.path.getsize(run.fastq_path)
+                    fsize = _os.path.getsize(run.get('fastq_path', ''))
                     base_seed = base_seed ^ (fsize & 0xFFFFFF)
                 except OSError:
                     pass
@@ -692,9 +692,9 @@ class _DownloadWorker(QObject):
         cores           = str(max((os.cpu_count() or 4) - 1, 1))
         failed_details: list[str] = []
 
-        for run in state.runs:
-            srr     = run.accession
-            layout  = (run.layout or "PAIRED").lower()
+        for run in state.runs.values():
+            srr     = run['run_accession']
+            layout  = (run.get('library_layout') or "PAIRED").lower()
             out_dir = project_dir / "fastq" / layout
             out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -724,8 +724,8 @@ class _DownloadWorker(QObject):
 
                     fastq_files = sorted(out_dir.glob(f"{srr}*.fastq"))
                     if fastq_files:
-                        run.fastq_path = str(fastq_files[0])
-                        run.uploaded   = True
+                        run['fastq_path'] = str(fastq_files[0])
+                        run['uploaded']   = True
                         mb = sum(f.stat().st_size for f in fastq_files) // 1_048_576
                         self.progress.emit(f"✓ {srr} — {len(fastq_files)} file(s), {mb} MB")
                         continue
@@ -787,8 +787,8 @@ class _DownloadWorker(QObject):
 
                 fastq_files = sorted(out_dir.glob(f"{srr}*.fastq"))
                 if fastq_files:
-                    run.fastq_path = str(fastq_files[0])
-                    run.uploaded   = True
+                    run['fastq_path'] = str(fastq_files[0])
+                    run['uploaded']   = True
                     mb = sum(f.stat().st_size for f in fastq_files) // 1_048_576
                     self.progress.emit(f"✓ {srr} (SRA toolkit) — {len(fastq_files)} file(s), {mb} MB")
                 else:
@@ -805,14 +805,14 @@ class _DownloadWorker(QObject):
         # ── Write QIIME2 manifest files ───────────────────────────────────────
         try:
             from pipeline.fetch_data import write_manifest
-            layouts = {(r.layout or "PAIRED").lower() for r in state.runs if r.uploaded}
+            layouts = {(r.get('library_layout') or "PAIRED").lower() for r in state.runs.values() if r['uploaded']}
             for layout in layouts:
                 write_manifest(state.bioproject_id, layout)
         except Exception:
             pass
 
         # ── Final result ──────────────────────────────────────────────────────
-        any_ok = any(r.uploaded for r in state.runs)
+        any_ok = any(r['uploaded'] for r in state.runs.values())
 
         if not any_ok and failed_details:
             diag = "\n".join(f"  • {d}" for d in failed_details[:4])
@@ -827,7 +827,7 @@ class _DownloadWorker(QObject):
         if failed_details:
             self.progress.emit(
                 f"Warning: {len(failed_details)} run(s) failed, "
-                f"{sum(1 for r in state.runs if r.uploaded)} succeeded"
+                f"{sum(1 for r in state.runs.values() if r['uploaded'])} succeeded"
             )
 
         self.finished.emit(state)
@@ -901,7 +901,7 @@ class _PipelineWorker(QObject):
             # parse output files, and persist results to the database.
             from pipeline import run_pipeline
 
-            srr_list     = [r.accession for r in state.runs if r.accession]
+            srr_list     = [r['run_accession'] for r in state.runs.values() if r.get('run_accession')]
             username     = self._user.get("username", "pipeline_user")
             project_name = state.title or state.bioproject_id
 
@@ -1192,9 +1192,14 @@ class MainWindow(QMainWindow):
 
     # ── Fetch flow ────────────────────────────────────────────────────────────
 
-    def _on_fetch_requested(self, bioproject: str, run_accession: str, max_runs: int, email: str, username: str) -> None:
+    def _on_fetch_requested(self, bioproject: str, run_accession: str, max_runs: int, email: str = "", username: str = "") -> None:
         self._status_badge.setText("Fetching from NCBI…")
         self._status_badge.show()
+
+        if not email and self._current_user:
+            email = self._current_user.get("email", "")
+        if not username and self._current_user:
+            username = self._current_user.get("username", "")
 
         self._fetch_thread = self._make_thread()
         self._fetch_worker = _FetchWorker(bioproject, run_accession, max_runs)
@@ -1207,17 +1212,7 @@ class MainWindow(QMainWindow):
         self._fetch_thread.start()
 
 
-        # self._fetch_thread = QThread(self)
-        # self._fetch_worker = _FetchWorker(bioproject, run_accession, max_runs)
-        # self._fetch_worker.moveToThread(self._fetch_thread)
-        # self._fetch_thread.started.connect(self._fetch_worker.run)
-        # self._fetch_worker.finished.connect(self._on_fetch_complete)
-        # self._fetch_worker.errored.connect(self._on_fetch_error)
-        # self._fetch_worker.finished.connect(self._fetch_thread.quit)
-        # self._fetch_worker.errored.connect(self._fetch_thread.quit)
-        # self._fetch_thread.start()
-
-    def _on_fetch_complete(self, single_runs, paired_runs, project_dict: dict) -> None:
+    def _on_fetch_complete(self, single_runs, paired_runs = None, project_dict: dict = None) -> None:
         """Build AppState from NCBI data, save to DB, then run analysis."""
         state = AppState(
             bioproject_id = project_dict["bioproject_id"],
@@ -1231,15 +1226,6 @@ class MainWindow(QMainWindow):
 
         for run in project_dict.get("runs", []):
             state.runs[run['run_accession']] = run
-            # state.runs.append(RunState(
-            #     label       = lbl,
-            #     accession   = project_dict["run_accessions"].get(lbl, ""),
-            #     read_count  = project_dict.get("read_counts", {}).get(lbl, 0),
-            #     base_count  = project_dict.get("base_counts", {}).get(lbl, 0),
-            #     layout      = project_dict.get("library_layouts", {}).get(lbl, "PAIRED"),
-            #     instrument  = project_dict.get("instruments", {}).get(lbl, ""),
-            #     uploaded    = False,
-            # ))
         self._state = state
 
         # Persist project to DB so it appears on the profile page
@@ -1251,8 +1237,8 @@ class MainWindow(QMainWindow):
                     bio_proj_accession = state.bioproject_id,
                     title              = state.title or state.bioproject_id,
                     runs               = [
-                        {"accession": r.accession, "layout": r.layout}
-                        for r in state.runs
+                        {"accession": r['run_accession'], "layout": r.get('library_layout', 'PAIRED')}
+                        for r in state.runs.values()
                     ],
                 )
                 state.db_project_id = result["project_id"]   # ← link state to DB row
@@ -1403,18 +1389,18 @@ class MainWindow(QMainWindow):
         except (ImportError, AttributeError):
             valid, error = True, ""
 
-        for run in self._state.runs:
-            if run.label == run_label:
-                run.uploaded    = valid
-                run.fastq_path  = path if valid else ""
-                run.qiime_error = error if not valid else None
+        for run in self._state.runs.values():
+            if run['label'] == run_label:
+                run['uploaded']    = valid
+                run['fastq_path']  = path if valid else ""
+                run['qiime_error'] = error if not valid else None
                 break
 
         self._upload_page.update_run_status(run_label, valid, error)
         self._overview_page.load(self._state)
 
-        any_uploaded = any(r.uploaded for r in self._state.runs)
-        all_uploaded = all(r.uploaded for r in self._state.runs)
+        any_uploaded = any(r['uploaded'] for r in self._state.runs.values())
+        all_uploaded = all(r['uploaded'] for r in self._state.runs.values())
         if any_uploaded:
             self._upload_page.show_run_pipeline_btn(
                 ready=all_uploaded,
