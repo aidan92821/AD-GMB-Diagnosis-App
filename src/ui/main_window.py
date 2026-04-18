@@ -103,13 +103,52 @@ class _DownloadWorkerReal(QObject):
     
     def run(self):
         try:
-            # download the single runs + write the manifest file
-            download_runs(runner=self._runner, bioproject=self._state.bioproject_id, lib_layout='single', runs=self._state.single_runs, state=self._state)
-            write_manifest(self._state.bioproject_id, lib_layout='single', state=self._state)
-            # download the paired runs + write the manifest file
-            download_runs(runner=self._runner, bioproject=self._state.bioproject_id, lib_layout='paired', runs=self._state.paired_runs, state=self._state)
-            write_manifest(self._state.bioproject_id, lib_layout='paired', state=self._state)
-            
+            from pathlib import Path as _Path
+            APP_DIR = _Path(__file__).parent.parent / "pipeline"
+            total = len(self._state.single_runs) + len(self._state.paired_runs)
+            ok, skipped, failed_srrs = 0, 0, []
+
+            if self._state.single_runs:
+                fastq_dir = APP_DIR / f"data/{self._state.bioproject_id}/fastq/single"
+                for srr in self._state.single_runs:
+                    if (fastq_dir / f"{srr}.fastq").exists():
+                        self.progress.emit(f"✓ {srr} — already on disk, skipping")
+                        skipped += 1
+                    else:
+                        self.progress.emit(f"Downloading {srr} (single-end)… [{ok+skipped+1}/{total}]")
+                download_runs(runner=self._runner, bioproject=self._state.bioproject_id,
+                              lib_layout='single', runs=self._state.single_runs, state=self._state)
+                write_manifest(self._state.bioproject_id, lib_layout='single', state=self._state)
+                for srr in self._state.single_runs:
+                    if self._state.runs.get(srr, {}).get('uploaded'):
+                        ok += 1
+                    elif not (fastq_dir / f"{srr}.fastq").exists():
+                        failed_srrs.append(srr)
+
+            if self._state.paired_runs:
+                fastq_dir = APP_DIR / f"data/{self._state.bioproject_id}/fastq/paired"
+                for srr in self._state.paired_runs:
+                    if (fastq_dir / f"{srr}_1.fastq").exists():
+                        self.progress.emit(f"✓ {srr} — already on disk, skipping")
+                        skipped += 1
+                    else:
+                        self.progress.emit(f"Downloading {srr} (paired-end)… [{ok+skipped+1}/{total}]")
+                download_runs(runner=self._runner, bioproject=self._state.bioproject_id,
+                              lib_layout='paired', runs=self._state.paired_runs, state=self._state)
+                write_manifest(self._state.bioproject_id, lib_layout='paired', state=self._state)
+                for srr in self._state.paired_runs:
+                    if self._state.runs.get(srr, {}).get('uploaded'):
+                        ok += 1
+                    elif not (fastq_dir / f"{srr}_1.fastq").exists():
+                        failed_srrs.append(srr)
+
+            # Emit a summary for the topbar badge only (not status panel)
+            ready = ok + skipped
+            if failed_srrs:
+                self.progress.emit(f"⚠  {ready} of {total} run(s) ready — {len(failed_srrs)} could not be downloaded")
+            else:
+                self.progress.emit(f"✓ All {ready} run(s) downloaded and ready")
+
             self.finished.emit(self._state)
         except Exception as exc:
             self.errored.emit(str(exc))
@@ -141,16 +180,19 @@ class _PipelineWorkerReal(QObject):
     
     def run(self):
         try:
+            cb = self.progress.emit
             # preprocess the paired end fastq files
             if self._state.paired_runs:
-                if "demux.qza" not in os.listdir(str(self.QIIME_DIR / "single")):
-                    qiime_preprocess(runner=self._runner, bioproject=self._bioproject, lib_layout='paired')
-            
+                if "demux.qza" not in os.listdir(str(self.QIIME_DIR / "paired")):
+                    qiime_preprocess(runner=self._runner, bioproject=self._bioproject,
+                                     lib_layout='paired', callback=cb)
+
             # preprocess the single end fastq files
             if self._state.single_runs:
-                if "demux.qza" not in os.listdir(str(self.QIIME_DIR / "paired")):
-                    qiime_preprocess(runner=self._runner, bioproject=self._bioproject, lib_layout='single')
-            
+                if "demux.qza" not in os.listdir(str(self.QIIME_DIR / "single")):
+                    qiime_preprocess(runner=self._runner, bioproject=self._bioproject,
+                                     lib_layout='single', callback=cb)
+
             self.finished.emit(self._state)
         except Exception as exc:
             self.errored.emit(str(exc))
@@ -1070,7 +1112,7 @@ class MainWindow(QMainWindow):
 
         # Wire signals
         self._overview_page.fetch_requested.connect(self._on_fetch_requested)
-        self._upload_page.file_selected.connect(self._on_file_selected)
+        self._upload_page.file_selected.connect(self._on_file_selected)  # (label, slot, path)
         self._profile_page.logout_requested.connect(self._on_logout)
         self._profile_page.load_project.connect(self._on_load_project)
         self._profile_page.delete_project.connect(self._on_delete_project)
@@ -1191,6 +1233,8 @@ class MainWindow(QMainWindow):
 
         self._overview_page.load(state)
         self._broadcast_state()
+        # Navigate to Upload Runs page so user sees download progress
+        self._switch_page(1)
         self._start_download()
 
     def _on_fetch_error(self, message: str) -> None:
@@ -1202,6 +1246,8 @@ class MainWindow(QMainWindow):
     def _start_download(self) -> None:
         """Start fasterq-dump download; fall back to analysis-only if unavailable."""
         self._status_badge.setText("Downloading FASTQ files…")
+        self._upload_page.update_pipeline_status("Downloading FASTQ files from NCBI…", "info")
+        self._upload_page.clear_terminal()
 
         # emma changes
         self._dl_thread_real = QThread(self)
@@ -1242,19 +1288,43 @@ class MainWindow(QMainWindow):
         self._status_badge.setObjectName("badge_green")
         self._status_badge.style().unpolish(self._status_badge)
         self._status_badge.style().polish(self._status_badge)
+
         # Auto-populate Upload Runs page with the downloaded files
         self._upload_page.auto_mark_uploaded(state)
 
-        # Show the Run Pipeline button (enabled when all runs downloaded)
-        all_up = uploaded == state.run_count and uploaded > 0
-        if uploaded > 0:
+        # Count runs (not files) — uploaded_count counts 2 per paired run
+        uploaded_runs = sum(1 for r in state.runs.values() if r['uploaded'])
+        failed_runs   = state.run_count - uploaded_runs
+        fastq_files   = uploaded  # uploaded_count property
+
+        if failed_runs > 0:
+            self._upload_page.update_pipeline_status(
+                f"⚠  {uploaded_runs} of {state.run_count} run(s) downloaded "
+                f"({fastq_files} FASTQ files) — {failed_runs} could not be downloaded",
+                "warn",
+            )
+            self._upload_page.show_download_status(
+                f"⚠  {failed_runs} run(s) could not be downloaded — pipeline will run "
+                f"with the {uploaded_runs} available run(s).  "
+                f"You can browse and upload the missing files manually below.",
+                kind="warn",
+            )
+        else:
+            self._upload_page.update_pipeline_status(
+                f"✓ All {uploaded_runs} run(s) downloaded "
+                f"({fastq_files} FASTQ files total) — ready to run pipeline",
+                "ok",
+            )
+
+        # Enable button for any uploaded runs (partial data is fine)
+        if uploaded_runs > 0:
             self._upload_page.show_run_pipeline_btn(
-                ready=all_up,
+                ready=True,
                 callback=self._on_run_pipeline,
             )
 
-        # TODO put in correct spot in flow
-        # self._run_analysis()
+        # Refresh Overview so run statuses show ✓ Uploaded instead of ○ Pending
+        self._overview_page.load(state)
 
     def _on_download_error(self, msg: str) -> None:
         """
@@ -1266,15 +1336,19 @@ class MainWindow(QMainWindow):
         # Show a non-blocking info notice on the Upload page
         if hasattr(self._upload_page, "show_download_status"):
             if "not found" in msg.lower() or "sra-tools" in msg.lower():
-                self._upload_page.show_download_status(
+                notice = (
                     "ℹ  fasterq-dump not found — FASTQ auto-download skipped.\n"
                     "Install SRA-tools to enable automatic downloads:  "
                     "conda install -c bioconda sra-tools\n"
-                    "You can still browse and upload FASTQ files manually below.",
-                    kind="warn",
+                    "You can still browse and upload FASTQ files manually below."
+                )
+                self._upload_page.show_download_status(notice, kind="warn")
+                self._upload_page.update_pipeline_status(
+                    "fasterq-dump not found — upload files manually to run pipeline", "warn"
                 )
             else:
                 self._upload_page.show_download_status(msg, kind="err")
+                self._upload_page.update_pipeline_status(f"Download error: {msg[:80]}", "err")
         self._broadcast_state()
         self._run_analysis()
 
@@ -1306,6 +1380,9 @@ class MainWindow(QMainWindow):
             f"{state.asv_count:,} ASVs  ·  {state.genus_count} genera"
         )
         self._analysis_badge.show()
+        self._upload_page.update_pipeline_status(
+            f"Analysis complete — {state.asv_count:,} ASVs · {state.genus_count} genera", "ok"
+        )
 
         self._overview_page.load(state)
         self._broadcast_state()
@@ -1331,77 +1408,151 @@ class MainWindow(QMainWindow):
 
     # ── File upload + pipeline trigger ───────────────────────────────────────
 
-    def _on_file_selected(self, run_label: str, path: str) -> None:
+    def _on_file_selected(self, run_label: str, slot: str, path: str) -> None:
+        # Find run dict by label
+        run_dict = next(
+            (r for r in self._state.runs.values() if r['label'] == run_label), None)
+        if not run_dict:
+            return
+
+        # Validate FASTQ header
         try:
             from src.pipeline.qc import _validate_fastq_header
             valid, error = _validate_fastq_header(path)
         except (ImportError, AttributeError):
             valid, error = True, ""
 
-        for run in self._state.runs:
-            if run.label == run_label:
-                run.uploaded    = valid
-                run.fastq_path  = path if valid else ""
-                run.qiime_error = error if not valid else None
-                break
+        if not valid:
+            self._upload_page.update_run_status(run_label, False, error)
+            return
 
-        self._upload_page.update_run_status(run_label, valid, error)
+        # Store path in run dict under the right slot
+        layout = run_dict.get('library_layout', 'PAIRED').upper()
+        if slot == 'forward':
+            run_dict['fastq_forward'] = path
+        elif slot == 'reverse':
+            run_dict['fastq_reverse'] = path
+        else:
+            run_dict['fastq_path'] = path
+
+        # Mark uploaded once all required files are present
+        if layout == 'PAIRED':
+            both = run_dict.get('fastq_forward') and run_dict.get('fastq_reverse')
+            run_dict['uploaded'] = bool(both)
+        else:
+            run_dict['uploaded'] = bool(run_dict.get('fastq_path'))
+
+        # Refresh both pages so file-path rows and status update
+        self._upload_page.load(self._state)
         self._overview_page.load(self._state)
 
-        any_uploaded = any(r.uploaded for r in self._state.runs)
-        all_uploaded = all(r.uploaded for r in self._state.runs)
-        if any_uploaded:
+        uploaded_runs = sum(1 for r in self._state.runs.values() if r['uploaded'])
+        if uploaded_runs > 0:
             self._upload_page.show_run_pipeline_btn(
-                ready=all_uploaded,
-                callback=self._on_run_pipeline,
+                ready=True, callback=self._on_run_pipeline)
+            self._upload_page.update_pipeline_status(
+                f"{uploaded_runs} of {self._state.run_count} run(s) ready — click Run Pipeline to start",
+                "ok"
             )
 
-    def _on_run_pipeline(self) -> None:
-        # Check whether QIIME2 conda env is available before starting the
-        # heavyweight pipeline worker.  If not, fall back to the in-app
-        # analysis worker (which still uses the downloaded FASTQ metadata).
-        # qiime2_available = False
-        # try:
-        #     import subprocess as _sp
-        #     result = _sp.run(
-        #         ["conda", "run", "-n", "qiime2-amplicon-2024.10",
-        #          "qiime", "--version"],
-        #         capture_output=True, text=True, timeout=15,
-        #     )
-        #     qiime2_available = result.returncode == 0
-        # except Exception:
-        #     qiime2_available = False
+    def _write_manifests_from_state(self) -> None:
+        """Re-write QIIME2 manifest TSVs using paths stored in run dicts.
 
-        # if not qiime2_available:
-        #     self._upload_page.show_download_status(
-        #         "ℹ  QIIME2 environment (qiime2-amplicon-2024.10) not found.\n"
-        #         "Running in-app analysis instead.\n\n"
-        #         "To enable real QIIME2 processing, install it with:\n"
-        #         "  conda env create -n qiime2-amplicon-2024.10 "
-        #         "--file https://data.qiime2.org/distro/amplicon/"
-        #         "qiime2-amplicon-2024.10-py310-osx-conda.yml",
-        #         kind="warn",
-        #     )
-        #     self._status_badge.setText("Computing analysis…")
-        #     self._run_analysis()
-        #     return
+        Works for both NCBI-downloaded files (standard paths) and user-browsed
+        files (arbitrary paths stored in fastq_forward / fastq_reverse / fastq_path).
+        Called just before pipeline starts so manifests are always current.
+        """
+        import csv as _csv
+        from pathlib import Path as _P
+
+        APP_DIR = _P(__file__).parent.parent / "pipeline"
+        bio = self._state.bioproject_id
+
+        paired = [r for r in self._state.runs.values()
+                  if r.get('library_layout', '').upper() == 'PAIRED' and r['uploaded']]
+        single = [r for r in self._state.runs.values()
+                  if r.get('library_layout', '').upper() == 'SINGLE' and r['uploaded']]
+
+        if paired:
+            out = APP_DIR / f"data/{bio}/qiime/paired"
+            out.mkdir(parents=True, exist_ok=True)
+            with open(out / "manifest.tsv", "w", newline="") as f:
+                w = _csv.writer(f, delimiter='\t')
+                w.writerow(['sample-id', 'forward-absolute-filepath',
+                            'reverse-absolute-filepath'])
+                for r in paired:
+                    srr = r['run_accession']
+                    fwd = r.get('fastq_forward') or str(
+                        APP_DIR / f"data/{bio}/fastq/paired/{srr}_1.fastq")
+                    rev = r.get('fastq_reverse') or str(
+                        APP_DIR / f"data/{bio}/fastq/paired/{srr}_2.fastq")
+                    w.writerow([srr, fwd, rev])
+
+        if single:
+            out = APP_DIR / f"data/{bio}/qiime/single"
+            out.mkdir(parents=True, exist_ok=True)
+            with open(out / "manifest.tsv", "w", newline="") as f:
+                w = _csv.writer(f, delimiter='\t')
+                w.writerow(['sample-id', 'absolute-filepath'])
+                for r in single:
+                    srr = r['run_accession']
+                    path = r.get('fastq_path') or str(
+                        APP_DIR / f"data/{bio}/fastq/single/{srr}.fastq")
+                    w.writerow([srr, path])
+
+    def _on_run_pipeline(self) -> None:
+        import subprocess as _sp
+
+        # Detect whether QIIME2 is available and report in the terminal
+        self._upload_page.show_terminal(True)
+        self._upload_page.clear_terminal()
+        self._upload_page.update_pipeline_status("Checking QIIME2 environment…", "info")
+        uploaded_srrs = [srr for srr, r in self._state.runs.items() if r['uploaded']]
+        skipped_srrs  = [srr for srr, r in self._state.runs.items() if not r['uploaded']]
+        self._upload_page.append_terminal_output("=== Axis Pipeline ===")
+        self._upload_page.append_terminal_output(f"Project : {self._state.bioproject_id}")
+        self._upload_page.append_terminal_output(
+            f"Process : {', '.join(uploaded_srrs)}")
+        if skipped_srrs:
+            self._upload_page.append_terminal_output(
+                f"Skipped : {', '.join(skipped_srrs)}  (not downloaded)")
+        self._upload_page.append_terminal_output("")
+
+        qiime2_available = False
+        try:
+            result = _sp.run(
+                [str(self._runner.base_cmd[0]), "run", "-p",
+                 str(self._runner.base_cmd[3]), "qiime", "--version"],
+                capture_output=True, text=True, timeout=20,
+            )
+            qiime2_available = result.returncode == 0
+            if qiime2_available:
+                ver = result.stdout.strip().splitlines()[0] if result.stdout.strip() else "detected"
+                self._upload_page.append_terminal_output(f"QIIME2 detected: {ver}")
+            else:
+                self._upload_page.append_terminal_output(
+                    "QIIME2 not found in environment — will fall back to in-app analysis."
+                )
+        except Exception as e:
+            self._upload_page.append_terminal_output(
+                f"QIIME2 check failed ({e}) — will fall back to in-app analysis."
+            )
+
+        self._upload_page.append_terminal_output("")
+
+        # Write manifests from current run paths (covers user-uploaded files)
+        try:
+            self._write_manifests_from_state()
+            self._upload_page.append_terminal_output("Manifests written — starting QIIME2…\n")
+        except Exception as e:
+            self._upload_page.append_terminal_output(f"[WARN] Could not write manifests: {e}\n")
 
         self._status_badge.setText("Running QIIME2 pipeline…")
         self._status_badge.setObjectName("badge_yellow")
         self._status_badge.style().unpolish(self._status_badge)
         self._status_badge.style().polish(self._status_badge)
         self._status_badge.show()
-
-        # self._pipeline_thread = QThread(self)
-        # self._pipeline_worker = _PipelineWorker(self._state, n_runs=self._state.run_count)
-        # self._pipeline_worker.moveToThread(self._pipeline_thread)
-        # self._pipeline_thread.started.connect(self._pipeline_worker.run)
-        # self._pipeline_worker.progress.connect(self._on_analysis_progress)
-        # self._pipeline_worker.finished.connect(self._on_pipeline_complete)
-        # self._pipeline_worker.errored.connect(self._on_pipeline_error)
-        # self._pipeline_worker.finished.connect(self._pipeline_thread.quit)
-        # self._pipeline_worker.errored.connect(self._pipeline_thread.quit)
-        # self._pipeline_thread.start()
+        self._upload_page.update_pipeline_status("QIIME2 pipeline running…", "run")
 
         # emma changes
         self._pipeline_thread_real = QThread(self)
@@ -1411,6 +1562,7 @@ class MainWindow(QMainWindow):
         self._pipeline_worker_real.moveToThread(self._pipeline_thread_real)
         self._pipeline_thread_real.started.connect(self._pipeline_worker_real.run)
         self._pipeline_worker_real.progress.connect(self._on_analysis_progress)
+        self._pipeline_worker_real.progress.connect(self._upload_page.append_terminal_output)
         self._pipeline_worker_real.finished.connect(self._on_pipeline_complete)
         self._pipeline_worker_real.errored.connect(self._on_pipeline_error)
         self._pipeline_worker_real.finished.connect(self._pipeline_thread_real.quit)
@@ -1424,6 +1576,8 @@ class MainWindow(QMainWindow):
         self._status_badge.setObjectName("badge_green")
         self._status_badge.style().unpolish(self._status_badge)
         self._status_badge.style().polish(self._status_badge)
+        self._upload_page.update_pipeline_status("QIIME2 pipeline complete — parsing results…", "ok")
+        self._upload_page.append_terminal_output("\n=== Pipeline complete — saving results to database ===\n")
 
         # TODO update this badge
         # self._analysis_badge.setText(
@@ -1446,6 +1600,9 @@ class MainWindow(QMainWindow):
         else:
             display = msg
         self._upload_page.show_pipeline_error(display)
+        self._upload_page.update_pipeline_status(f"Pipeline error — running in-app analysis", "err")
+        self._upload_page.append_terminal_output(f"\n[ERROR] {msg}\n")
+        self._upload_page.append_terminal_output("Falling back to in-app analysis…\n")
         self._status_badge.setText("Pipeline error — running in-app analysis…")
         self._run_analysis()
 
@@ -1474,15 +1631,20 @@ class MainWindow(QMainWindow):
         self._status_badge.setObjectName("badge_green")
         self._status_badge.style().unpolish(self._status_badge)
         self._status_badge.style().polish(self._status_badge)
+        self._upload_page.update_pipeline_status("Results saved — computing analysis…", "ok")
+        self._upload_page.append_terminal_output("Results saved to database. Running analysis…\n")
         self._overview_page.load(state)
         self._broadcast_state()
-        
+
         # hand it off to run analysis
         self._run_analysis()
 
     def _on_parsing_error(self, msg: str):
         self._upload_page.show_pipeline_error(msg)
         self._status_badge.setText("Parsing error")
+        self._status_badge.setObjectName("badge_red")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
 
     # ── Profile page integration ──────────────────────────────────────────────
 

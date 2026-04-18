@@ -344,6 +344,27 @@ QPushButton#btn_primary:disabled {{
     color: #818CF8;
 }}
 
+QPushButton#btn_run_pipeline {{
+    background: #059669;
+    color: {WHITE};
+    border: none;
+    border-radius: 8px;
+    padding: 9px 24px;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.2px;
+}}
+QPushButton#btn_run_pipeline:hover {{
+    background: #047857;
+}}
+QPushButton#btn_run_pipeline:pressed {{
+    background: #065F46;
+}}
+QPushButton#btn_run_pipeline:disabled {{
+    background: #6EE7B7;
+    color: #ECFDF5;
+}}
+
 QPushButton#btn_outline {{
     background: transparent;
     border: 1.5px solid {BORDER};

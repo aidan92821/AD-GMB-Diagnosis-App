@@ -5,8 +5,8 @@ import urllib.request
 
 
 # lib_layout = 'paired' or 'single'
-def import_samples(runner, bioproject: str, lib_layout: str):
-    
+def import_samples(runner, bioproject: str, lib_layout: str, callback=None):
+
     APP_DIR = Path(__file__).parent
     input_dir = str((APP_DIR / f"data/{bioproject}/fastq/{lib_layout}").resolve())
     output_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
@@ -26,7 +26,7 @@ def import_samples(runner, bioproject: str, lib_layout: str):
             '--input-path', f"{output_dir}/manifest.tsv",
             '--output-path', f"{output_dir}/demux.qza",
             '--input-format', input_format
-        ])
+        ], callback=callback)
 
 
 # lib_layout = 'paired' or 'single'
@@ -34,8 +34,8 @@ def import_samples(runner, bioproject: str, lib_layout: str):
 # 0 -> something weird happened
 # 1 -> single with key: 'single'
 # 2 -> paired with keys: 'forward', 'reverse' in that order
-def qc(runner, bioproject: str, lib_layout: str):
-    
+def qc(runner, bioproject: str, lib_layout: str, callback=None):
+
     APP_DIR = Path(__file__).parent
     io_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
 
@@ -44,18 +44,18 @@ def qc(runner, bioproject: str, lib_layout: str):
         'qiime', 'demux', 'summarize',
         '--i-data', f"{io_dir}/demux.qza",
         '--o-visualization', f"{io_dir}/demux.qzv"
-    ])
+    ], callback=callback)
 
     # get truncation positions for paired forward, paired reverse, and single
     return get_trunc(bioproject, lib_layout)
 
 
 # lib_layout = 'paired' or 'single'
-def dada2_denoise(runner, bioproject: str, lib_layout: str, trunc_f: int=None, trunc_r: int=None, trunc_s: int=None):
-    
+def dada2_denoise(runner, bioproject: str, lib_layout: str, trunc_f: int=None, trunc_r: int=None, trunc_s: int=None, callback=None):
+
     APP_DIR = Path(__file__).parent
     io_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
-    
+
     # get the number of cores from user's machine
     # and calculate how many to use for the process
     cores = os.cpu_count()
@@ -74,7 +74,7 @@ def dada2_denoise(runner, bioproject: str, lib_layout: str, trunc_f: int=None, t
             '--o-table', f"{io_dir}/table.qza",
             '--o-representative-sequences', f"{io_dir}/rep-seqs.qza",
             '--o-denoising-stats', f"{io_dir}/stats.qza"
-        ])
+        ], callback=callback)
 
     # single
     elif trunc_s:
@@ -87,7 +87,7 @@ def dada2_denoise(runner, bioproject: str, lib_layout: str, trunc_f: int=None, t
             '--o-table', f"{io_dir}/table.qza",
             '--o-representative-sequences', f"{io_dir}/rep-seqs.qza",
             '--o-denoising-stats', f"{io_dir}/stats.qza"
-        ])
+        ], callback=callback)
 
 
 '''
@@ -95,8 +95,8 @@ classifier: silva-138-99-nb-classifier.qza
 source: https://data.qiime2.org/classifiers/sklearn-1.4.2/silva/silva-138-99-nb-classifier.qza
 '''
 # lib_layout: 'paired' or 'single'
-def classify_taxa(runner, bioproject: str, lib_layout: str):
-    
+def classify_taxa(runner, bioproject: str, lib_layout: str, callback=None):
+
     APP_DIR = Path(__file__).parent
     classifier_path = str((APP_DIR / "taxa_classifier/silva-138-99-nb-classifier.qza").resolve())
     io_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
@@ -107,12 +107,12 @@ def classify_taxa(runner, bioproject: str, lib_layout: str):
         '--i-classifier', classifier_path,
         '--i-reads', f"{io_dir}/rep-seqs.qza",
         '--o-classification', f"{io_dir}/taxonomy.qza"
-    ])
-    
+    ], callback=callback)
+
 
 # lib_layout: 'paired' or 'single'
-def create_tables(runner, bioproject: str, lib_layout: str):
-    
+def create_tables(runner, bioproject: str, lib_layout: str, callback=None):
+
     APP_DIR = Path(__file__).parent
     io_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
     reps_tree_dir = str((APP_DIR / f"data/{bioproject}/reps-tree/{lib_layout}").resolve())
@@ -124,27 +124,27 @@ def create_tables(runner, bioproject: str, lib_layout: str):
         'qiime', 'tools', 'export',
         '--input-path', f"{io_dir}/rep-seqs.qza",
         '--output-path', reps_tree_dir
-    ])
+    ], callback=callback)
 
     # feature table (asv counts) (feature-table.tsv)
     runner.run([
         'qiime', 'tools', 'export',
         '--input-path', f"{io_dir}/table.qza",
         '--output-path', f"{io_dir}/features"
-    ])
+    ], callback=callback)
     runner.run([
         'biom', 'convert',
         '-i', f"{io_dir}/features/feature-table.biom",
         '-o', f"{io_dir}/feature-table.tsv",
         '--to-tsv'
-    ])
+    ], callback=callback)
 
     # asv to taxonomy map table (taxonomy.tsv)
     runner.run([
         'qiime', 'tools', 'export',
         '--input-path', f"{io_dir}/taxonomy.qza",
         '--output-path', f"{io_dir}"
-    ])
+    ], callback=callback)
 
     # genus relative abundance table (genus-table.tsv)
     # collapse ASV table to genus level abundance
@@ -154,65 +154,59 @@ def create_tables(runner, bioproject: str, lib_layout: str):
         '--i-taxonomy', f"{io_dir}/taxonomy.qza",
         '--p-level', str(6), # 6 = genus
         '--o-collapsed-table', f"{io_dir}/genus-table.qza"
-    ])
-    
+    ], callback=callback)
+
     # normalize to get relative abundance
     runner.run([
         'qiime', 'feature-table', 'relative-frequency',
         '--i-table', f"{io_dir}/genus-table.qza",
         '--o-relative-frequency-table', f"{io_dir}/genus-relfreq.qza"
-    ])
-    
+    ], callback=callback)
+
     # export to BIOM
     runner.run([
         'qiime', 'tools', 'export',
         '--input-path', f"{io_dir}/genus-relfreq.qza",
         '--output-path', f"{io_dir}/genus"
-    ])
-    
+    ], callback=callback)
+
     # convert to tsv
     runner.run([
         'biom', 'convert',
         '-i', f"{io_dir}/genus/feature-table.biom",
         '-o', f"{io_dir}/genus-table.tsv",
         '--to-tsv'
-    ])
+    ], callback=callback)
 
 
-def qiime_preprocess(runner, bioproject: str, lib_layout: str):
-    
-    print('importing samples')
-    import_samples(runner,
-                   bioproject=bioproject,
-                   lib_layout=lib_layout)
+def qiime_preprocess(runner, bioproject: str, lib_layout: str, callback=None):
 
-    print('doing qc')
-    trunc = qc(runner,
-               bioproject=bioproject, 
-               lib_layout=lib_layout)
+    def _log(msg: str):
+        print(msg)
+        if callback:
+            callback(msg)
 
-    print('denoising')
+    _log(f"[{lib_layout}] Importing samples…")
+    import_samples(runner, bioproject=bioproject, lib_layout=lib_layout, callback=callback)
+
+    _log(f"[{lib_layout}] Running QC / demux summary…")
+    trunc = qc(runner, bioproject=bioproject, lib_layout=lib_layout, callback=callback)
+
+    _log(f"[{lib_layout}] DADA2 denoising…")
     if lib_layout == 'paired':
-        dada2_denoise(runner,
-                      bioproject=bioproject,
-                      lib_layout=lib_layout,
-                      trunc_f=trunc['forward'],
-                      trunc_r=trunc['reverse'])
+        dada2_denoise(runner, bioproject=bioproject, lib_layout=lib_layout,
+                      trunc_f=trunc['forward'], trunc_r=trunc['reverse'], callback=callback)
     elif lib_layout == 'single':
-        dada2_denoise(runner,
-                      bioproject=bioproject,
-                      lib_layout=lib_layout,
-                      trunc_s=trunc['single'])
+        dada2_denoise(runner, bioproject=bioproject, lib_layout=lib_layout,
+                      trunc_s=trunc['single'], callback=callback)
 
-    print('classifying taxa')
-    classify_taxa(runner,
-                  bioproject=bioproject,
-                  lib_layout=lib_layout)
+    _log(f"[{lib_layout}] Classifying taxa…")
+    classify_taxa(runner, bioproject=bioproject, lib_layout=lib_layout, callback=callback)
 
-    print('creating tables')
-    create_tables(runner,
-                  bioproject=bioproject,
-                  lib_layout=lib_layout)
+    _log(f"[{lib_layout}] Creating output tables…")
+    create_tables(runner, bioproject=bioproject, lib_layout=lib_layout, callback=callback)
+
+    _log(f"[{lib_layout}] Preprocessing complete.")
     
 
 def download_classifier(classifier_url: str):
