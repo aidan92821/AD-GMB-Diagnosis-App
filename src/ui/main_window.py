@@ -1299,20 +1299,13 @@ class MainWindow(QMainWindow):
 
         if failed_runs > 0:
             self._upload_page.update_pipeline_status(
-                f"⚠  {uploaded_runs} of {state.run_count} run(s) downloaded "
-                f"({fastq_files} FASTQ files) — {failed_runs} could not be downloaded",
+                f"{uploaded_runs}/{state.run_count} run(s) downloaded "
+                f"({fastq_files} FASTQ) — {failed_runs} failed. Browse to upload manually.",
                 "warn",
-            )
-            self._upload_page.show_download_status(
-                f"⚠  {failed_runs} run(s) could not be downloaded — pipeline will run "
-                f"with the {uploaded_runs} available run(s).  "
-                f"You can browse and upload the missing files manually below.",
-                kind="warn",
             )
         else:
             self._upload_page.update_pipeline_status(
-                f"✓ All {uploaded_runs} run(s) downloaded "
-                f"({fastq_files} FASTQ files total) — ready to run pipeline",
+                f"All {uploaded_runs} run(s) downloaded ({fastq_files} FASTQ files) — ready",
                 "ok",
             )
 
@@ -1334,21 +1327,17 @@ class MainWindow(QMainWindow):
         """
         self._status_badge.setText("Download skipped — computing analysis…")
         # Show a non-blocking info notice on the Upload page
-        if hasattr(self._upload_page, "show_download_status"):
-            if "not found" in msg.lower() or "sra-tools" in msg.lower():
-                notice = (
-                    "ℹ  fasterq-dump not found — FASTQ auto-download skipped.\n"
-                    "Install SRA-tools to enable automatic downloads:  "
-                    "conda install -c bioconda sra-tools\n"
-                    "You can still browse and upload FASTQ files manually below."
-                )
-                self._upload_page.show_download_status(notice, kind="warn")
-                self._upload_page.update_pipeline_status(
-                    "fasterq-dump not found — upload files manually to run pipeline", "warn"
-                )
-            else:
-                self._upload_page.show_download_status(msg, kind="err")
-                self._upload_page.update_pipeline_status(f"Download error: {msg[:80]}", "err")
+        if "not found" in msg.lower() or "sra-tools" in msg.lower():
+            self._upload_page.update_pipeline_status(
+                "fasterq-dump not found — browse to upload FASTQ files manually", "warn"
+            )
+            self._upload_page.append_terminal_output(
+                "fasterq-dump not installed. Install SRA-tools to enable auto-download:\n"
+                "  conda install -c bioconda sra-tools\n"
+                "You can still browse and upload FASTQ files manually.\n"
+            )
+        else:
+            self._upload_page.update_pipeline_status(f"Download error: {msg[:80]}", "err")
         self._broadcast_state()
         self._run_analysis()
 

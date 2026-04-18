@@ -561,14 +561,7 @@ class UploadRunsPage(QWidget):
         self._pipeline_btn.clicked.connect(callback)
 
     def auto_mark_uploaded(self, state: "AppState") -> None:
-        self.load(state)
-        uploaded_runs = [r for r in state.runs.values() if r['uploaded']]
-        if uploaded_runs:
-            n = len(uploaded_runs)
-            files = state.uploaded_count
-            self._log(
-                f"✓  {n} of {state.run_count} run(s) downloaded — "
-                f"{files} FASTQ file(s) on disk", "ok")
+        self.load(state)  # refresh table; main_window logs status via update_pipeline_status
 
     def show_pipeline_error(self, message: str) -> None:
         self._log(f"✗  Pipeline error: {message[:200]}", "err")
@@ -610,7 +603,6 @@ class UploadRunsPage(QWidget):
 
     def clear_terminal(self) -> None:
         self._terminal.clear()
-        self._terminal.setPlainText("Ready — fetch a project to begin.\n")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
