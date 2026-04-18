@@ -28,7 +28,7 @@ class RunState:
 
 
 @dataclass
-class AppState:
+class  AppState:
     """
     Single source of truth for the current project.
     Populated by MainWindow after a successful NCBI fetch.

@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from sqlalchemy.orm import Session
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, exists
 
 from src.db.db_models import (
     User, Project, Run, Genus, Feature, FeatureCount,
@@ -184,6 +184,11 @@ def get_genus_for_run(session: Session, run_id: int) -> list[Genus]:
     )
     return list(session.execute(stmt).scalars().all())
 
+def get_run_exists_genus_table(session: Session, run_id: int) -> bool:
+    stmt = (
+        select(exists().where(Genus.run_id == run_id))
+    )
+    return bool(session.execute(stmt).scalar())
 
 # ==== FEATURE ====
 def create_feature(
@@ -241,6 +246,19 @@ def create_feature_count_bulk(
 def get_feature_counts_for_run(session: Session, run_id: int) -> list[FeatureCount]:
     stmt = select(FeatureCount).where(FeatureCount.run_id == run_id)
     return list(session.execute(stmt).scalars().all())
+
+
+def get_run_exists_feature_table(session: Session, run_id: int) -> bool:
+    stmt = (
+        select(exists().where(Feature.run_id == run_id))
+    )
+    return bool(session.execute(stmt).scalar())
+
+def get_run_exists_feature_count_table(session: Session, run_id: int) -> bool:
+    stmt = (
+        select(exists().where(FeatureCount.run_id == run_id))
+    )
+    return bool(session.execute(stmt).scalar())
 
 
 # ==== TREE ====

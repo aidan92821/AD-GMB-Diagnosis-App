@@ -1,8 +1,11 @@
 # ── Local data & databases ────────────────────────────────────────────────────
 *.db
-data/
 exports/
 logs/
+
+# ── Pipeline data (generated at runtime) ──────────────────────────────────────
+src/pipeline/data/
+fasterq.tmp*/
 
 # ── Bioinformatics files ──────────────────────────────────────────────────────
 *.fastq
@@ -14,6 +17,7 @@ logs/
 *.qzv
 *.bam
 *.sam
+<<<<<<< HEAD
 *.vcf
 *.bed
 
@@ -31,7 +35,23 @@ src/pipeline/data/
 fasterq.tmp*/
 
 # ── QIIME2 conda environment files ───────────────────────────────────────────
+=======
+*.tsv
+*.biom
+*.nwk
+*.fasta
+
+# ── Downloaded classifiers / large model files ────────────────────────────────
+src/pipeline/taxa_classifier/
+models/*.pkl
+
+# ── QIIME2 conda environment (downloaded, not authored) ───────────────────────
+src/pipeline/qiime_env/
+>>>>>>> ui-fetch-pipeline
 qiime2-*.yml
+
+# ── Third-party binaries (downloaded at setup) ────────────────────────────────
+src/pipeline/bin/
 
 # ── Python ────────────────────────────────────────────────────────────────────
 **/__pycache__/
@@ -56,6 +76,12 @@ src/venv/
 *.so
 *.o
 
+# ── Secrets / credentials ─────────────────────────────────────────────────────
+.env
+.env.*
+*.pem
+*.key
+
 # ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store
 **/.DS_Store
@@ -66,6 +92,7 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+<<<<<<< HEAD
 *.orig
 
 # ── Secrets & environment variables ──────────────────────────────────────────
@@ -75,4 +102,12 @@ Thumbs.db
 *.key
 
 # ── Claude Code session data ──────────────────────────────────────────────────
+=======
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+logs/
+*.log
+
+# ── Claude Code ───────────────────────────────────────────────────────────────
+>>>>>>> ui-fetch-pipeline
 .claude/

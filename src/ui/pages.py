@@ -6,14 +6,16 @@ whenever the shared state changes.  No page imports from example_data.
 """
 
 from __future__ import annotations
+from pathlib import Path as _Path
 
 from PyQt6.QtWidgets import (
     QWidget, QFrame, QLabel, QLineEdit, QComboBox,
     QPushButton, QHBoxLayout, QVBoxLayout, QGridLayout,
     QFileDialog, QTableWidget, QTableWidgetItem, QHeaderView,
-    QSizePolicy, QScrollArea,
+    QSizePolicy, QScrollArea, QPlainTextEdit,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QFont, QTextCursor
 
 from models.app_state import AppState
 from resources.styles import (
@@ -126,7 +128,7 @@ class OverviewPage(QWidget):
         self._run_count = QComboBox()
         for n in ["1", "2", "3", "4", "5", "6", "8", "10", "12", "16", "20"]:
             self._run_count.addItem(n)
-        self._run_count.setCurrentIndex(3)   # default = 4
+        self._run_count.setCurrentIndex(0)   # default = 4
         col_n.addWidget(self._run_count)
         input_row.addLayout(col_n, 1)
         lay.addLayout(input_row)
@@ -277,6 +279,11 @@ class OverviewPage(QWidget):
         genus_val = str(state.genus_count)  if state.genus_count else "—"
         asv_sub   = "unique sequences"      if state.asv_count else "upload FASTQ to compute"
         genus_sub = "bacterial genera"      if state.genus_count else "upload FASTQ to compute"
+        uploaded_runs = sum(1 for r in state.runs.values() if r['uploaded'])
+        uploaded_sub  = (
+            f"{state.uploaded_count} FASTQ files on disk"
+            if uploaded_runs else "browse or fetch to upload"
+        )
         for value, label, sub in [
             (state.project_uid or state.bioproject_id, "Project ID",    ""),
             (state.bioproject_id,                     "BioProject ID", "NCBI accession"),
@@ -284,26 +291,27 @@ class OverviewPage(QWidget):
             (asv_val,                                 "ASVs",          asv_sub),
             (genus_val,                               "Genera",        genus_sub),
             (state.library_layout,                    "Library",       "sequencing type"),
-            (f"{state.uploaded_count} / {state.run_count}", "Uploaded",
-             "FASTQ files ready"),
+            (f"{uploaded_runs} / {state.run_count}",  "Runs Uploaded", uploaded_sub),
         ]:
             self._stats_row.addWidget(stat_card(value, label, sub))
 
     def _rebuild_runs_list(self, state: AppState):
         _clear(self._runs_body)
         header = QHBoxLayout()
-        for col_text, fw in [("Run",0),("Accession",1),("Reads",1),("Layout",1),("Status",1),("QIIME2",2)]:
+        for col_text, fw in [("Run", 0), ("Accession", 2), ("Reads", 1), ("Layout", 1), ("Status", 1)]:
             lbl = QLabel(col_text)
             lbl.setStyleSheet(f"font-size:11px;font-weight:600;color:{TEXT_M};padding-bottom:4px;")
-            if fw: header.addWidget(lbl, fw)
-            else: lbl.setFixedWidth(36); header.addWidget(lbl)
+            if fw:
+                header.addWidget(lbl, fw)
+            else:
+                lbl.setFixedWidth(36); header.addWidget(lbl)
         self._runs_body.addLayout(header)
         rule = QFrame(); rule.setFrameShape(QFrame.Shape.HLine)
         rule.setStyleSheet(f"background:{BORDER}; max-height:1px;")
         self._runs_body.addWidget(rule)
 
         for run in state.runs.values():
-            row = QHBoxLayout(); row.setContentsMargins(0, 6, 0, 6)
+            row = QHBoxLayout(); row.setContentsMargins(0, 5, 0, 5)
             badge = QLabel(run['label'])
             badge.setFixedWidth(36)
             badge.setStyleSheet(
@@ -313,29 +321,20 @@ class OverviewPage(QWidget):
 
             acc = QLabel(run['run_accession'])
             acc.setStyleSheet("font-size:11px;color:#6B7280;font-family:monospace;")
-            row.addWidget(acc, 1)
+            row.addWidget(acc, 2)
 
             reads = QLabel(f"{run['read_count']:,}" if run['read_count'] else "—")
-            reads.setStyleSheet(f"font-size:12px;color:{TEXT_M};")
+            reads.setStyleSheet(f"font-size:11px;color:{TEXT_M};")
             row.addWidget(reads, 1)
 
             layout_lbl = QLabel(run['library_layout'].title())
             layout_lbl.setStyleSheet(f"font-size:11px;color:{TEXT_M};")
             row.addWidget(layout_lbl, 1)
 
-            status_text  = "✓  Uploaded" if run['uploaded'] else "○  Pending"
-            status_color = SUCCESS_FG    if run['uploaded'] else TEXT_HINT
-            st = QLabel(status_text)
-            st.setStyleSheet(f"font-size:11px;color:{status_color};")
+            st = QLabel("✓  Uploaded" if run['uploaded'] else "○  Pending")
+            st.setStyleSheet(
+                f"font-size:11px;color:{SUCCESS_FG if run['uploaded'] else TEXT_HINT};")
             row.addWidget(st, 1)
-
-            if run['qiime_error']:
-                qiime_lbl = QLabel(f"⚠  {run['qiime_error'][:60]}")
-                qiime_lbl.setStyleSheet(f"font-size:10px;color:{DANGER_FG};")
-            else:
-                qiime_lbl = QLabel("—")
-                qiime_lbl.setStyleSheet(f"font-size:11px;color:{TEXT_HINT};")
-            row.addWidget(qiime_lbl, 2)
             self._runs_body.addLayout(row)
 
             div = QFrame(); div.setFrameShape(QFrame.Shape.HLine)
@@ -348,6 +347,7 @@ class OverviewPage(QWidget):
 # ═════════════════════════════════════════════════════════════════════════════
 
 class UploadRunsPage(QWidget):
+<<<<<<< HEAD
     """
     Users browse local FASTQ files, see them listed, then click Run Pipeline.
     No QIIME2 knowledge required — analysis runs in-app automatically.
@@ -358,6 +358,10 @@ class UploadRunsPage(QWidget):
     # kept for callers that haven't been updated yet
     file_selected      = pyqtSignal(str, str)
     srr_manually_added = pyqtSignal(str)
+=======
+    # slot = "forward" | "reverse" | "single"
+    file_selected = pyqtSignal(str, str, str)   # (run_label, slot, file_path)
+>>>>>>> ui-fetch-pipeline
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -367,9 +371,10 @@ class UploadRunsPage(QWidget):
     def _build(self):
         self._root = QVBoxLayout(self)
         self._root.setContentsMargins(28, 24, 28, 24)
-        self._root.setSpacing(16)
+        self._root.setSpacing(12)
         self._root.addWidget(page_title("Upload Runs"))
 
+<<<<<<< HEAD
         # ── Drop-zone card ────────────────────────────────────────────────────
         drop_zone = QFrame()
         drop_zone.setObjectName("drop_zone")
@@ -429,11 +434,16 @@ class UploadRunsPage(QWidget):
         self._root.addWidget(drop_zone)
 
         # ── Run files list ────────────────────────────────────────────────────
+=======
+        # ── Runs card: compact one-row-per-run table ───────────────────────────
+>>>>>>> ui-fetch-pipeline
         self._runs_card = card()
-        self._runs_card.layout().addWidget(section_title("Run files"))
+        self._runs_card.layout().setSpacing(6)
+        self._runs_card.layout().addWidget(section_title("Sequencing Runs"))
         self._runs_body = QVBoxLayout()
         self._runs_body.setSpacing(0)
         self._runs_card.layout().addLayout(self._runs_body)
+<<<<<<< HEAD
         self._empty_lbl = _placeholder(
             "No files added yet — click  ⬆ Browse files…  above to select FASTQ files.")
         self._runs_body.addWidget(self._empty_lbl)
@@ -464,6 +474,78 @@ class UploadRunsPage(QWidget):
         self._pipeline_widget.hide()
         self._root.addWidget(self._pipeline_widget)
 
+=======
+        self._runs_body.addWidget(_placeholder("No runs loaded — fetch a project first."))
+
+        # Pipeline button (hidden until files ready)
+        self._pipeline_divider = hdivider()
+        self._runs_card.layout().addWidget(self._pipeline_divider)
+        self._pipeline_divider.hide()
+
+        self._pipeline_row_widget = QWidget()
+        pr_lay = QHBoxLayout(self._pipeline_row_widget)
+        pr_lay.setContentsMargins(0, 4, 0, 2)
+        pr_lay.setSpacing(12)
+        self._pipeline_hint = QLabel("Runs ready — click to start QIIME2 preprocessing.")
+        self._pipeline_hint.setObjectName("label_hint")
+        pr_lay.addWidget(self._pipeline_hint, 1)
+        self._pipeline_btn = btn_primary("  ▶  Run Pipeline")
+        self._pipeline_btn.setObjectName("btn_run_pipeline")
+        self._pipeline_btn.setFixedHeight(40)
+        self._pipeline_btn.setMinimumWidth(160)
+        self._pipeline_btn.setStyleSheet(
+            "background-color:#059669; color:white; border:none;"
+            "border-radius:8px; font-size:13px; font-weight:700; padding:0 20px;"
+        )
+        pr_lay.addWidget(self._pipeline_btn)
+        self._runs_card.layout().addWidget(self._pipeline_row_widget)
+        self._pipeline_row_widget.hide()
+        self._root.addWidget(self._runs_card)
+
+        # ── Log / terminal card (always visible) ──────────────────────────────
+        log_card = card()
+        log_card.layout().setSpacing(6)
+        log_card.layout().setContentsMargins(14, 10, 14, 10)
+
+        log_hdr = QHBoxLayout()
+        log_hdr.setSpacing(8)
+        log_hdr.addWidget(section_title("Log"))
+        log_hdr.addStretch()
+        self._status_dot = QLabel("●")
+        self._status_dot.setStyleSheet("font-size:10px; color:#9CA3AF;")
+        log_hdr.addWidget(self._status_dot)
+        self._status_step_lbl = QLabel("Idle")
+        self._status_step_lbl.setStyleSheet("font-size:11px; color:#9CA3AF;")
+        log_hdr.addWidget(self._status_step_lbl)
+        log_card.layout().addLayout(log_hdr)
+
+        self._terminal = QPlainTextEdit()
+        self._terminal.setReadOnly(True)
+        mono = QFont("Menlo")
+        mono.setStyleHint(QFont.StyleHint.Monospace)
+        mono.setPointSize(10)
+        self._terminal.setFont(mono)
+        self._terminal.setStyleSheet(
+            "QPlainTextEdit {"
+            "  background:#0D1117; color:#C9D1D9;"
+            "  border:1px solid #30363D; border-radius:6px; padding:8px;"
+            "}"
+        )
+        self._terminal.setMinimumHeight(220)
+        self._terminal.setPlainText("Ready — fetch a project to begin.\n")
+        log_card.layout().addWidget(self._terminal)
+
+        # Hidden error container kept for API compatibility
+        self._error_container = QWidget()
+        self._error_container.hide()
+        err_lay = QVBoxLayout(self._error_container)
+        err_lay.setContentsMargins(0, 0, 0, 0)
+        err_lay.setSpacing(4)
+        self._error_area = err_lay
+        log_card.layout().addWidget(self._error_container)
+
+        self._root.addWidget(log_card)
+>>>>>>> ui-fetch-pipeline
         self._root.addStretch()
 
     # ── File browser ──────────────────────────────────────────────────────────
@@ -481,6 +563,7 @@ class UploadRunsPage(QWidget):
         import os
         self._state = state
         _clear(self._runs_body)
+<<<<<<< HEAD
 
         if not state.runs:
             self._runs_body.addWidget(_placeholder(
@@ -542,6 +625,82 @@ class UploadRunsPage(QWidget):
                 "QPushButton:hover{background:#FEF2F2;}")
             rem.clicked.connect(lambda _, lbl=run['label']: self.file_removed.emit(lbl))
             row.addWidget(rem)
+=======
+
+        _pipeline_dir = _Path(__file__).parent.parent / "pipeline" / "data"
+
+        for i, run in enumerate(state.runs.values(), start=1):
+            srr       = run['run_accession']
+            is_paired = run.get('library_layout', 'PAIRED').upper() == 'PAIRED'
+            uploaded  = run.get('uploaded', False)
+
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 6, 0, 6)
+            row.setSpacing(10)
+
+            # Label badge
+            badge = QLabel(run['label'])
+            badge.setFixedWidth(30)
+            badge.setStyleSheet(
+                "font-size:11px; font-weight:700; color:#6366F1;"
+                "background:#EEF2FF; border-radius:4px; padding:2px 4px;")
+            row.addWidget(badge)
+
+            # Accession (monospace)
+            acc = QLabel(srr)
+            acc.setStyleSheet("font-size:11px; color:#6B7280; font-family:monospace;")
+            row.addWidget(acc, 2)
+
+            # Type tag
+            tag = QLabel("PAIRED" if is_paired else "SINGLE")
+            tag.setStyleSheet(
+                f"font-size:10px; font-weight:700; padding:1px 5px; border-radius:3px;"
+                f"background:{'#EDE9FE' if is_paired else '#D1FAE5'};"
+                f"color:{'#6D28D9' if is_paired else '#065F46'};")
+            row.addWidget(tag)
+
+            # FASTQ file existence dots
+            if is_paired:
+                f1 = _pipeline_dir / state.bioproject_id / "fastq" / "paired" / f"{srr}_1.fastq"
+                f2 = _pipeline_dir / state.bioproject_id / "fastq" / "paired" / f"{srr}_2.fastq"
+                files_ok = f1.exists() and f2.exists()
+                files_lbl = QLabel(
+                    f"{'✓' if f1.exists() else '○'} _1.fastq  "
+                    f"{'✓' if f2.exists() else '○'} _2.fastq")
+            else:
+                f1 = _pipeline_dir / state.bioproject_id / "fastq" / "single" / f"{srr}.fastq"
+                files_ok = f1.exists()
+                files_lbl = QLabel(f"{'✓' if files_ok else '○'} {srr}.fastq")
+            files_lbl.setStyleSheet(
+                f"font-size:10px; font-family:monospace;"
+                f"color:{'#059669' if files_ok else '#9CA3AF'};")
+            row.addWidget(files_lbl, 3)
+
+            # Upload status
+            status_lbl = QLabel("✓  Uploaded" if uploaded else "○  Pending")
+            status_lbl.setFixedWidth(84)
+            status_lbl.setStyleSheet(
+                f"font-size:11px; color:{'#065F46' if uploaded else '#9CA3AF'};")
+            row.addWidget(status_lbl)
+
+            # Browse button(s)
+            if is_paired:
+                for slot, label, tip in [
+                    ('forward', '_1', 'Forward reads (SRR_1.fastq)'),
+                    ('reverse', '_2', 'Reverse reads (SRR_2.fastq)'),
+                ]:
+                    b = btn_outline(f"Browse {label}")
+                    b.setFixedWidth(80)
+                    b.setToolTip(tip)
+                    b.clicked.connect(lambda _, r=run['label'], s=slot: self._browse(r, s))
+                    row.addWidget(b)
+            else:
+                b = btn_outline("Browse")
+                b.setFixedWidth(80)
+                b.setToolTip("Select FASTQ file")
+                b.clicked.connect(lambda _, r=run['label']: self._browse(r, 'single'))
+                row.addWidget(b)
+>>>>>>> ui-fetch-pipeline
 
             self._runs_body.addLayout(row)
             if i < len(state.runs) - 1:
@@ -549,17 +708,52 @@ class UploadRunsPage(QWidget):
                 d.setStyleSheet(f"background:{BORDER};max-height:1px;")
                 self._runs_body.addWidget(d)
 
+<<<<<<< HEAD
         self._pipeline_widget.show()
 
     # ── Pipeline button helpers ───────────────────────────────────────────────
 
     def set_pipeline_callback(self, callback) -> None:
+=======
+    def update_run_status(self, run_label: str, uploaded: bool, error: str = ""):
+        """Called by MainWindow after FASTQ validation."""
+        if run_label not in self._row_widgets:
+            return
+        lbl = self._row_widgets[run_label]["status"]
+        if error:
+            lbl.setText(f"✗  Error")
+            lbl.setStyleSheet(f"color:{DANGER_FG}; font-size:12px;")
+        else:
+            lbl.setText("✓  Uploaded" if uploaded else "○  Pending")
+            lbl.setStyleSheet(
+                f"color:{'#065F46' if uploaded else '#9CA3AF'}; font-size:12px;")
+
+    def _browse(self, run_label: str, slot: str) -> None:
+        titles = {
+            'forward': f"Select Forward reads (_1.fastq) for {run_label}",
+            'reverse': f"Select Reverse reads (_2.fastq) for {run_label}",
+            'single':  f"Select FASTQ file for {run_label}",
+        }
+        path, _ = QFileDialog.getOpenFileName(
+            self, titles.get(slot, f"Select FASTQ for {run_label}"), "",
+            "FASTQ files (*.fastq *.fastq.gz);;All files (*)")
+        if path:
+            self.file_selected.emit(run_label, slot, path)
+
+    def show_run_pipeline_btn(self, ready: bool, callback) -> None:
+        """Show the pre-built Run Pipeline button and wire its callback."""
+        self._pipeline_divider.show()
+        self._pipeline_row_widget.show()
+        self._pipeline_btn.setEnabled(ready)
+        self._pipeline_btn.setText("  ▶  Run Pipeline")
+>>>>>>> ui-fetch-pipeline
         try:
             self._pipeline_btn.clicked.disconnect()
         except (RuntimeError, TypeError):
             pass
         self._pipeline_btn.clicked.connect(callback)
 
+<<<<<<< HEAD
     def set_pipeline_running(self, running: bool) -> None:
         self._pipeline_btn.setEnabled(not running)
         self._pipeline_btn.setText(
@@ -591,6 +785,51 @@ class UploadRunsPage(QWidget):
 
     def show_pipeline_error(self, message: str) -> None:
         self.show_status(f"Error: {message[:200]}", kind="err")
+=======
+    def auto_mark_uploaded(self, state: "AppState") -> None:
+        self.load(state)  # refresh table; main_window logs status via update_pipeline_status
+
+    def show_pipeline_error(self, message: str) -> None:
+        self._log(f"✗  Pipeline error: {message[:200]}", "err")
+
+    def show_download_status(self, message: str, kind: str = "info") -> None:
+        self._log(message, kind)
+
+    def update_pipeline_status(self, message: str, kind: str = "info") -> None:
+        dot_colors = {
+            "ok": "#10B981", "warn": "#F59E0B",
+            "err": "#EF4444", "info": "#3B82F6", "run": "#8B5CF6",
+        }
+        text_colors = {
+            "ok": "#065F46", "warn": "#78350F",
+            "err": "#7F1D1D", "info": "#1E3A5F", "run": "#3B0764",
+        }
+        self._status_dot.setStyleSheet(
+            f"font-size:10px; color:{dot_colors.get(kind, '#3B82F6')};")
+        self._status_step_lbl.setStyleSheet(
+            f"font-size:11px; color:{text_colors.get(kind, '#1E3A5F')};")
+        self._status_step_lbl.setText(message)
+        self._log(message, kind)
+
+    def _log(self, text: str, kind: str = "info") -> None:
+        prefixes = {"ok": "✓", "warn": "⚠", "err": "✗", "run": "▶", "info": "ℹ"}
+        prefix = prefixes.get(kind, "ℹ")
+        line = f"{prefix}  {text.strip()}"
+        self._terminal.moveCursor(QTextCursor.MoveOperation.End)
+        self._terminal.insertPlainText(line + "\n")
+        self._terminal.moveCursor(QTextCursor.MoveOperation.End)
+
+    def append_terminal_output(self, text: str) -> None:
+        self._terminal.moveCursor(QTextCursor.MoveOperation.End)
+        self._terminal.insertPlainText(text if text.endswith("\n") else text + "\n")
+        self._terminal.moveCursor(QTextCursor.MoveOperation.End)
+
+    def show_terminal(self, visible: bool = True) -> None:
+        self._terminal.setVisible(visible)
+
+    def clear_terminal(self) -> None:
+        self._terminal.clear()
+>>>>>>> ui-fetch-pipeline
 
 
 # ═════════════════════════════════════════════════════════════════════════════

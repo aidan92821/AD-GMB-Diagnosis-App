@@ -34,6 +34,7 @@ def fetch_runs(email, runner, bioproject: str, srr=None, n_runs=1) -> tuple[list
     
     info = pd.read_csv(result)
 
+<<<<<<< HEAD
 
     if srr:
         filtered = info.loc[info['Run'] == srr]
@@ -47,21 +48,84 @@ def fetch_runs(email, runner, bioproject: str, srr=None, n_runs=1) -> tuple[list
             + (f" with run accession '{srr}'" if srr else "") + "."
         )
 
+=======
+    if info.empty:
+        raise ValueError(f"No run info returned from NCBI for bioproject '{bioproject}'. "
+                         "Check that the accession is valid and your email is set.")
+
+    # only bioproject is specified
+    if srr is None or info.loc[info['Run'] == srr].empty:
+        # select the first n_runs runs from the dataset if srr is None
+        # or select the first run from the dataset if srr not associated with this bioproject
+        # (n_runs will == 1 if srr is supplied to GUI)
+        info = info.head(n_runs)
+    # run id is specified
+    else:
+        # get the specific run
+        info = info.loc[info['Run'] == srr]
+
+    if info.empty:
+        raise ValueError(f"No matching runs found for bioproject '{bioproject}'"
+                         + (f" / SRR '{srr}'" if srr else "") + ".")
+>>>>>>> ui-fetch-pipeline
 
     # determine paired or single end
     paired_runs = info.loc[info['LibraryLayout'] == 'PAIRED', 'Run'].tolist()
     single_runs = info.loc[info['LibraryLayout'] == 'SINGLE', 'Run'].tolist()
 
+<<<<<<< HEAD
     return paired_runs, single_runs
+=======
+    # get the run record (using a dict instead of RunRecord class)
+    runs: list[dict] = []
+    for i, (_, row) in enumerate(info.iterrows(), start=1):
+        layout = str(row.get("LibraryLayout", "")).upper()
+        if layout not in {"PAIRED", "SINGLE"}:
+            layout = "PAIRED"
+
+        runs.append({
+            'run_accession'    : row.get("Run", ""),
+            'label'            : f"R{i}",
+            'read_count'       : int(row.get("spots", 0)),
+            'base_count'       : int(row.get("bases", 0)),
+            'library_layout'   : layout,
+            'library_strategy' : row.get("LibraryStrategy", ""),
+            'platform'         : row.get("Platform", ""),
+            'instrument'       : row.get("Model", ""),
+            'sample_accession' : row.get("BioSample", ""),
+            'organism'         : row.get("ScientificName", ""),
+            'uploaded'         : False,
+            'qiime_error'      : ""
+        })
+
+    # get project meta data
+    first       = info.iloc[0]
+    project_uid = str(first.get("ProjectID", "")).strip()
+    sra_study   = str(first.get("SRAStudy", "")).strip()
+    organism    = str(first.get("ScientificName", "")).strip()
+
+    # get the project record (using a dict instead of ProjectRecord class)
+    project = {
+        'bioproject_id' : bioproject,
+        'project_uid'   : project_uid,
+        'sra_study_id'  : sra_study,
+        'title'         : f"{bioproject}",
+        'description'   : "",
+        'organism'      : organism,
+        'runs'          : runs,
+    }
+
+    return single_runs, paired_runs, project
+>>>>>>> ui-fetch-pipeline
 
 
 # lib_layout = 'paired' or 'single'
 # runs = list of SRR Accessions
 def download_runs(runner, bioproject: str, lib_layout: str, runs: list[str], state: AppState) -> AppState:
-    
-    # create temporary directory for fetching
+
     APP_DIR = Path(__file__).parent
     SRA_BIN = APP_DIR / "bin" / "sratoolkit" / "bin"
+<<<<<<< HEAD
     output_dir_fastq = str((APP_DIR / f"data/{bioproject}/fastq/{lib_layout}").resolve())
     Path(output_dir_fastq).mkdir(parents=True, exist_ok=True)
 
@@ -69,13 +133,34 @@ def download_runs(runner, bioproject: str, lib_layout: str, runs: list[str], sta
     # and calculate how many to use for the process
     cores = os.cpu_count()
     cores = str(max(cores - 4, 1))
+=======
+    output_dir = Path(APP_DIR / f"data/{bioproject}/fastq/{lib_layout}").resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    # fetch from NCBI and convert to fastq files -> output_dir
+    cores = str(max(os.cpu_count() - 4, 1))
+>>>>>>> ui-fetch-pipeline
+
     for run in runs:
+<<<<<<< HEAD
         subprocess.run(['fasterq-dump', run, '--split-files',
                         '--threads', cores,
                         '--outdir', output_dir_fastq],
                         check=True)
+=======
+        # Skip download if files already present on disk
+        already_paired  = (output_dir / f"{run}_1.fastq").exists()
+        already_single  = (output_dir / f"{run}.fastq").exists()
+        if already_paired or already_single:
+            continue
+
+        runner.fq_run([
+            str(SRA_BIN / "fasterq-dump"), run, "--split-files",
+            "--threads", cores,
+            "--outdir", str(output_dir),
+        ])
+
+    return state
+>>>>>>> ui-fetch-pipeline
 
 
 # lib_layout = 'paired' or 'single'
@@ -107,6 +192,7 @@ def write_manifest(bioproject: str, lib_layout: str, state: AppState) -> None:
                 writer.writerow(['sample-id',
                                  'forward-absolute-filepath',
                                  'reverse-absolute-filepath'])
+<<<<<<< HEAD
                 for f, r in zip(forward, reverse):
                     writer.writerow([f"{f[:-8]}",
                                      Path(f"{input_dir}/{f}").resolve(),
@@ -118,14 +204,38 @@ def write_manifest(bioproject: str, lib_layout: str, state: AppState) -> None:
                 for s in files:
                     writer.writerow([f"{s[:-6]}",
                                      Path(f"{input_dir}/{s}").resolve()])
+=======
+                for f, r in zip(sorted(forward), sorted(reverse)):
+                    srr = f[:-8]   # strip _1.fastq (8 chars)
+                    if srr not in state.runs:
+                        continue   # skip leftover files from previous fetches
+                    state.runs[srr]['uploaded'] = True
+                    writer.writerow([srr,
+                                     str(Path(f"{input_dir}/{f}").resolve()),
+                                     str(Path(f"{input_dir}/{r}").resolve())])
+            else:
+                # single end
+                writer.writerow(['sample-id', 'absolute-filepath'])
+                for s in files:
+                    srr = s[:-6]   # strip .fastq (6 chars)
+                    if srr not in state.runs:
+                        continue   # skip leftover files from previous fetches
+                    state.runs[srr]['uploaded'] = True
+                    writer.writerow([srr,
+                                     str(Path(f"{input_dir}/{s}").resolve())])
+>>>>>>> ui-fetch-pipeline
 
 
 # clean up the temporary files
 # after data tables have been imported to the database, remove them
 # the only files needed after importing are rep-seqs.fasta and tree.nwk
-def cleanup(bioproject):
-    shutil.rmtree(Path("data") / bioproject / "fastq")
-    shutil.rmtree(Path("data") / bioproject / "qiime")
+def cleanup(bioproject: str):
+    APP_DIR = Path(__file__).parent # pipeline/
+    FASTQ_DIR = (APP_DIR / f"data/{bioproject}/fastq")
+    QIIME_DIR = (APP_DIR / f"data/{bioproject}/qiime")
+    
+    shutil.rmtree(FASTQ_DIR, ignore_errors=True)
+    shutil.rmtree(QIIME_DIR, ignore_errors=True)
 
 
 '''DEPRECATED'''
