@@ -155,6 +155,39 @@ class _DownloadWorkerReal(QObject):
             print(exc)
 
 
+class _CheckEnvWorker(QObject):
+    '''
+    this worker checks to make sure the qiime env is up and running
+    '''
+    finished = pyqtSignal(bool, object, object)   # emits if the env available and the subprocess result
+    errored  = pyqtSignal(str)
+
+    def __init__(self, runner: QiimeRunner) -> None:
+        super().__init__()
+        self._runner = runner
+
+    def run(self):
+
+        import subprocess as _sp
+        proc = None
+        try:
+            proc = _sp.Popen(
+                [str(self._runner.base_cmd[0]), "run", "-p",
+                str(self._runner.base_cmd[3]), "qiime", "--version"],
+                stdout=_sp.PIPE,
+                stderr=_sp.PIPE,
+                text=True
+            )
+            stdout, stderr = proc.communicate(timeout=20)
+            qiime2_available = (proc.returncode == 0)
+            self.finished.emit(qiime2_available, stdout, stderr)
+        except _sp.TimeoutExpired as e:
+            proc.kill()
+            self.errored.emit(str(e))
+        except Exception as exc:
+            self.errored.emit(str(exc))
+
+
 class _PipelineWorkerReal(QObject):
     '''
     this worker will run the full qiime2 preprocessing and create the tables ready for parsing
@@ -179,19 +212,18 @@ class _PipelineWorkerReal(QObject):
             download_classifier(classifier_url=f"{SOURCE}/{CLASSIFIER}")
     
     def run(self):
+
         try:
             cb = self.progress.emit
             # preprocess the paired end fastq files
             if self._state.paired_runs:
-                if "demux.qza" not in os.listdir(str(self.QIIME_DIR / "paired")):
-                    qiime_preprocess(runner=self._runner, bioproject=self._bioproject,
-                                     lib_layout='paired', callback=cb)
+                qiime_preprocess(runner=self._runner, bioproject=self._bioproject,
+                                    lib_layout='paired', callback=cb)
 
             # preprocess the single end fastq files
             if self._state.single_runs:
-                if "demux.qza" not in os.listdir(str(self.QIIME_DIR / "single")):
-                    qiime_preprocess(runner=self._runner, bioproject=self._bioproject,
-                                     lib_layout='single', callback=cb)
+                qiime_preprocess(runner=self._runner, bioproject=self._bioproject,
+                                    lib_layout='single', callback=cb)
 
             self.finished.emit(self._state)
         except Exception as exc:
@@ -952,6 +984,7 @@ class MainWindow(QMainWindow):
         self._state       = AppState()
         self._current_user: dict | None = None
         self._runner = QiimeRunner()
+        self._downloaded = False
 
         self._build_ui()
 
@@ -1278,6 +1311,7 @@ class MainWindow(QMainWindow):
     def _on_download_complete(self, state: "AppState") -> None:
         """All (or some) runs downloaded — auto-populate Upload page, then run analysis."""
         self._state = state
+        self._downloaded = True
         # get number of successfully downloaded runs as fastq files
         uploaded = self._state.uploaded_count
 
@@ -1314,7 +1348,7 @@ class MainWindow(QMainWindow):
         if uploaded_runs > 0:
             self._upload_page.show_run_pipeline_btn(
                 ready=True,
-                callback=self._on_run_pipeline,
+                callback=self._on_check_env,
             )
 
         # Refresh Overview so run statuses show ✓ Uploaded instead of ○ Pending
@@ -1439,7 +1473,7 @@ class MainWindow(QMainWindow):
         uploaded_runs = sum(1 for r in self._state.runs.values() if r['uploaded'])
         if uploaded_runs > 0:
             self._upload_page.show_run_pipeline_btn(
-                ready=True, callback=self._on_run_pipeline)
+                ready=True, callback=self._on_check_env)
             self._upload_page.update_pipeline_status(
                 f"{uploaded_runs} of {self._state.run_count} run(s) ready — click Run Pipeline to start",
                 "ok"
@@ -1488,7 +1522,7 @@ class MainWindow(QMainWindow):
         self._overview_page.load(self._state)
 
         uploaded_runs = sum(1 for r in self._state.runs.values() if r['uploaded'])
-        self._upload_page.show_run_pipeline_btn(ready=True, callback=self._on_run_pipeline)
+        self._upload_page.show_run_pipeline_btn(ready=True, callback=self._on_check_env)
         self._upload_page.update_pipeline_status(
             f"{label} added — {uploaded_runs} run(s) ready for pipeline", "ok")
 
@@ -1537,8 +1571,7 @@ class MainWindow(QMainWindow):
                         APP_DIR / f"data/{bio}/fastq/single/{srr}.fastq")
                     w.writerow([srr, path])
 
-    def _on_run_pipeline(self) -> None:
-        import subprocess as _sp
+    def _on_check_env(self) -> None:
 
         # Detect whether QIIME2 is available and report in the terminal
         self._upload_page.show_terminal(True)
@@ -1555,41 +1588,56 @@ class MainWindow(QMainWindow):
                 f"Skipped : {', '.join(skipped_srrs)}  (not downloaded)")
         self._upload_page.append_terminal_output("")
 
-        qiime2_available = False
-        try:
-            result = _sp.run(
-                [str(self._runner.base_cmd[0]), "run", "-p",
-                 str(self._runner.base_cmd[3]), "qiime", "--version"],
-                capture_output=True, text=True, timeout=20,
-            )
-            qiime2_available = result.returncode == 0
-            if qiime2_available:
-                ver = result.stdout.strip().splitlines()[0] if result.stdout.strip() else "detected"
-                self._upload_page.append_terminal_output(f"QIIME2 detected: {ver}")
-            else:
-                self._upload_page.append_terminal_output(
-                    "QIIME2 not found in environment — will fall back to in-app analysis."
-                )
-        except Exception as e:
+
+        self._checkenv_thread = QThread(self)
+        self._checkenv_worker = _CheckEnvWorker(runner=self._runner)
+        self._checkenv_worker.moveToThread(self._checkenv_thread)
+        self._checkenv_thread.started.connect(self._checkenv_worker.run)
+        self._checkenv_worker.finished.connect(self._on_check_env_complete)
+        self._checkenv_worker.errored.connect(self._on_check_env_error)
+        self._checkenv_worker.finished.connect(self._checkenv_thread.quit)
+        self._checkenv_worker.errored.connect(self._checkenv_thread.quit)
+        self._checkenv_thread.start()
+
+
+    def _on_check_env_complete(self, qiime2_available: bool, stdout) -> None:
+        if qiime2_available:
+            ver = stdout.strip().splitlines()[0] if stdout.strip() else "detected"
+            self._upload_page.append_terminal_output(f"QIIME2 detected: {ver}")
+        else:
             self._upload_page.append_terminal_output(
-                f"QIIME2 check failed ({e}) — will fall back to in-app analysis."
+                "QIIME2 not found in environment — will fall back to in-app analysis."
             )
+        self._upload_page.append_terminal_output("")
+
+        self._on_run_pipeline()
+
+
+    def _on_check_env_error(self, exc: str) -> None:
+        self._upload_page.append_terminal_output(
+            f"QIIME2 check failed ({exc}) — will fall back to in-app analysis."
+        )
 
         self._upload_page.append_terminal_output("")
 
-        # Write manifests from current run paths (covers user-uploaded files)
-        try:
-            self._write_manifests_from_state()
-            self._upload_page.append_terminal_output("Manifests written — starting QIIME2…\n")
-        except Exception as e:
-            self._upload_page.append_terminal_output(f"[WARN] Could not write manifests: {e}\n")
+        # TODO fall back to in app analysis
+
+
+    def _on_run_pipeline(self) -> None:   
 
         self._status_badge.setText("Running QIIME2 pipeline…")
         self._status_badge.setObjectName("badge_yellow")
         self._status_badge.style().unpolish(self._status_badge)
         self._status_badge.style().polish(self._status_badge)
         self._status_badge.show()
-        self._upload_page.update_pipeline_status("QIIME2 pipeline running…", "run")
+        self._upload_page.update_pipeline_status("QIIME2 pipeline running…\nThis may take a few minutes", "run")
+
+        if self._downloaded == False:
+            try:
+                self._write_manifests_from_state()
+                self._upload_page.append_terminal_output("Manifests written — starting QIIME2…\n")
+            except Exception as e:
+                self._upload_page.append_terminal_output(f"[WARN] Could not write manifests: {e}\n")
 
         # emma changes
         self._pipeline_thread_real = QThread(self)
@@ -1615,12 +1663,6 @@ class MainWindow(QMainWindow):
         self._status_badge.style().polish(self._status_badge)
         self._upload_page.update_pipeline_status("QIIME2 pipeline complete — parsing results…", "ok")
         self._upload_page.append_terminal_output("\n=== Pipeline complete — saving results to database ===\n")
-
-        # TODO update this badge
-        # self._analysis_badge.setText(
-        #     f"{state.asv_count:,} ASVs  ·  {state.genus_count} genera  (QIIME2)"
-        # )
-        # self._analysis_badge.show()
 
         self._overview_page.load(state)
         self._broadcast_state()
