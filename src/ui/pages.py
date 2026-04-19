@@ -345,8 +345,8 @@ class OverviewPage(QWidget):
 # ═════════════════════════════════════════════════════════════════════════════
 
 class UploadRunsPage(QWidget):
-    # slot = "forward" | "reverse" | "single"
-    file_selected = pyqtSignal(str, str, str)   # (run_label, slot, file_path)
+    file_selected   = pyqtSignal(str, str, str)  # (run_label, slot, file_path)  — for NCBI pending runs
+    local_run_added = pyqtSignal(str, str, str)  # (layout, fwd_path, rev_or_empty)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -393,6 +393,98 @@ class UploadRunsPage(QWidget):
         self._runs_card.layout().addWidget(self._pipeline_row_widget)
         self._pipeline_row_widget.hide()
         self._root.addWidget(self._runs_card)
+
+        # ── Add Local FASTQ card ───────────────────────────────────────────────
+        local_card = card()
+        local_card.layout().setSpacing(8)
+        local_card.layout().addWidget(section_title("Add Local FASTQ Files"))
+        local_card.layout().addWidget(label_hint(
+            "Upload your own FASTQ files from your computer. "
+            "They will be included in the QIIME2 pipeline when you click Run Pipeline."))
+
+        # Type toggle — two large, clearly visible buttons
+        _SEL   = "background-color:#4F46E5; color:#FFFFFF; border:none; border-radius:8px; font-size:13px; font-weight:700; padding:8px 20px;"
+        _UNSEL = "background-color:#F3F4F6; color:#374151; border:1.5px solid #D1D5DB; border-radius:8px; font-size:13px; font-weight:600; padding:8px 20px;"
+        type_row = QHBoxLayout(); type_row.setSpacing(8)
+        self._btn_paired = QPushButton("⬤  Paired-end")
+        self._btn_paired.setFixedHeight(40)
+        self._btn_paired.setStyleSheet(_SEL)
+        self._btn_paired.clicked.connect(lambda: self._set_local_type("Paired-end"))
+        self._btn_single = QPushButton("○  Single-end")
+        self._btn_single.setFixedHeight(40)
+        self._btn_single.setStyleSheet(_UNSEL)
+        self._btn_single.clicked.connect(lambda: self._set_local_type("Single-end"))
+        type_row.addWidget(self._btn_paired, 1)
+        type_row.addWidget(self._btn_single, 1)
+        type_row.addStretch()
+        local_card.layout().addLayout(type_row)
+        self._local_type_active = "Paired-end"
+
+        # Paired-end file inputs
+        self._local_paired_widget = QWidget()
+        pw = QVBoxLayout(self._local_paired_widget)
+        pw.setContentsMargins(0, 4, 0, 0); pw.setSpacing(8)
+        self._local_fwd_path = QLineEdit()
+        self._local_fwd_path.setReadOnly(True)
+        self._local_fwd_path.setPlaceholderText("Forward reads  (_1.fastq / _R1.fastq)")
+        self._local_rev_path = QLineEdit()
+        self._local_rev_path.setReadOnly(True)
+        self._local_rev_path.setPlaceholderText("Reverse reads  (_2.fastq / _R2.fastq)")
+        for path_edit, row_lbl, tip in [
+            (self._local_fwd_path, "Forward (_1)", "Select forward / R1 FASTQ file"),
+            (self._local_rev_path, "Reverse (_2)", "Select reverse / R2 FASTQ file"),
+        ]:
+            fr = QHBoxLayout(); fr.setSpacing(8)
+            lbl_w = QLabel(row_lbl)
+            lbl_w.setFixedWidth(90)
+            lbl_w.setStyleSheet("font-size:12px; color:#6B7280;")
+            fr.addWidget(lbl_w)
+            fr.addWidget(path_edit, 1)
+            b = QPushButton("Browse…")
+            b.setFixedHeight(34); b.setFixedWidth(90)
+            b.setToolTip(tip)
+            b.setStyleSheet(
+                "background-color:#FFFFFF; color:#374151; border:1.5px solid #D1D5DB;"
+                "border-radius:6px; font-size:12px; font-weight:600; padding:0 12px;")
+            b.clicked.connect(lambda _, p=path_edit: self._browse_local_file(p))
+            fr.addWidget(b)
+            pw.addLayout(fr)
+        local_card.layout().addWidget(self._local_paired_widget)
+
+        # Single-end file input (hidden by default)
+        self._local_single_widget = QWidget()
+        sw = QHBoxLayout(self._local_single_widget)
+        sw.setContentsMargins(0, 4, 0, 0); sw.setSpacing(8)
+        lbl_sw = QLabel("FASTQ file")
+        lbl_sw.setFixedWidth(90)
+        lbl_sw.setStyleSheet("font-size:12px; color:#6B7280;")
+        sw.addWidget(lbl_sw)
+        self._local_single_path = QLineEdit()
+        self._local_single_path.setReadOnly(True)
+        self._local_single_path.setPlaceholderText("FASTQ file  (.fastq / .fastq.gz)")
+        sw.addWidget(self._local_single_path, 1)
+        b_s = QPushButton("Browse…")
+        b_s.setFixedHeight(34); b_s.setFixedWidth(90)
+        b_s.setStyleSheet(
+            "background-color:#FFFFFF; color:#374151; border:1.5px solid #D1D5DB;"
+            "border-radius:6px; font-size:12px; font-weight:600; padding:0 12px;")
+        b_s.clicked.connect(lambda _: self._browse_local_file(self._local_single_path))
+        sw.addWidget(b_s)
+        local_card.layout().addWidget(self._local_single_widget)
+        self._local_single_widget.hide()
+
+        # Add Run button — large and green, full attention
+        add_row = QHBoxLayout(); add_row.addStretch()
+        self._add_local_btn = QPushButton("＋  Add Run")
+        self._add_local_btn.setFixedHeight(42)
+        self._add_local_btn.setMinimumWidth(140)
+        self._add_local_btn.setStyleSheet(
+            "background-color:#059669; color:white; border:none;"
+            "border-radius:8px; font-size:14px; font-weight:700; padding:0 24px;")
+        self._add_local_btn.clicked.connect(self._on_add_local_run)
+        add_row.addWidget(self._add_local_btn)
+        local_card.layout().addLayout(add_row)
+        self._root.addWidget(local_card)
 
         # ── Log / terminal card (always visible) ──────────────────────────────
         log_card = card()
@@ -476,18 +568,28 @@ class UploadRunsPage(QWidget):
                 f"color:{'#6D28D9' if is_paired else '#065F46'};")
             row.addWidget(tag)
 
-            # FASTQ file existence dots
+            # FASTQ file display — prefer stored path names, fall back to disk check
             if is_paired:
-                f1 = _pipeline_dir / state.bioproject_id / "fastq" / "paired" / f"{srr}_1.fastq"
-                f2 = _pipeline_dir / state.bioproject_id / "fastq" / "paired" / f"{srr}_2.fastq"
-                files_ok = f1.exists() and f2.exists()
-                files_lbl = QLabel(
-                    f"{'✓' if f1.exists() else '○'} _1.fastq  "
-                    f"{'✓' if f2.exists() else '○'} _2.fastq")
+                stored_fwd = run.get('fastq_forward', '')
+                stored_rev = run.get('fastq_reverse', '')
+                disk_f1 = _pipeline_dir / state.bioproject_id / "fastq" / "paired" / f"{srr}_1.fastq"
+                disk_f2 = _pipeline_dir / state.bioproject_id / "fastq" / "paired" / f"{srr}_2.fastq"
+                fwd_ok   = bool(stored_fwd) or disk_f1.exists()
+                rev_ok   = bool(stored_rev) or disk_f2.exists()
+                fwd_name = _Path(stored_fwd).name if stored_fwd else (f"{srr}_1.fastq" if disk_f1.exists() else f"{srr}_1.fastq")
+                rev_name = _Path(stored_rev).name if stored_rev else (f"{srr}_2.fastq" if disk_f2.exists() else f"{srr}_2.fastq")
+                files_ok = fwd_ok and rev_ok
+                files_text = (
+                    f"{'✓' if fwd_ok else '○'}  {fwd_name}    "
+                    f"{'✓' if rev_ok else '○'}  {rev_name}"
+                )
             else:
-                f1 = _pipeline_dir / state.bioproject_id / "fastq" / "single" / f"{srr}.fastq"
-                files_ok = f1.exists()
-                files_lbl = QLabel(f"{'✓' if files_ok else '○'} {srr}.fastq")
+                stored_s  = run.get('fastq_path', '')
+                disk_f1   = _pipeline_dir / state.bioproject_id / "fastq" / "single" / f"{srr}.fastq"
+                files_ok  = bool(stored_s) or disk_f1.exists()
+                file_name = _Path(stored_s).name if stored_s else f"{srr}.fastq"
+                files_text = f"{'✓' if files_ok else '○'}  {file_name}"
+            files_lbl = QLabel(files_text)
             files_lbl.setStyleSheet(
                 f"font-size:10px; font-family:monospace;"
                 f"color:{'#059669' if files_ok else '#9CA3AF'};")
@@ -500,23 +602,23 @@ class UploadRunsPage(QWidget):
                 f"font-size:11px; color:{'#065F46' if uploaded else '#9CA3AF'};")
             row.addWidget(status_lbl)
 
-            # Browse button(s)
-            if is_paired:
-                for slot, label, tip in [
-                    ('forward', '_1', 'Forward reads (SRR_1.fastq)'),
-                    ('reverse', '_2', 'Reverse reads (SRR_2.fastq)'),
-                ]:
-                    b = btn_outline(f"Browse {label}")
-                    b.setFixedWidth(80)
-                    b.setToolTip(tip)
-                    b.clicked.connect(lambda _, r=run['label'], s=slot: self._browse(r, s))
+            # Browse buttons only for pending NCBI runs (not local and not already uploaded)
+            is_local = srr.startswith("LOCAL_")
+            if not uploaded and not is_local:
+                if is_paired:
+                    for slot, lbl_txt, tip in [
+                        ('forward', 'Browse _1', 'Forward reads (SRR_1.fastq)'),
+                        ('reverse', 'Browse _2', 'Reverse reads (SRR_2.fastq)'),
+                    ]:
+                        b = btn_outline(lbl_txt)
+                        b.setFixedWidth(82); b.setToolTip(tip)
+                        b.clicked.connect(lambda _, r=run['label'], s=slot: self._browse(r, s))
+                        row.addWidget(b)
+                else:
+                    b = btn_outline("Browse")
+                    b.setFixedWidth(82); b.setToolTip("Select FASTQ file")
+                    b.clicked.connect(lambda _, r=run['label']: self._browse(r, 'single'))
                     row.addWidget(b)
-            else:
-                b = btn_outline("Browse")
-                b.setFixedWidth(80)
-                b.setToolTip("Select FASTQ file")
-                b.clicked.connect(lambda _, r=run['label']: self._browse(r, 'single'))
-                row.addWidget(b)
 
             self._runs_body.addLayout(row)
             self._row_widgets[run['label']] = {"status": status_lbl}
@@ -547,6 +649,49 @@ class UploadRunsPage(QWidget):
             "FASTQ files (*.fastq *.fastq.gz);;All files (*)")
         if path:
             self.file_selected.emit(run_label, slot, path)
+
+    # ── Local file upload helpers ──────────────────────────────────────────────
+
+    def _set_local_type(self, label: str) -> None:
+        _SEL   = "background-color:#4F46E5; color:#FFFFFF; border:none; border-radius:8px; font-size:13px; font-weight:700; padding:8px 20px;"
+        _UNSEL = "background-color:#F3F4F6; color:#374151; border:1.5px solid #D1D5DB; border-radius:8px; font-size:13px; font-weight:600; padding:8px 20px;"
+        self._local_type_active = label
+        is_paired = label == "Paired-end"
+        self._btn_paired.setText("⬤  Paired-end  (2 files)" if is_paired else "○  Paired-end  (2 files)")
+        self._btn_single.setText("⬤  Single-end  (1 file)" if not is_paired else "○  Single-end  (1 file)")
+        self._btn_paired.setStyleSheet(_SEL if is_paired else _UNSEL)
+        self._btn_single.setStyleSheet(_SEL if not is_paired else _UNSEL)
+        self._local_paired_widget.setVisible(is_paired)
+        self._local_single_widget.setVisible(not is_paired)
+
+    def _on_local_type_changed(self, label: str) -> None:
+        self._set_local_type(label)
+
+    def _browse_local_file(self, target: QLineEdit) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select FASTQ file", "",
+            "FASTQ files (*.fastq *.fastq.gz);;All files (*)")
+        if path:
+            target.setText(path)
+
+    def _on_add_local_run(self) -> None:
+        is_paired = self._local_type_active == "Paired-end"
+        if is_paired:
+            fwd = self._local_fwd_path.text().strip()
+            rev = self._local_rev_path.text().strip()
+            if not fwd or not rev:
+                self._log("Select both forward and reverse FASTQ files first.", "warn")
+                return
+            self.local_run_added.emit("PAIRED", fwd, rev)
+            self._local_fwd_path.clear()
+            self._local_rev_path.clear()
+        else:
+            single = self._local_single_path.text().strip()
+            if not single:
+                self._log("Select a FASTQ file first.", "warn")
+                return
+            self.local_run_added.emit("SINGLE", single, "")
+            self._local_single_path.clear()
 
     def show_run_pipeline_btn(self, ready: bool, callback) -> None:
         """Show the pre-built Run Pipeline button and wire its callback."""

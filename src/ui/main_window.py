@@ -1112,7 +1112,8 @@ class MainWindow(QMainWindow):
 
         # Wire signals
         self._overview_page.fetch_requested.connect(self._on_fetch_requested)
-        self._upload_page.file_selected.connect(self._on_file_selected)  # (label, slot, path)
+        self._upload_page.file_selected.connect(self._on_file_selected)
+        self._upload_page.local_run_added.connect(self._on_local_run_added)
         self._profile_page.logout_requested.connect(self._on_logout)
         self._profile_page.load_project.connect(self._on_load_project)
         self._profile_page.delete_project.connect(self._on_delete_project)
@@ -1443,6 +1444,53 @@ class MainWindow(QMainWindow):
                 f"{uploaded_runs} of {self._state.run_count} run(s) ready — click Run Pipeline to start",
                 "ok"
             )
+
+    def _on_local_run_added(self, layout: str, fwd_path: str, rev_path: str) -> None:
+        """User added a local FASTQ file via the Add Local FASTQ card."""
+        if self._state is None:
+            return
+
+        # Generate unique accession and label
+        local_n = sum(1 for k in self._state.runs if k.startswith("LOCAL_")) + 1
+        accession = f"LOCAL_{local_n}"
+        all_labels = [r['label'] for r in self._state.runs.values()]
+        label = f"L{local_n}"
+
+        run = {
+            'run_accession'    : accession,
+            'label'            : label,
+            'read_count'       : 0,
+            'base_count'       : 0,
+            'library_layout'   : layout,
+            'library_strategy' : 'AMPLICON',
+            'platform'         : 'LOCAL',
+            'instrument'       : '',
+            'sample_accession' : '',
+            'organism'         : self._state.organism,
+            'uploaded'         : True,
+            'qiime_error'      : '',
+        }
+
+        if layout == 'PAIRED':
+            run['fastq_forward'] = fwd_path
+            run['fastq_reverse'] = rev_path
+        else:
+            run['fastq_path'] = fwd_path
+
+        self._state.runs[accession] = run
+        self._state.run_count = len(self._state.runs)
+        if layout == 'PAIRED':
+            self._state.paired_runs.append(accession)
+        else:
+            self._state.single_runs.append(accession)
+
+        self._upload_page.load(self._state)
+        self._overview_page.load(self._state)
+
+        uploaded_runs = sum(1 for r in self._state.runs.values() if r['uploaded'])
+        self._upload_page.show_run_pipeline_btn(ready=True, callback=self._on_run_pipeline)
+        self._upload_page.update_pipeline_status(
+            f"{label} added — {uploaded_runs} run(s) ready for pipeline", "ok")
 
     def _write_manifests_from_state(self) -> None:
         """Re-write QIIME2 manifest TSVs using paths stored in run dicts.
