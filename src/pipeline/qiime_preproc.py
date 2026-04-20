@@ -211,7 +211,8 @@ def qiime_preprocess(runner, bioproject: str, lib_layout: str, callback=None):
 
 def download_classifier(classifier_url: str):
 
-    output_dir = Path("taxa_classifier").resolve()
+    APP_DIR = Path(__file__).parent
+    output_dir = APP_DIR / "taxa_classifier"
     output_dir.mkdir(exist_ok=True)
 
     classifier_file = output_dir / classifier_url.split("/")[-1]

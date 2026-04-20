@@ -385,15 +385,53 @@ class _AnalysisWorker(QObject):
     @staticmethod
     def _fill_taxonomy(state: AppState, labels: list[str]) -> None:
         """
-        Generate biologically realistic genus abundance profiles.
+        Populate genus abundances, ASV features, and phylo tree.
 
-        Each run is seeded from its actual read_count + index so results are
-        reproducible but vary meaningfully between runs and projects.
-
-        Profiles interpolate between a 'healthy' and 'AD-associated' gut
-        microbiome based on known literature (Vogt 2017, Liu 2019, Shen 2021).
+        If real QIIME2 data is already loaded from the database (genus_abundances
+        non-empty), skips synthetic generation and only builds the phylo tree text
+        from the existing data.
         """
         import random, math
+
+        if state.genus_abundances:
+            # Real data present — only build phylo tree text from it; skip fake profiles
+            GENUS_PROFILES = [
+                ("Bacteroides",      22.0, 18.0, "thetaiotaomicron"),
+                ("Faecalibacterium", 13.0,  3.5, "prausnitzii"),
+                ("Prevotella",        7.0, 18.0, "copri"),
+                ("Ruminococcus",      8.0,  5.0, "gnavus"),
+                ("Blautia",           6.5,  2.5, "obeum"),
+                ("Roseburia",         5.5,  1.5, "intestinalis"),
+                ("Akkermansia",       4.5,  0.6, "muciniphila"),
+                ("Lachnospiraceae",   5.0,  2.5, "bacterium"),
+                ("Bifidobacterium",   3.5,  1.0, "longum"),
+                ("Lactobacillus",     2.5,  1.8, "acidophilus"),
+                ("Clostridium",       2.5,  8.0, "difficile"),
+                ("Streptococcus",     2.0,  4.0, "salivarius"),
+                ("Enterococcus",      1.5,  4.5, "faecalis"),
+                ("Veillonella",       1.5,  5.0, "parvula"),
+            ]
+            epi = {p[0]: p[3] for p in GENUS_PROFILES}
+            for lbl in labels:
+                pairs = state.genus_abundances.get(lbl, [])
+                if not pairs:
+                    continue
+                top = [g for g, _ in pairs[:5]]
+                if len(top) >= 5:
+                    state.phylo_tree[lbl] = (
+                        f"  ┌─── {top[0]} {epi.get(top[0], 'sp.')}\n"
+                        f"──┤  └─── {top[0]} fragilis\n"
+                        f"  │\n"
+                        f"  ├─── {top[1]} {epi.get(top[1], 'sp.')}\n"
+                        f"  │    └─── {top[1]} melaninogenica\n"
+                        f"  │\n"
+                        f"  ├─── {top[2]} {epi.get(top[2], 'sp.')}\n"
+                        f"  │\n"
+                        f"  ├─── {top[3]} {epi.get(top[3], 'sp.')}\n"
+                        f"  │\n"
+                        f"  └─── {top[4]} {epi.get(top[4], 'sp.')}"
+                    )
+            return
 
         # (healthy_pct, ad_pct, species_epithet_for_tree)
         GENUS_PROFILES = [
@@ -1712,11 +1750,69 @@ class MainWindow(QMainWindow):
         self._status_badge.style().polish(self._status_badge)
         self._upload_page.update_pipeline_status("Results saved — computing analysis…", "ok")
         self._upload_page.append_terminal_output("Results saved to database. Running analysis…\n")
+
+        # Populate AppState with real QIIME2 data from the database before analysis
+        try:
+            self._load_db_data_into_state(state)
+        except Exception as exc:
+            print(f"Warning: could not load DB data into state: {exc}")
+
         self._overview_page.load(state)
         self._broadcast_state()
 
         # hand it off to run analysis
         self._run_analysis()
+
+    def _load_db_data_into_state(self, state: AppState) -> None:
+        """Load genus abundances and ASV features from DB into AppState."""
+        from src.services.assessment_service import get_run_id_by_srr, get_genus_data, get_feature_counts, ServiceError
+
+        for srr, run_dict in state.runs.items():
+            label = run_dict.get('label', '')
+            if not label:
+                continue
+            try:
+                run_id = get_run_id_by_srr(srr)
+            except ServiceError:
+                continue
+
+            # Genus abundances — DB stores 0–1 relative frequencies; UI expects 0–100 %
+            genus_rows = get_genus_data(run_id)
+            if genus_rows:
+                pairs = sorted(
+                    [(g['genus'], round(g['relative_abundance'] * 100, 2)) for g in genus_rows],
+                    key=lambda x: -x[1],
+                )
+                state.genus_abundances[label] = pairs
+
+            # ASV feature counts
+            feature_counts = get_feature_counts(run_id)
+            if feature_counts:
+                total_reads = sum(fc['abundance'] for fc in feature_counts) or 1
+                features = []
+                for fc in sorted(feature_counts, key=lambda x: -x['abundance'])[:15]:
+                    pct = fc['abundance'] / total_reads * 100
+                    genus = "Unclassified"
+                    if fc.get('taxonomy'):
+                        for part in fc['taxonomy'].split(';'):
+                            stripped = part.strip()
+                            if stripped.startswith('g__'):
+                                g = stripped[3:].strip()
+                                if g and g.lower() not in ('', 'uncultured', 'unknown'):
+                                    genus = g
+                                break
+                    features.append({
+                        "id":    fc['feature_id'],
+                        "genus": f"g__{genus}",
+                        "count": fc['abundance'],
+                        "pct":   round(pct, 2),
+                    })
+                state.asv_features[label] = features
+
+        state.asv_count = sum(len(feats) for feats in state.asv_features.values())
+        state.genus_count = len({
+            g for pairs in state.genus_abundances.values() for g, _ in pairs
+        })
 
     def _on_parsing_error(self, msg: str):
         self._upload_page.show_pipeline_error(msg)

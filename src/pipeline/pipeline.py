@@ -4,17 +4,19 @@ This module is what the GUI interacts with upon user request to fetch and prepro
 '''
 from db_import import parse_feat_tax_seqs, parse_feature_counts, parse_genus_table
 from fetch_data import fetch_ncbi_data
-import os
+from pathlib import Path
 from qiime_preproc import qiime_preprocess, download_classifier
 from services.assessment_service import create_project, create_run, ingest_run_data, get_or_create_user, get_project_overview
 from qiime2_runner import QiimeRunner
+
+APP_DIR = Path(__file__).parent
 
 # get email from user -> db -> retrieve from db to use as argument here
 def run_fetch(bioproject: str, email: str, srr: str=None, n_runs=1):
 
     CLASSIFIER = 'silva-138-99-nb-classifier.qza'
     SOURCE = 'https://data.qiime2.org/classifiers/sklearn-1.4.2/silva'
-    
+
     # ensures exact environment is used
     runner = QiimeRunner()
 
@@ -24,9 +26,10 @@ def run_fetch(bioproject: str, email: str, srr: str=None, n_runs=1):
                                  bioproject=bioproject,
                                  srr=srr,
                                  n_runs=n_runs)
-    
+
     # download classifier if it does not exist yet
-    if CLASSIFIER not in os.listdir('taxa_classifier'):
+    classifier_path = APP_DIR / "taxa_classifier" / CLASSIFIER
+    if not classifier_path.exists():
         download_classifier(classifier_url=f"{SOURCE}/{CLASSIFIER}")
 
     return lib_layout # to _on_fetch_request() in main_window.py

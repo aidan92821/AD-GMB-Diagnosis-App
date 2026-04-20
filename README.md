@@ -351,12 +351,13 @@ The **Run Pipeline** button checks for QIIME2 before starting. If not found, it 
 
 ### Example BioProject accessions to try
 
-| Accession | Description |
-|---|---|
+| Accession | Description | Run |
+|---|---|---|
 | `PRJNA1020741` | Human gut microbiome study |
 | `PRJNA31257` | Homo sapiens gut microbiome |
 | `PRJNA743840` | Human gut 16S rRNA amplicon study |
-
+Project : PRJNA1028813
+Process : SRR26409620
 ---
 
 ## Running Tests

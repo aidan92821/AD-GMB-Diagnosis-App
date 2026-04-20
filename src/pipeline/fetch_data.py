@@ -9,7 +9,7 @@ import shutil
 if TYPE_CHECKING:
     from models.app_state import AppState
 
-# make sure that in the UI, user knows they can only download max 4 runs at a time
+# make sure that in the UI, user knows they can only download runs
 # this function downloads one run at a time if the run is specified
 # it can download up to 4 runs at a time if no run is specified
 # returns two lists of strings: paired end runs and single end runs (SRR Accessions)

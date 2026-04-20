@@ -126,7 +126,7 @@ class OverviewPage(QWidget):
         col_n = QVBoxLayout(); col_n.setSpacing(4)
         col_n.addWidget(label_muted("Max runs to fetch"))
         self._run_count = QComboBox()
-        for n in ["1", "2", "3", "4", "5", "6", "8", "10", "12", "16", "20"]:
+        for n in ["1", "2", "3", "4", "5", "6", "8", "10"]:
             self._run_count.addItem(n)
         self._run_count.setCurrentIndex(0)   # default = 4
         col_n.addWidget(self._run_count)
@@ -406,7 +406,7 @@ class UploadRunsPage(QWidget):
         _SEL   = "background-color:#4F46E5; color:#FFFFFF; border:none; border-radius:8px; font-size:13px; font-weight:700; padding:8px 20px;"
         _UNSEL = "background-color:#F3F4F6; color:#374151; border:1.5px solid #D1D5DB; border-radius:8px; font-size:13px; font-weight:600; padding:8px 20px;"
         type_row = QHBoxLayout(); type_row.setSpacing(8)
-        self._btn_paired = QPushButton("⬤  Paired-end")
+        self._btn_paired = QPushButton("○  Paired-end")
         self._btn_paired.setFixedHeight(40)
         self._btn_paired.setStyleSheet(_SEL)
         self._btn_paired.clicked.connect(lambda: self._set_local_type("Paired-end"))
