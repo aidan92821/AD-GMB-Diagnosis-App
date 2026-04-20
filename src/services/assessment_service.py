@@ -32,14 +32,18 @@ from src.db.repository import (
     get_tree_for_run,
     create_alpha_diversity,
     get_alpha_diversity_for_run,
+    get_run_exists_alpha_table,
     create_beta_diversity as repo_create_beta_diversity,
     get_beta_diversity,
+    get_run_exists_beta_table,
     update_run_risk,
     RepositoryError,
     NotFoundError,
     hash_password,
     verify_password,
     username_exists,
+    create_pcoa,
+    get_pcoa_for_project,
 )
 
 
@@ -404,13 +408,14 @@ def store_alpha_diversities(run_id: int, metrics: dict[str, float]) -> list[dict
     """
     session = SessionLocal()
     try:
-        run = get_run(session, run_id)
-        rows = []
-        for metric, value in metrics.items():
-            alpha = create_alpha_diversity(session, run=run, metric=metric, value=value)
-            rows.append({"run_id": run_id, "metric": alpha.metric, "value": alpha.value})
-        session.commit()
-        return rows
+        if not get_run_exists_alpha_table(session=session, run_id=run_id):
+            run = get_run(session, run_id)
+            rows = []
+            for metric, value in metrics.items():
+                alpha = create_alpha_diversity(session, run=run, metric=metric, value=value)
+                rows.append({"run_id": run_id, "metric": alpha.metric, "value": alpha.value})
+            session.commit()
+            return rows
     except RepositoryError as e:
         session.rollback()
         raise ServiceError(str(e)) from e
@@ -445,16 +450,18 @@ def store_beta_diversity(
     """
     session = SessionLocal()
     try:
-        r1 = get_run(session, run_id_1)
-        r2 = get_run(session, run_id_2)
-        beta = repo_create_beta_diversity(session, run_1=r1, run_2=r2, metric=metric, value=value)
-        session.commit()
-        return {
-            "run_id_1": beta.run_id_1,
-            "run_id_2": beta.run_id_2,
-            "metric": beta.metric,
-            "value": beta.value,
-        }
+        if not get_run_exists_beta_table(session=session, run_id_1=run_id_1,
+                                         run_id_2=run_id_2, metric=metric):
+            r1 = get_run(session, run_id_1)
+            r2 = get_run(session, run_id_2)
+            beta = repo_create_beta_diversity(session, run_1=r1, run_2=r2, metric=metric, value=value)
+            session.commit()
+            return {
+                "run_id_1": beta.run_id_1,
+                "run_id_2": beta.run_id_2,
+                "metric": beta.metric,
+                "value": beta.value,
+            }
     except RepositoryError as e:
         session.rollback()
         raise ServiceError(str(e)) from e
@@ -487,6 +494,50 @@ def get_beta_diversity_matrix(project_id: int, metric: str) -> list[dict]:
                         "value": b.value,
                     })
         return results
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+def store_pcoa(run_id: int, metric: str, pc1: float, pc2: float) -> dict:
+    """
+    Persist PCoA coordinates for a single run and metric.
+    Upserts — safe to call on re-analysis without creating duplicate rows.
+    Raises ServiceError if the run does not exist.
+    """
+    session = SessionLocal()
+    try:
+        run = get_run(session, run_id)
+        row = create_pcoa(session, run=run, metric=metric, pc1=pc1, pc2=pc2)
+        session.commit()
+        return {
+            "run_id": run_id,
+            "metric": metric,
+            "pc1":    row.pc1,
+            "pc2":    row.pc2,
+        }
+    except RepositoryError as e:
+        session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+ 
+ 
+def get_pcoa(project_id: int, metric: str) -> list[dict]:
+    """
+    Return PCoA coordinates for all runs in a project for a given metric.
+    Returns [{"run_id": int, "pc1": float, "pc2": float}, ...]
+    Returns [] if no coordinates have been computed yet (e.g. UniFrac was
+    skipped because no phylogenetic tree was available).
+    """
+    session = SessionLocal()
+    try:
+        rows = get_pcoa_for_project(session, project_id, metric)
+        return [
+            {"run_id": r.run_id, "pc1": r.pc1, "pc2": r.pc2}
+            for r in rows
+        ]
     except RepositoryError as e:
         raise ServiceError(str(e)) from e
     finally:

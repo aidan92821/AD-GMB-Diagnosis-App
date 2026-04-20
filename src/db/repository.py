@@ -7,11 +7,11 @@
 from __future__ import annotations
 
 from sqlalchemy.orm import Session
-from sqlalchemy import select, desc, exists
+from sqlalchemy import select, desc, exists, or_, and_
 
 from src.db.db_models import (
     User, Project, Run, Genus, Feature, FeatureCount,
-    Tree, AlphaDiversity, BetaDiversity,
+    Tree, AlphaDiversity, BetaDiversity, PCoA,
 )
 
 from argon2 import PasswordHasher
@@ -300,6 +300,13 @@ def get_alpha_diversity_for_run(session: Session, run_id: int) -> list[AlphaDive
     return list(session.execute(stmt).scalars().all())
 
 
+def get_run_exists_alpha_table(session: Session, run_id: int) -> bool:
+    stmt = (
+        select(exists().where(AlphaDiversity.run_id == run_id))
+    )
+    return bool(session.execute(stmt).scalar())
+
+
 # ==== BETA DIVERSITY ====
 def create_beta_diversity(
         session: Session,
@@ -336,3 +343,60 @@ def get_beta_diversity(
     if metric:
         stmt = stmt.where(BetaDiversity.metric == metric)
     return list(session.execute(stmt).scalars().all())
+
+
+def get_run_exists_beta_table(session: Session, run_id_1: int, run_id_2: int, metric: str) -> bool:
+    stmt = select(exists().where(
+        or_(
+            and_(BetaDiversity.run_id_1 == run_id_1, BetaDiversity.run_id_2 == run_id_2, BetaDiversity.metric == metric),
+            and_(BetaDiversity.run_id_1 == run_id_2, BetaDiversity.run_id_2 == run_id_1, BetaDiversity.metric == metric),
+        )
+    ))
+
+    return bool(session.execute(stmt).scalar())
+
+
+def create_pcoa(
+        session: Session,
+        *,
+        run: Run,
+        metric: str,
+        pc1: float,
+        pc2: float,
+) -> PCoA:
+    """
+    Upsert PCoA coordinates for a run + metric pair.
+    If a row already exists (e.g. re-running analysis) the coordinates are
+    overwritten in place rather than inserting a duplicate.
+    The UniqueConstraint on (run_id, metric) enforces this at the DB level.
+    """
+    stmt     = select(PCoA).where(PCoA.run_id == run.run_id, PCoA.metric == metric)
+    existing = session.execute(stmt).scalar_one_or_none()
+    if existing:
+        existing.pc1 = pc1
+        existing.pc2 = pc2
+        session.flush()
+        return existing
+    row = PCoA(run_id=run.run_id, metric=metric, pc1=pc1, pc2=pc2)
+    session.add(row)
+    session.flush()
+    return row
+ 
+ 
+def get_pcoa_for_project(
+        session: Session,
+        project_id: int,
+        metric: str,
+) -> list[PCoA]:
+    """
+    Return all PCoA rows for every run in a project, filtered by metric.
+    Joins through Run so we never need project_id on the PCoA table itself.
+    Returns [] when no coordinates have been stored yet (e.g. UniFrac skipped).
+    """
+    stmt = (
+        select(PCoA)
+        .join(Run, PCoA.run_id == Run.run_id)
+        .where(Run.project_id == project_id, PCoA.metric == metric)
+    )
+    return list(session.execute(stmt).scalars().all())
+ 

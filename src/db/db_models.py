@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     Column, Integer, String, Float, DateTime, ForeignKey, Text,
-    CheckConstraint, ForeignKeyConstraint,
+    CheckConstraint, ForeignKeyConstraint, UniqueConstraint
 )
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -70,6 +70,7 @@ class Run(Base):
     features          = relationship("Feature",       back_populates="run", cascade="all, delete-orphan")
     trees             = relationship("Tree",          back_populates="run", cascade="all, delete-orphan")
     alpha_diversities = relationship("AlphaDiversity", back_populates="run", cascade="all, delete-orphan")
+    pcoa_coords       = relationship("PCoA", back_populates="run", cascade="all, delete-orphan")
 
 
 # ==== GENUS ====
@@ -172,4 +173,21 @@ class BetaDiversity(Base):
     __table_args__ = (
         # A run cannot be compared to itself
         CheckConstraint("run_id_1 != run_id_2", name="ck_beta_diff_runs"),
+    )
+
+class PCoA(Base):
+    __tablename__ = "pcoa"
+ 
+    # Integer surrogate PK matches Tree — avoids a wide composite PK on floats
+    pcoa_id = Column(Integer, primary_key=True)
+    run_id  = Column(Integer, ForeignKey("run.run_id"), nullable=False)
+    metric  = Column(String(64), nullable=False)   # "bray_curtis" or "unifrac"
+    pc1     = Column(Float, nullable=False)
+    pc2     = Column(Float, nullable=False)
+ 
+    run = relationship("Run", back_populates="pcoa_coords")
+ 
+    __table_args__ = (
+        # One coordinate pair per run per metric — enforces upsert safety at DB level
+        UniqueConstraint("run_id", "metric", name="uq_pcoa_run_metric"),
     )

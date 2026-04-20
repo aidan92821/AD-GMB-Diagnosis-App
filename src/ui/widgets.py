@@ -122,6 +122,53 @@ class BarChartWidget(QWidget):
         p.end()
 
 
+class _AlphaBarWidget(BarChartWidget):
+    """
+    BarChartWidget that additionally paints the numeric scalar value above
+    each bar.  Alpha diversity values (Shannon ~2–4 bits, Simpson 0–1) are
+    meaningful absolute numbers, not just relative heights.
+    """
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self._data:
+            return
+
+        from PyQt6.QtGui import QPainter, QFont, QColor
+        from PyQt6.QtCore import Qt as _Qt
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        W, H    = self.width(), self.height()
+        pad_b   = 24
+        pad_t   = 8
+        chart_h = H - pad_b - pad_t
+        max_val = max(v for _, v in self._data) or 1.0
+        n       = len(self._data)
+        gap     = 4
+        bar_w   = max(6, (W - gap * (n + 1)) // n)
+
+        font = QFont()
+        font.setPointSize(7)
+        p.setFont(font)
+
+        from resources.styles import TEXT_M
+        p.setPen(QColor(TEXT_M))
+
+        for i, (_, value) in enumerate(self._data):
+            bar_h = int(chart_h * value / max_val)
+            x     = gap + i * (bar_w + gap)
+            y     = pad_t + (chart_h - bar_h)
+            p.drawText(
+                x, y - 14, bar_w, 13,
+                _Qt.AlignmentFlag.AlignCenter,
+                f"{value:.3f}",
+            )
+        p.end()
+
+
+
 # ── Horizontal stacked bar chart ──────────────────────────────────────────────
 
 class StackedBarWidget(QWidget):
