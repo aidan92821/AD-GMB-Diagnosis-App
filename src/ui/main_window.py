@@ -271,14 +271,19 @@ class _ParseWorkerReal(QObject):
 
                 # TODO: allow for project retrieval if just getting more runs for the current project
                 project = create_project(user_id=self._user['user_id'], name=self._state.bioproject_id)
+                self._state.db_project_id = project['project_id']
 
                 for run, row in abundances.items():
                     try:
                         run_id = get_run_id_by_srr(run)
+                        label = self._state.runs[run]['label'] # R1, R2, R3, or R4
+                        self._state.lbs[label] = run_id
                     except ServiceError:
                         db_run = create_run(project_id=project['project_id'], source='ncbi', srr_accession=run,
                                             bio_proj_accession=self._state.bioproject_id, library_layout='single')
                         run_id = db_run['run_id']
+                        label = self._state.runs[run]['label'] # R1, R2, R3, or R4
+                        self._state.lbs[label] = run_id
                     ingest_run_data(run_id=run_id, genus_rows=row, features=feature_seqs, feature_counts=feature_counts[run])
             
             # remove all the intermediate files
@@ -1730,7 +1735,7 @@ class MainWindow(QMainWindow):
     def _on_load_project(self, bio_proj_accession: str) -> None:
         """Re-fetch a past project from NCBI and navigate to Overview."""
         self._switch_page(0)
-        self._on_fetch_requested(bioproject=bio_proj_accession, srr="", max_runs=5, email='emmanicolego@gmail.com', username=self._current_user['user_id'])
+        self._on_fetch_requested(bioproject=bio_proj_accession, run_accession="", max_runs=5, email='emmanicolego@gmail.com', username=self._current_user['user_id'])
 
     def _on_delete_project(self, project_id: int) -> None:
         """Delete a project from the DB and refresh the profile page."""

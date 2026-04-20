@@ -27,6 +27,7 @@ from models.example_data import ALZHEIMER_RISK   # risk only still uses example
 from ui.widgets import (
     BarChartWidget, StackedBarWidget, BoxPlotWidget,
     PCoAWidget, HeatmapWidget, RiskMeterWidget,
+    NumericSortItem, GenusTableWidget
 )
 from ui.helpers import (
     card, page_title, section_title,
@@ -34,6 +35,9 @@ from ui.helpers import (
     btn_primary, btn_outline,
     PillSwitcher, hdivider, vdivider,
 )
+
+from src.services.assessment_service import (ServiceError, get_feature_counts,
+                                             get_genus_data)
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -893,10 +897,12 @@ class DiversityPage(QWidget):
 # ═════════════════════════════════════════════════════════════════════════════
 
 class TaxonomyPage(QWidget):
-    def __init__(self, parent=None):
+    # def __init__(self, parent=None):
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._state: AppState | None = None
         self._active_run = "R1"
+        self._genus_cache: dict[int, list[dict]] = {}
         self._build()
 
     def _build(self):
@@ -910,103 +916,287 @@ class TaxonomyPage(QWidget):
         hdr.addStretch(); hdr.addWidget(self._run_sw)
         self._root.addLayout(hdr)
 
-        # Two-column row
-        cols = QHBoxLayout(); cols.setSpacing(12)
+        # emma taxonomy
+        # ── Row 1: bar chart  +  legend ───────────────────────────────────
+        cols = QHBoxLayout()
+        cols.setSpacing(12)
 
         bar_card = card()
-        bar_card.layout().addWidget(section_title("Top genera — relative abundance"))
+        bar_card.layout().addWidget(section_title("Top 10 genera by relative abundance"))
         self._bar = BarChartWidget(data=[], colors=GENUS_COLORS)
         self._bar.setFixedHeight(160)
         bar_card.layout().addWidget(self._bar)
-        self._bar_placeholder = _placeholder("Upload FASTQ files to compute taxonomy.")
+        self._bar_placeholder = _placeholder(
+            "Upload FASTQ files to compute taxonomy."
+        )
         bar_card.layout().addWidget(self._bar_placeholder)
         cols.addWidget(bar_card, 3)
 
         tax_card = card()
-        tax_card.layout().addWidget(section_title("Genus abundance breakdown"))
-        self._legend_layout = QVBoxLayout(); self._legend_layout.setSpacing(4)
+        tax_card.layout().addWidget(section_title("Genus abundance overview"))
+        self._legend_layout = QVBoxLayout()
+        self._legend_layout.setSpacing(4)
         tax_card.layout().addLayout(self._legend_layout)
         self._legend_placeholder = _placeholder("No data yet.")
         self._legend_layout.addWidget(self._legend_placeholder)
         cols.addWidget(tax_card, 2)
+
         self._root.addLayout(cols)
 
-        # Stacked bar
+        # ── Row 2: sortable genus table (all genera, current run) ─────────
+        genus_tbl_card = card()
+        genus_tbl_card.layout().addWidget(
+            section_title("Genus abundance table")
+        )
+        genus_tbl_card.layout().addWidget(
+            label_muted(
+                "Switch runs with the run button above."
+            )
+        )
+        self._genus_table = GenusTableWidget()
+        self._genus_table.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        genus_tbl_card.layout().addWidget(self._genus_table)
+        self._genus_tbl_placeholder = _placeholder(
+            "Upload FASTQ files to populate the genus table."
+        )
+        genus_tbl_card.layout().addWidget(self._genus_tbl_placeholder)
+        self._genus_table.hide()
+        self._root.addWidget(genus_tbl_card, 1)
+
+        # ── Row 3: stacked bar (all runs) ─────────────────────────────────
         comp_card = card()
-        comp_card.layout().addWidget(section_title("Genus composition — all runs"))
+        comp_card.layout().addWidget(
+            section_title("Genus composition across runs")
+        )
         self._stacked = StackedBarWidget(data={}, colors=GENUS_COLORS)
         comp_card.layout().addWidget(self._stacked)
         self._stacked_placeholder = _placeholder(
-            "Upload FASTQ files to see composition across all runs.")
+            "Upload FASTQ files to see composition across all runs."
+        )
         comp_card.layout().addWidget(self._stacked_placeholder)
         self._root.addWidget(comp_card)
         self._root.addStretch()
+        # emma taxonomy
+
+        # # Two-column row
+        # cols = QHBoxLayout(); cols.setSpacing(12)
+
+        # bar_card = card()
+        # bar_card.layout().addWidget(section_title("Top genera — relative abundance"))
+        # self._bar = BarChartWidget(data=[], colors=GENUS_COLORS)
+        # self._bar.setFixedHeight(160)
+        # bar_card.layout().addWidget(self._bar)
+        # self._bar_placeholder = _placeholder("Upload FASTQ files to compute taxonomy.")
+        # bar_card.layout().addWidget(self._bar_placeholder)
+        # cols.addWidget(bar_card, 3)
+
+        # tax_card = card()
+        # tax_card.layout().addWidget(section_title("Genus abundance breakdown"))
+        # self._legend_layout = QVBoxLayout(); self._legend_layout.setSpacing(4)
+        # tax_card.layout().addLayout(self._legend_layout)
+        # self._legend_placeholder = _placeholder("No data yet.")
+        # self._legend_layout.addWidget(self._legend_placeholder)
+        # cols.addWidget(tax_card, 2)
+        # self._root.addLayout(cols)
+
+        # # Stacked bar
+        # comp_card = card()
+        # comp_card.layout().addWidget(section_title("Genus composition — all runs"))
+        # self._stacked = StackedBarWidget(data={}, colors=GENUS_COLORS)
+        # comp_card.layout().addWidget(self._stacked)
+        # self._stacked_placeholder = _placeholder(
+        #     "Upload FASTQ files to see composition across all runs.")
+        # comp_card.layout().addWidget(self._stacked_placeholder)
+        # self._root.addWidget(comp_card)
+        # self._root.addStretch()
 
     def load(self, state: AppState):
         self._state = state
 
-        # Rebuild run switcher if run labels changed
-        old_active = self._active_run
+        # # Rebuild run switcher if run labels changed
+        # old_active = self._active_run
+        # labels = state.run_labels or ["—"]
+
+        # # Reconnect switcher
+        # new_sw = PillSwitcher(labels, obj_name="pill")
+        # new_sw.on_changed(self._on_run)
+        # hdr_lay = self._root.itemAt(0).layout()
+        # # Replace old switcher widget
+        # old_sw_item = hdr_lay.itemAt(hdr_lay.count() - 1)
+        # if old_sw_item and old_sw_item.widget():
+        #     old_sw_item.widget().deleteLater()
+        # hdr_lay.addWidget(new_sw)
+        # self._run_sw = new_sw
+
+        # self._active_run = labels[0] if labels else "R1"
+        # self._refresh(self._active_run)
+
+        # # Stacked bar
+        # if state.genus_abundances:
+        #     self._stacked.set_data(state.genus_abundances)
+        #     self._stacked.show()
+        #     self._stacked_placeholder.hide()
+        # else:
+        #     self._stacked.hide()
+        #     self._stacked_placeholder.show()
+
+        # emma load
+        self._genus_cache.clear()       # invalidate cache on new project load
+
         labels = state.run_labels or ["—"]
 
-        # Reconnect switcher
+        # ── Rebuild run switcher ──────────────────────────────────────────
         new_sw = PillSwitcher(labels, obj_name="pill")
         new_sw.on_changed(self._on_run)
         hdr_lay = self._root.itemAt(0).layout()
-        # Replace old switcher widget
-        old_sw_item = hdr_lay.itemAt(hdr_lay.count() - 1)
-        if old_sw_item and old_sw_item.widget():
-            old_sw_item.widget().deleteLater()
+        old_item = hdr_lay.itemAt(hdr_lay.count() - 1)
+        if old_item and old_item.widget():
+            old_item.widget().deleteLater()
         hdr_lay.addWidget(new_sw)
         self._run_sw = new_sw
 
         self._active_run = labels[0] if labels else "R1"
         self._refresh(self._active_run)
 
-        # Stacked bar
-        if state.genus_abundances:
-            self._stacked.set_data(state.genus_abundances)
+        # ── Stacked bar: load all runs at once ────────────────────────────
+        self._refresh_stacked()
+        # emma load
+
+    def _get_genus_data(self, run_label: str) -> list[dict]:
+        """
+        Return genus data for run_label using the in-memory cache.
+        Returns [] on any error or missing mapping.
+        """
+        if not self._state:
+            return []
+        run_id = self._state.lbs.get(run_label)
+        if run_id is None:
+            return []
+        if run_id in self._genus_cache:
+            return self._genus_cache[run_id]
+        try:
+            data = get_genus_data(run_id)
+        except ServiceError:
+            data = []
+        self._genus_cache[run_id] = data
+        return data
+
+    def _refresh(self, run_label: str):
+        # if not self._state or not self._state.genus_abundances:
+        #     self._bar.hide(); self._bar_placeholder.show()
+        #     return
+
+        # genera = self._state.genus_abundances.get(run, [])
+        # if not genera:
+        #     self._bar.hide(); self._bar_placeholder.show()
+        #     return
+
+        # self._bar.set_data(genera[:10])
+        # self._bar.show(); self._bar_placeholder.hide()
+        # self._build_legend(genera)
+
+        # emma refresh
+        genera = self._get_genus_data(run_label)
+
+        if not genera:
+            self._bar.hide()
+            self._bar_placeholder.show()
+            self._genus_table.hide()
+            self._genus_tbl_placeholder.show()
+            return
+
+        # ── Bar chart: top 10 ─────────────────────────────────────────────
+        # BarChartWidget expects list[tuple[str, float]]
+        top10 = [
+            (g["genus"], g["relative_abundance"])
+            for g in sorted(genera, key=lambda x: x["relative_abundance"], reverse=True)[:10]
+        ]
+        self._bar.set_data(top10)
+        self._bar.show()
+        self._bar_placeholder.hide()
+
+        # ── Legend: top 5 + "Other" ───────────────────────────────────────
+        self._build_legend(genera)
+
+        # ── Genus table: all genera ───────────────────────────────────────
+        self._genus_table.set_data(genera)
+        self._genus_table.show()
+        self._genus_tbl_placeholder.hide()
+        # emma refresh
+
+    def _refresh_stacked(self) -> None:
+        """
+        Build the stacked bar from DB data for every run in the project.
+        StackedBarWidget expects dict[run_label, list[tuple[genus, abundance]]].
+        """
+        if not self._state or not self._state.run_labels:
+            self._stacked.hide()
+            self._stacked_placeholder.show()
+            return
+
+        stacked_data: dict[str, list[tuple[str, float]]] = {}
+        for label in self._state.run_labels:
+            genera = self._get_genus_data(label)
+            if genera:
+                stacked_data[label] = [
+                    (g["genus"], g["relative_abundance"]) for g in genera
+                ]
+
+        if stacked_data:
+            self._stacked.set_data(stacked_data)
             self._stacked.show()
             self._stacked_placeholder.hide()
         else:
             self._stacked.hide()
             self._stacked_placeholder.show()
-
-    def _refresh(self, run: str):
-        if not self._state or not self._state.genus_abundances:
-            self._bar.hide(); self._bar_placeholder.show()
-            return
-
-        genera = self._state.genus_abundances.get(run, [])
-        if not genera:
-            self._bar.hide(); self._bar_placeholder.show()
-            return
-
-        self._bar.set_data(genera[:10])
-        self._bar.show(); self._bar_placeholder.hide()
-        self._build_legend(genera)
-
+    
     def _build_legend(self, genera: list[tuple[str, float]]):
-        _clear(self._legend_layout)
-        top5  = genera[:5]
-        other = sum(p for _, p in genera[5:])
-        for i, (g, v) in enumerate(top5):
-            row = QHBoxLayout(); row.setSpacing(6)
-            dot = QLabel("●")
-            dot.setStyleSheet(f"color:{GENUS_COLORS[i % len(GENUS_COLORS)]}; font-size:11px;")
-            txt = label_muted(f"{g}   {v:.1f}%")
-            row.addWidget(dot); row.addWidget(txt); row.addStretch()
-            self._legend_layout.addLayout(row)
-        if other > 0:
-            row = QHBoxLayout(); row.setSpacing(6)
-            dot = QLabel("●"); dot.setStyleSheet("color:#D1D5DB; font-size:11px;")
-            txt = label_muted(f"Other   {other:.1f}%")
-            row.addWidget(dot); row.addWidget(txt); row.addStretch()
-            self._legend_layout.addLayout(row)
+        # _clear(self._legend_layout)
+        # top5  = genera[:5]
+        # other = sum(p for _, p in genera[5:])
+        # for i, (g, v) in enumerate(top5):
+        #     row = QHBoxLayout(); row.setSpacing(6)
+        #     dot = QLabel("●")
+        #     dot.setStyleSheet(f"color:{GENUS_COLORS[i % len(GENUS_COLORS)]}; font-size:11px;")
+        #     txt = label_muted(f"{g}   {v:.1f}%")
+        #     row.addWidget(dot); row.addWidget(txt); row.addStretch()
+        #     self._legend_layout.addLayout(row)
+        # if other > 0:
+        #     row = QHBoxLayout(); row.setSpacing(6)
+        #     dot = QLabel("●"); dot.setStyleSheet("color:#D1D5DB; font-size:11px;")
+        #     txt = label_muted(f"Other   {other:.1f}%")
+        #     row.addWidget(dot); row.addWidget(txt); row.addStretch()
+        #     self._legend_layout.addLayout(row)
 
-    def _on_run(self, run: str):
-        self._active_run = run
-        self._refresh(run)
+        # emma build legend
+        _clear(self._legend_layout)
+        sorted_genera = sorted(
+            genera, key=lambda x: x["relative_abundance"], reverse=True
+        )
+        top10  = sorted_genera[:10]
+
+        for i, g in enumerate(top10):
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            dot = QLabel("●")
+            dot.setStyleSheet(
+                f"color:{GENUS_COLORS[i % len(GENUS_COLORS)]}; font-size:11px;"
+            )
+            txt = label_muted(f"{g['genus']}   {g['relative_abundance']:.1f}%")
+            row.addWidget(dot)
+            row.addWidget(txt)
+            row.addStretch()
+            self._legend_layout.addLayout(row)
+        # emma build legend
+
+    # def _on_run(self, run: str):
+    #     self._active_run = run
+    #     self._refresh(run)
+    def _on_run(self, run_label: str) -> None:
+        self._active_run = run_label
+        self._refresh(run_label)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1014,52 +1204,109 @@ class TaxonomyPage(QWidget):
 # ═════════════════════════════════════════════════════════════════════════════
 
 class AsvTablePage(QWidget):
-    def __init__(self, parent=None):
+    # def __init__(self, parent=None):
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._state: AppState | None = None
         self._active_run = "R1"
         self._build()
 
     def _build(self):
+        # root = QVBoxLayout(self)
+        # root.setContentsMargins(28, 24, 28, 24)
+        # root.setSpacing(14)
+
+        # hdr = QHBoxLayout()
+        # hdr.addWidget(page_title("ASV Table"))
+        # self._run_sw = PillSwitcher(["—"], obj_name="pill")
+        # hdr.addStretch(); hdr.addWidget(self._run_sw)
+        # root.addLayout(hdr)
+
+        # ctrl = QHBoxLayout(); ctrl.setSpacing(10)
+        # ctrl.addWidget(label_muted("Sort:"))
+        # self._sort_id  = btn_outline("Feature ID ↕")
+        # self._sort_cnt = btn_outline("Count ↓")
+        # self._sort_id.clicked.connect(lambda: self._table.sortItems(0))
+        # self._sort_cnt.clicked.connect(lambda: self._table.sortItems(2))
+        # ctrl.addWidget(self._sort_id); ctrl.addWidget(self._sort_cnt)
+
+        # # Summary label
+        # self._summary_lbl = QLabel("")
+        # self._summary_lbl.setStyleSheet(f"font-size:11px; color:{TEXT_M};")
+        # ctrl.addStretch(); ctrl.addWidget(self._summary_lbl)
+        # root.addLayout(ctrl)
+
+        # tbl_card = card()
+        # root.addWidget(tbl_card, 1)
+
+        # self._table = QTableWidget(0, 4)
+        # self._table.setHorizontalHeaderLabels(["Feature ID", "Taxonomy", "Count", "Rel. %"])
+        # self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        # self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        # self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        # self._table.setAlternatingRowColors(True)
+        # tbl_card.layout().addWidget(self._table)
+
+        # self._placeholder = _placeholder(
+        #     "Fetch a project and upload FASTQ files to populate the ASV table.")
+        # tbl_card.layout().addWidget(self._placeholder)
+        # self._table.hide()
+        
+        # emma build
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 24, 28, 24)
         root.setSpacing(14)
 
+        # Header row: title + run pill switcher
         hdr = QHBoxLayout()
         hdr.addWidget(page_title("ASV Table"))
         self._run_sw = PillSwitcher(["—"], obj_name="pill")
-        hdr.addStretch(); hdr.addWidget(self._run_sw)
+        hdr.addStretch()
+        hdr.addWidget(self._run_sw)
         root.addLayout(hdr)
 
-        ctrl = QHBoxLayout(); ctrl.setSpacing(10)
-        ctrl.addWidget(label_muted("Sort:"))
-        self._sort_id  = btn_outline("Feature ID ↕")
-        self._sort_cnt = btn_outline("Count ↓")
-        self._sort_id.clicked.connect(lambda: self._table.sortItems(0))
-        self._sort_cnt.clicked.connect(lambda: self._table.sortItems(2))
-        ctrl.addWidget(self._sort_id); ctrl.addWidget(self._sort_cnt)
+        # Control row: sort buttons + summary label
+        ctrl = QHBoxLayout()
+        ctrl.setSpacing(10)
 
-        # Summary label
-        self._summary_lbl = QLabel("")
-        self._summary_lbl.setStyleSheet(f"font-size:11px; color:{TEXT_M};")
-        ctrl.addStretch(); ctrl.addWidget(self._summary_lbl)
+        self._summary_lbl = label_muted("")
+        ctrl.addStretch()
+        ctrl.addWidget(self._summary_lbl)
         root.addLayout(ctrl)
 
+        # Table inside a card
         tbl_card = card()
         root.addWidget(tbl_card, 1)
 
-        self._table = QTableWidget(0, 4)
-        self._table.setHorizontalHeaderLabels(["Feature ID", "Taxonomy", "Count", "Rel. %"])
-        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._table = QTableWidget(0, 3)
+        self._table.setHorizontalHeaderLabels(
+            ["Feature ID", "Taxonomy", "Count"]
+        )
+        self._table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        # Count column doesn't need to stretch as wide
+        self._table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self._table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self._table.horizontalHeader().setSortIndicatorShown(True)
+        self._table.setSortingEnabled(True)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setAlternatingRowColors(True)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setShowGrid(False)
         tbl_card.layout().addWidget(self._table)
 
         self._placeholder = _placeholder(
-            "Fetch a project and upload FASTQ files to populate the ASV table.")
+            "Fetch a project and upload FASTQ files to populate the ASV table."
+        )
         tbl_card.layout().addWidget(self._placeholder)
         self._table.hide()
+        # emma build
 
     def load(self, state: AppState):
         self._state = state
@@ -1076,36 +1323,89 @@ class AsvTablePage(QWidget):
         self._active_run = labels[0] if labels else "R1"
         self._populate(self._active_run)
 
-    def _populate(self, run: str):
-        if not self._state or not self._state.asv_features:
-            self._table.hide(); self._placeholder.show()
-            self._summary_lbl.setText("")
+    def _populate(self, run_label: str):
+        # emma populate
+        if not self._state:
+            self._show_placeholder()
             return
+        
+        run_id = self._state.lbs.get(run_label)
+        if run_id is None:
+            self._show_placeholder()
 
-        rows = self._state.asv_features.get(run, [])
+        try:
+            rows = get_feature_counts(run_id)
+        except ServiceError:
+            self._show_placeholder()
+            return
+        
         if not rows:
-            self._table.hide(); self._placeholder.show()
-            self._summary_lbl.setText("")
+            self._show_placeholder()
             return
 
+        # disable sort while filling
+        self._table.setSortingEnabled(False)
         self._table.setRowCount(len(rows))
-        for r, feat in enumerate(rows):
-            self._table.setItem(r, 0, QTableWidgetItem(feat["id"]))
-            self._table.setItem(r, 1, QTableWidgetItem(feat["genus"]))
-            count_item = QTableWidgetItem()
-            count_item.setData(Qt.ItemDataRole.DisplayRole, f"{feat['count']:,}")
-            count_item.setData(Qt.ItemDataRole.UserRole, feat["count"])
-            self._table.setItem(r, 2, count_item)
-            self._table.setItem(r, 3, QTableWidgetItem(f"{feat['pct']:.2f}"))
+
+        for i, feat in enumerate(rows):
+            feature_id = feat.get("feature_id", "")
+            taxonomy   = feat.get("taxonomy") or "Unclassified"
+            count      = int(feat.get("abundance", 0))
+
+            from PyQt6.QtWidgets import QTableWidgetItem
+            id_item  = QTableWidgetItem(feature_id)
+            tax_item = QTableWidgetItem(taxonomy)
+
+            cnt_item = NumericSortItem(count, fmt=",")
+
+            self._table.setItem(i, 0, id_item)
+            self._table.setItem(i, 1, tax_item)
+            self._table.setItem(i, 2, cnt_item)
+
+        self._table.setSortingEnabled(True)
+        self._table.sortItems(2, Qt.SortOrder.DescendingOrder) # default sorting
 
         self._summary_lbl.setText(
-            f"{len(rows)} ASVs  ·  {run}  ·  "
-            f"{sum(f['count'] for f in rows):,} total reads")
-        self._table.show(); self._placeholder.hide()
+            f"{len(rows)} ASVs · {run_label}"
+        )
+        self._table.show()
+        self._placeholder.hide()
+        # emma populate
 
-    def _on_run(self, run: str):
-        self._active_run = run
-        self._populate(run)
+        # if not self._state or not self._state.asv_features:
+        #     self._table.hide(); self._placeholder.show()
+        #     self._summary_lbl.setText("")
+        #     return
+
+        # rows = self._state.asv_features.get(run, [])
+        # if not rows:
+        #     self._table.hide(); self._placeholder.show()
+        #     self._summary_lbl.setText("")
+        #     return
+
+        # self._table.setRowCount(len(rows))
+        # for r, feat in enumerate(rows):
+        #     self._table.setItem(r, 0, QTableWidgetItem(feat["id"]))
+        #     self._table.setItem(r, 1, QTableWidgetItem(feat["genus"]))
+        #     count_item = QTableWidgetItem()
+        #     count_item.setData(Qt.ItemDataRole.DisplayRole, f"{feat['count']:,}")
+        #     count_item.setData(Qt.ItemDataRole.UserRole, feat["count"])
+        #     self._table.setItem(r, 2, count_item)
+        #     self._table.setItem(r, 3, QTableWidgetItem(f"{feat['pct']:.2f}"))
+
+        # self._summary_lbl.setText(
+        #     f"{len(rows)} ASVs  ·  {run}  ·  "
+        #     f"{sum(f['count'] for f in rows):,} total reads")
+        # self._table.show(); self._placeholder.hide()
+
+    def _on_run(self, run_label: str):
+        self._active_run = run_label
+        self._populate(run_label)
+
+    def _show_placeholder(self) -> None:
+        self._table.hide()
+        self._placeholder.show()
+        self._summary_lbl.setText("")
 
 
 # ═════════════════════════════════════════════════════════════════════════════

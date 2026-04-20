@@ -7,13 +7,14 @@ application domain; they accept plain Python lists/dicts and paint them.
 
 from __future__ import annotations
 import math
-from PyQt6.QtWidgets import QWidget, QFrame, QLabel, QVBoxLayout, QSizePolicy
+from PyQt6.QtWidgets import (QWidget, QFrame, QLabel, QVBoxLayout,
+                             QSizePolicy, QTableWidgetItem, QTableWidget,
+                             QHeaderView)
 from PyQt6.QtCore    import Qt, QRect, QRectF, QPointF
 from PyQt6.QtGui     import (
     QPainter, QColor, QPen, QBrush, QLinearGradient, QFont, QPainterPath,
 )
 from resources.styles import GENUS_COLORS, BORDER, TEXT_M, TEXT_HINT, BG_CARD
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -21,6 +22,42 @@ def _color(hex_str: str, alpha: int = 255) -> QColor:
     c = QColor(hex_str)
     c.setAlpha(alpha)
     return c
+
+
+def _build_genus_palette(n: int, base_colors: list[str]) -> list[str]:
+
+    if n <= len(base_colors):
+        return base_colors[:n]
+
+    palette = list(base_colors)
+    needed  = n - len(base_colors)
+
+    hue_step = 360 / (needed + 1)
+    hue_start = 37.0
+    for i in range(needed):
+        hue = int((hue_start + hue_step * i) % 360)
+        c   = QColor.fromHsl(hue, 155, 110)
+        palette.append(c.name())
+
+    return palette
+
+
+class NumericSortItem(QTableWidgetItem):
+    '''
+    QTableWidgetItem w/ float sort key instead of str
+    '''
+    def __init__(self, value: float, fmt: str = ",") -> None:
+        display = format(int(value), ",") if fmt == "," else format(value, fmt)
+        super().__init__(display)
+        self._numeric = float(value)
+        self.setTextAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+
+    def __lt__(self, other: QTableWidgetItem) -> bool:
+        if isinstance(other, NumericSortItem):
+            return self._numeric < other._numeric
+        return super().__lt__(other)
 
 
 # ── Vertical bar chart ────────────────────────────────────────────────────────
@@ -108,6 +145,16 @@ class StackedBarWidget(QWidget):
     def set_data(self, data: dict[str, list[tuple[str, float]]]) -> None:
         self._data = data
         self._recalc_height()
+
+        # Rebuild genus→color map whenever data changes
+        all_keys = list(dict.fromkeys(
+            g for segs in data.values() for g, _ in segs
+        ))
+        pal = _build_genus_palette(len(all_keys), self._colors)
+        self._genus_color_map: dict[str, str] = {
+            g: pal[i] for i, g in enumerate(all_keys)
+        }
+
         self.update()
 
     def _recalc_height(self) -> None:
@@ -573,3 +620,111 @@ class RiskMeterWidget(QWidget):
         p.setPen(QPen(QColor("#FFFFFF"), 2))
         p.drawEllipse(QPointF(mx, my), r_dot // 2 + 1, r_dot // 2 + 1)
         p.end()
+
+
+class GenusTableWidget(QWidget):
+    """
+    Sortable two-column table: Genus name | Relative abundance (%).
+
+    data: list of {"genus": str, "relative_abundance": float}
+          as returned by assessment_service.get_genus_data(run_id).
+
+    The user can click either column header to sort ascending / descending.
+    """
+
+    def __init__(
+        self,
+        data: list[dict] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._data: list[dict] = data or []
+        self._build()
+        if self._data:
+            self._populate()
+
+    # ── Construction ──────────────────────────────────────────────────────
+
+    def _build(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(6)
+
+        # Summary label (e.g. "14 genera")
+        self._summary = QLabel("")
+        self._summary.setStyleSheet(f"font-size:11px; color:{TEXT_HINT};")
+        root.addWidget(self._summary)
+
+        # Table
+        self._table = QTableWidget(0, 2)
+        self._table.setHorizontalHeaderLabels(["Genus", "Rel. Abundance (%)"])
+        self._table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        self._table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self._table.horizontalHeader().setSortIndicatorShown(True)
+        self._table.setSortingEnabled(True)
+        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table.setAlternatingRowColors(True)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setShowGrid(False)
+        self._table.setStyleSheet(
+            "QTableWidget { border: none; }"
+            "QHeaderView::section { font-size: 11px; padding: 4px 8px; }"
+        )
+        # Default sort: descending abundance
+        self._table.sortItems(1, Qt.SortOrder.DescendingOrder)
+        self._table.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        root.addWidget(self._table)
+
+    # ── Public API ────────────────────────────────────────────────────────
+
+    def set_data(self, data: list[dict]) -> None:
+        """
+        Refresh the table.
+        data: [{"genus": str, "relative_abundance": float}, ...]
+        """
+        self._data = data
+        self._populate()
+
+    def clear(self) -> None:
+        self._table.setRowCount(0)
+        self._summary.setText("")
+
+    # ── Internal ──────────────────────────────────────────────────────────
+
+    def _populate(self) -> None:
+        # Disable sorting while inserting to avoid mid-insert re-sorts
+        self._table.setSortingEnabled(False)
+        self._table.setRowCount(len(self._data))
+
+        for row, entry in enumerate(self._data):
+            genus = entry.get("genus", "Unknown")
+            abundance = float(entry.get("relative_abundance", 0.0))
+
+            genus_item = QTableWidgetItem(genus)
+            genus_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+            )
+
+            # Color dot prefix: reuse GENUS_COLORS palette by index
+            # (purely cosmetic — the dot is drawn via a styled QLabel in the
+            #  legend; here we tint the text a little instead)
+            abund_item = NumericSortItem(abundance, fmt=".2f")
+
+            self._table.setItem(row, 0, genus_item)
+            self._table.setItem(row, 1, abund_item)
+
+        # Re-enable sorting and apply default (abundance descending)
+        self._table.setSortingEnabled(True)
+        self._table.sortItems(1, Qt.SortOrder.DescendingOrder)
+
+        n = len(self._data)
+        self._summary.setText(
+            f"{n} genera"
+        )

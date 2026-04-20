@@ -44,6 +44,7 @@ class  AppState:
 
     # ── Runs ──────────────────────────────────────────────────────────────────
     runs: dict = field(default_factory=dict)
+    lbs:  dict = field(default_factory=dict) # R1, R2, R3, R4
 
     # ── Analysis results (filled after QIIME2 runs) ───────────────────────────
     asv_count:      int  = 0
