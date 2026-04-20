@@ -225,14 +225,48 @@ class OverviewPage(QWidget):
         else:
             self._run_count.setEnabled(True)
 
+    _FETCH_BTN_STYLE = """
+        QPushButton { background-color:#4F46E5; color:#FFFFFF; border:none;
+          border-radius:8px; font-size:14px; font-weight:700; padding:0 22px; }
+        QPushButton:hover   { background-color:#4338CA; }
+        QPushButton:pressed { background-color:#3730A3; }
+        QPushButton:disabled { background-color:#C7D2FE; color:#818CF8; }
+    """
+    _FETCH_CANCEL_STYLE = """
+        QPushButton { background-color:#DC2626; color:#FFFFFF; border:none;
+          border-radius:8px; font-size:14px; font-weight:700; padding:0 22px; }
+        QPushButton:hover   { background-color:#B91C1C; }
+        QPushButton:pressed { background-color:#991B1B; }
+    """
+
+    def set_cancel_callback(self, cb) -> None:
+        self._cancel_callback = cb
+
+    def _restore_fetch_btn(self) -> None:
+        self._fetch_btn.setText("  ⬇  Fetch data  →")
+        self._fetch_btn.setStyleSheet(self._FETCH_BTN_STYLE)
+        self._fetch_btn.clicked.disconnect()
+        self._fetch_btn.clicked.connect(self._on_fetch_clicked)
+        self._fetch_btn.setEnabled(True)
+        self._bp_input.setEnabled(True)
+        self._run_input.setEnabled(True)
+        self._run_count.setEnabled(not self._run_input.text().strip())
+
     def _on_fetch_clicked(self):
         bp  = self._bp_input.text().strip()
         run = self._run_input.text().strip()
         n   = int(self._run_count.currentText())
         email = 'emmanicolego@gmail.com'
         user = None
-        self._fetch_btn.setEnabled(False)
-        self._fetch_btn.setText("  ⟳  Fetching…")
+
+        # Transform button to Cancel
+        self._fetch_btn.setText("  ✕  Cancel")
+        self._fetch_btn.setStyleSheet(self._FETCH_CANCEL_STYLE)
+        self._fetch_btn.clicked.disconnect()
+        cb = getattr(self, '_cancel_callback', None)
+        if cb:
+            self._fetch_btn.clicked.connect(cb)
+
         self._bp_input.setEnabled(False)
         self._run_input.setEnabled(False)
         self._run_count.setEnabled(False)
@@ -249,10 +283,7 @@ class OverviewPage(QWidget):
 
     def load(self, state: AppState):
         """Populate overview from live AppState."""
-        self._fetch_btn.setEnabled(True)
-        self._fetch_btn.setText("  ⬇  Fetch data  →")
-        self._bp_input.setEnabled(True)
-        self._run_input.setEnabled(True)
+        self._restore_fetch_btn()
         self._run_count.setEnabled(True)
 
         self._status_lbl.setText(
@@ -266,11 +297,7 @@ class OverviewPage(QWidget):
         self._rebuild_runs_list(state)
 
     def show_fetch_error(self, message: str):
-        self._fetch_btn.setEnabled(True)
-        self._fetch_btn.setText("  ⬇  Fetch data  →")
-        self._bp_input.setEnabled(True)
-        self._run_input.setEnabled(True)
-        self._run_count.setEnabled(True)
+        self._restore_fetch_btn()
         self._status_lbl.setText(f"✗  {message}")
         self._status_bar.setStyleSheet(
             "background:#FEF2F2; border:1px solid #FECACA; border-radius:6px;")
@@ -528,7 +555,7 @@ class UploadRunsPage(QWidget):
             "  border:1px solid #30363D; border-radius:6px; padding:8px;"
             "}"
         )
-        self._terminal.setMinimumHeight(140)
+        self._terminal.setMinimumHeight(50)
         # self._terminal.setMaximumHeight(140)
         self._terminal.setPlainText("Ready — fetch a project to begin.\n")
         log_card.layout().addWidget(self._terminal)

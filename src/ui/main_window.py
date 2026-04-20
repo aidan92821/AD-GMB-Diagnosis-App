@@ -217,21 +217,36 @@ class _PipelineWorkerReal(QObject):
             download_classifier(classifier_url=f"{SOURCE}/{CLASSIFIER}")
     
     def run(self):
+        import re as _re
 
-        def _is_important(line: str) -> bool:
+        def _format(line: str) -> str | None:
             s = line.strip()
-            return (
-                s.startswith('[')           # phase headers: [single] Importing…
-                or s.startswith('Saved ')
-                or s.startswith('Imported ')
-                or s.startswith('Exported ')
-                or 'error' in s.lower()
-                or 'complete' in s.lower()
-            )
+            if not s:
+                return None
+            # Phase headers: [single] Importing samples…
+            if s.startswith('['):
+                return s
+            # "Saved FeatureTable[Frequency] to: /long/path/table.qza"
+            if s.startswith('Saved '):
+                artifact = s.split(' to:')[0]          # "Saved FeatureTable[Frequency]"
+                return f'✓  {artifact}'
+            # "Imported /path/manifest.tsv as SingleEndFastqManifestPhred33V2 to /path"
+            if s.startswith('Imported '):
+                m = _re.search(r'\bas\s+(\S+)', s)
+                return f'✓  Imported as {m.group(1)}' if m else '✓  Imported'
+            # "Exported /path/rep-seqs.qza as DNASequencesDirectoryFormat to directory /path"
+            if s.startswith('Exported '):
+                m = _re.search(r'\bas\s+(\S+)', s)
+                return f'✓  Exported as {m.group(1)}' if m else '✓  Exported'
+            # Errors
+            if 'error' in s.lower():
+                return f'✗  {s}'
+            return None
 
         def cb(line: str):
-            if _is_important(line):
-                self.progress.emit(line.rstrip())
+            msg = _format(line)
+            if msg:
+                self.progress.emit(msg)
 
         try:
             # preprocess the paired end fastq files
@@ -765,6 +780,7 @@ class MainWindow(QMainWindow):
 
         # Wire signals
         self._overview_page.fetch_requested.connect(self._on_fetch_requested)
+        self._overview_page.set_cancel_callback(self._on_cancel)
         self._upload_page.file_selected.connect(self._on_file_selected)
         self._upload_page.local_run_added.connect(self._on_local_run_added)
         self._profile_page.logout_requested.connect(self._on_logout)
@@ -809,7 +825,6 @@ class MainWindow(QMainWindow):
     def _on_fetch_requested(self, bioproject: str, run_accession: str, max_runs: int, email: str, username: str) -> None:
         self._status_badge.setText("Fetching from NCBI…")
         self._status_badge.show()
-        self._show_cancel(True)
 
         # emma changes
         self._fetch_real_thread = QThread(self)
@@ -840,7 +855,6 @@ class MainWindow(QMainWindow):
 
     def _on_fetch_complete(self, single_runs, paired_runs, project_dict: dict) -> None:
         """Build AppState from NCBI data, save to DB, then run analysis."""
-        self._show_cancel(False)
         state = AppState(
             bioproject_id = project_dict["bioproject_id"],
             project_uid   = project_dict.get("project_uid", ""),
@@ -894,7 +908,6 @@ class MainWindow(QMainWindow):
         self._start_download()
 
     def _on_fetch_error(self, message: str) -> None:
-        self._show_cancel(False)
         self._status_badge.setText("Fetch failed")
         self._overview_page.show_fetch_error(message)
 
@@ -1083,6 +1096,7 @@ class MainWindow(QMainWindow):
         # Reset UI
         self._cancel_btn.hide()
         self._cancel_btn.setEnabled(True)
+        self._overview_page._restore_fetch_btn()
         self._status_badge.setText("Cancelled")
         self._status_badge.setObjectName("badge_yellow")
         self._status_badge.style().unpolish(self._status_badge)
