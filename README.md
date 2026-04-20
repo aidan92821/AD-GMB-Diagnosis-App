@@ -359,8 +359,8 @@ The **Run Pipeline** button checks for QIIME2 before starting. If not found, it 
 
 
 
-Project : PRJNA1028813                        
-Process : SRR26409620 
+Project : PRJNA1028813
+Process : SRR26409620
 
 ---
 

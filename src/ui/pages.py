@@ -707,23 +707,44 @@ class UploadRunsPage(QWidget):
             self.local_run_added.emit("SINGLE", single, "")
             self._local_single_path.clear()
 
-    def show_run_pipeline_btn(self, ready: bool, callback) -> None:
-        """Show the pre-built Run Pipeline button and wire its callback."""
+    _PIPELINE_BTN_STYLE = (
+        "background-color:#059669; color:white; border:none;"
+        "border-radius:8px; font-size:13px; font-weight:700; padding:0 20px;"
+    )
+    _CANCEL_BTN_STYLE = (
+        "background-color:#DC2626; color:white; border:none;"
+        "border-radius:8px; font-size:13px; font-weight:700; padding:0 20px;"
+    )
+
+    def show_run_pipeline_btn(self, ready: bool, callback, cancel_callback=None) -> None:
+        """Show button as Run Pipeline; on click it transforms into a Cancel button."""
         self._pipeline_divider.show()
         self._pipeline_row_widget.show()
         self._pipeline_btn.setEnabled(ready)
         self._pipeline_btn.setText("  ▶  Run Pipeline")
+        self._pipeline_btn.setStyleSheet(self._PIPELINE_BTN_STYLE)
         try:
             self._pipeline_btn.clicked.disconnect()
         except (RuntimeError, TypeError):
             pass
 
         def _on_click():
-            self._pipeline_btn.setEnabled(False)
-            self._pipeline_btn.setText("  ⟳  Running…")
+            self._pipeline_btn.setText("  ✕  Cancel")
+            self._pipeline_btn.setStyleSheet(self._CANCEL_BTN_STYLE)
+            try:
+                self._pipeline_btn.clicked.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            if cancel_callback:
+                self._pipeline_btn.clicked.connect(cancel_callback)
             callback()
 
         self._pipeline_btn.clicked.connect(_on_click)
+
+    def reset_pipeline_btn(self, callback, cancel_callback=None) -> None:
+        """Restore button to Run Pipeline state (call after complete, error, or cancel)."""
+        self.show_run_pipeline_btn(ready=True, callback=callback,
+                                   cancel_callback=cancel_callback)
 
     def auto_mark_uploaded(self, state: "AppState") -> None:
         self.load(state)  # refresh table; main_window logs status via update_pipeline_status

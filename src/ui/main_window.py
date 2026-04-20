@@ -974,6 +974,7 @@ class MainWindow(QMainWindow):
             self._upload_page.show_run_pipeline_btn(
                 ready=True,
                 callback=self._on_check_env,
+                cancel_callback=self._on_cancel,
             )
 
         # Refresh Overview so run statuses show ✓ Uploaded instead of ○ Pending
@@ -1088,9 +1089,10 @@ class MainWindow(QMainWindow):
         self._status_badge.style().polish(self._status_badge)
         self._upload_page.update_pipeline_status("Cancelled by user", "warn")
         self._upload_page.append_terminal_output("\n[CANCELLED] Operation cancelled.\n")
-        # Re-enable Run Pipeline button so the user can retry
+        # Restore Run Pipeline button so the user can retry
         if self._state and any(r.get('uploaded') for r in self._state.runs.values()):
-            self._upload_page.show_run_pipeline_btn(ready=True, callback=self._on_check_env)
+            self._upload_page.reset_pipeline_btn(
+                callback=self._on_check_env, cancel_callback=self._on_cancel)
 
     def _broadcast_state(self) -> None:
         for page in [
@@ -1151,7 +1153,7 @@ class MainWindow(QMainWindow):
         uploaded_runs = sum(1 for r in self._state.runs.values() if r['uploaded'])
         if uploaded_runs > 0:
             self._upload_page.show_run_pipeline_btn(
-                ready=True, callback=self._on_check_env)
+                ready=True, callback=self._on_check_env, cancel_callback=self._on_cancel)
             self._upload_page.update_pipeline_status(
                 f"{uploaded_runs} of {self._state.run_count} run(s) ready — click Run Pipeline to start",
                 "ok"
@@ -1200,7 +1202,8 @@ class MainWindow(QMainWindow):
         self._overview_page.load(self._state)
 
         uploaded_runs = sum(1 for r in self._state.runs.values() if r['uploaded'])
-        self._upload_page.show_run_pipeline_btn(ready=True, callback=self._on_check_env)
+        self._upload_page.show_run_pipeline_btn(
+            ready=True, callback=self._on_check_env, cancel_callback=self._on_cancel)
         self._upload_page.update_pipeline_status(
             f"{label} added — {uploaded_runs} run(s) ready for pipeline", "ok")
 
@@ -1302,7 +1305,6 @@ class MainWindow(QMainWindow):
 
 
     def _on_run_pipeline(self) -> None:
-        self._show_cancel(True)
         self._status_badge.setText("Running QIIME2 pipeline…")
         self._status_badge.setObjectName("badge_yellow")
         self._status_badge.style().unpolish(self._status_badge)
@@ -1334,7 +1336,8 @@ class MainWindow(QMainWindow):
         # emma changes
 
     def _on_pipeline_complete(self, state: AppState) -> None:
-        self._show_cancel(False)
+        self._upload_page.reset_pipeline_btn(callback=self._on_check_env,
+                                             cancel_callback=self._on_cancel)
         self._state = state
         self._status_badge.setText("QIIME2 pipeline complete")
         self._status_badge.setObjectName("badge_green")
@@ -1349,7 +1352,8 @@ class MainWindow(QMainWindow):
         self._run_parsing()
 
     def _on_pipeline_error(self, msg: str) -> None:
-        self._show_cancel(False)
+        self._upload_page.reset_pipeline_btn(callback=self._on_check_env,
+                                             cancel_callback=self._on_cancel)
         # Translate common internal errors into friendlier messages
         if "db_import" in msg or "No module named" in msg:
             display = (
