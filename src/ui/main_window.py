@@ -213,8 +213,22 @@ class _PipelineWorkerReal(QObject):
     
     def run(self):
 
+        def _is_important(line: str) -> bool:
+            s = line.strip()
+            return (
+                s.startswith('[')           # phase headers: [single] Importing…
+                or s.startswith('Saved ')
+                or s.startswith('Imported ')
+                or s.startswith('Exported ')
+                or 'error' in s.lower()
+                or 'complete' in s.lower()
+            )
+
+        def cb(line: str):
+            if _is_important(line):
+                self.progress.emit(line.rstrip())
+
         try:
-            cb = self.progress.emit
             # preprocess the paired end fastq files
             if self._state.paired_runs:
                 qiime_preprocess(runner=self._runner, bioproject=self._bioproject,
@@ -1095,6 +1109,17 @@ class MainWindow(QMainWindow):
         self._analysis_badge.hide()
         lay.addWidget(self._analysis_badge)
 
+        self._cancel_btn = QPushButton("✕  Cancel")
+        self._cancel_btn.setFixedHeight(28)
+        self._cancel_btn.setStyleSheet(
+            "QPushButton { background:#FEE2E2; color:#991B1B; border:1px solid #FECACA;"
+            "border-radius:6px; font-size:12px; font-weight:600; padding:0 12px; }"
+            "QPushButton:hover { background:#FECACA; }"
+        )
+        self._cancel_btn.clicked.connect(self._on_cancel)
+        self._cancel_btn.hide()
+        lay.addWidget(self._cancel_btn)
+
         # Divider
         div = QFrame(); div.setObjectName("vdivider")
         div.setFixedWidth(1); div.setFixedHeight(24)
@@ -1194,6 +1219,7 @@ class MainWindow(QMainWindow):
     def _on_fetch_requested(self, bioproject: str, run_accession: str, max_runs: int, email: str, username: str) -> None:
         self._status_badge.setText("Fetching from NCBI…")
         self._status_badge.show()
+        self._show_cancel(True)
 
         # emma changes
         self._fetch_real_thread = QThread(self)
@@ -1224,6 +1250,7 @@ class MainWindow(QMainWindow):
 
     def _on_fetch_complete(self, single_runs, paired_runs, project_dict: dict) -> None:
         """Build AppState from NCBI data, save to DB, then run analysis."""
+        self._show_cancel(False)
         state = AppState(
             bioproject_id = project_dict["bioproject_id"],
             project_uid   = project_dict.get("project_uid", ""),
@@ -1277,6 +1304,7 @@ class MainWindow(QMainWindow):
         self._start_download()
 
     def _on_fetch_error(self, message: str) -> None:
+        self._show_cancel(False)
         self._status_badge.setText("Fetch failed")
         self._overview_page.show_fetch_error(message)
 
@@ -1284,6 +1312,7 @@ class MainWindow(QMainWindow):
 
     def _start_download(self) -> None:
         """Start fasterq-dump download; fall back to analysis-only if unavailable."""
+        self._show_cancel(True)
         self._status_badge.setText("Downloading FASTQ files…")
         self._upload_page.update_pipeline_status("Downloading FASTQ files from NCBI…", "info")
         self._upload_page.clear_terminal()
@@ -1315,6 +1344,7 @@ class MainWindow(QMainWindow):
 
     def _on_download_complete(self, state: "AppState") -> None:
         """All (or some) runs downloaded — auto-populate Upload page, then run analysis."""
+        self._show_cancel(False)
         self._state = state
         self._downloaded = True
         # get number of successfully downloaded runs as fastq files
@@ -1360,11 +1390,7 @@ class MainWindow(QMainWindow):
         self._overview_page.load(state)
 
     def _on_download_error(self, msg: str) -> None:
-        """
-        fasterq-dump not installed or all downloads failed.
-        Show an informational notice (not a pipeline error) and continue
-        with in-app analysis so diversity / risk results are still visible.
-        """
+        self._show_cancel(False)
         self._status_badge.setText("Download skipped — computing analysis…")
         # Show a non-blocking info notice on the Upload page
         if "not found" in msg.lower() or "sra-tools" in msg.lower():
@@ -1418,6 +1444,53 @@ class MainWindow(QMainWindow):
 
     def _on_analysis_error(self, msg: str) -> None:
         self._status_badge.setText(f"Analysis error: {msg[:60]}")
+
+    # ── Cancel ────────────────────────────────────────────────────────────────
+
+    def _show_cancel(self, visible: bool) -> None:
+        self._cancel_btn.setVisible(visible)
+
+    def _on_cancel(self) -> None:
+        self._cancel_btn.setEnabled(False)
+
+        # Kill any running QIIME2 subprocess
+        if self._runner:
+            self._runner.cancel()
+
+        # Terminate all active worker threads
+        for attr in (
+            '_fetch_real_thread',
+            '_dl_thread_real',
+            '_pipeline_thread_real',
+            '_parsing_thread_real',
+            '_analysis_thread',
+        ):
+            thread = getattr(self, attr, None)
+            if thread and thread.isRunning():
+                thread.quit()
+                thread.terminate()
+                thread.wait(2000)
+
+        # Delete intermediate files
+        if self._state and self._state.bioproject_id:
+            try:
+                from src.pipeline.fetch_data import cleanup
+                cleanup(self._state.bioproject_id)
+            except Exception as exc:
+                print(f"Cleanup error on cancel: {exc}")
+
+        # Reset UI
+        self._cancel_btn.hide()
+        self._cancel_btn.setEnabled(True)
+        self._status_badge.setText("Cancelled")
+        self._status_badge.setObjectName("badge_yellow")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+        self._upload_page.update_pipeline_status("Cancelled by user", "warn")
+        self._upload_page.append_terminal_output("\n[CANCELLED] Operation cancelled.\n")
+        # Re-enable Run Pipeline button so the user can retry
+        if self._state and any(r.get('uploaded') for r in self._state.runs.values()):
+            self._upload_page.show_run_pipeline_btn(ready=True, callback=self._on_check_env)
 
     def _broadcast_state(self) -> None:
         for page in [
@@ -1628,8 +1701,8 @@ class MainWindow(QMainWindow):
         # TODO fall back to in app analysis
 
 
-    def _on_run_pipeline(self) -> None:   
-
+    def _on_run_pipeline(self) -> None:
+        self._show_cancel(True)
         self._status_badge.setText("Running QIIME2 pipeline…")
         self._status_badge.setObjectName("badge_yellow")
         self._status_badge.style().unpolish(self._status_badge)
@@ -1661,6 +1734,7 @@ class MainWindow(QMainWindow):
         # emma changes
 
     def _on_pipeline_complete(self, state: AppState) -> None:
+        self._show_cancel(False)
         self._state = state
         self._status_badge.setText("QIIME2 pipeline complete")
         self._status_badge.setObjectName("badge_green")
@@ -1675,6 +1749,7 @@ class MainWindow(QMainWindow):
         self._run_parsing()
 
     def _on_pipeline_error(self, msg: str) -> None:
+        self._show_cancel(False)
         # Translate common internal errors into friendlier messages
         if "db_import" in msg or "No module named" in msg:
             display = (

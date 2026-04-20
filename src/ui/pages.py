@@ -124,13 +124,14 @@ class OverviewPage(QWidget):
         self._run_input = QLineEdit()
         self._run_input.setPlaceholderText("e.g. SRR001001  —  leave blank for all runs")
         self._run_input.textChanged.connect(self._validate_inputs)
+        self._run_input.textChanged.connect(self._on_run_input_changed)
         col_run.addWidget(run_lbl); col_run.addWidget(self._run_input)
         input_row.addLayout(col_run, 3)
 
         col_n = QVBoxLayout(); col_n.setSpacing(4)
         col_n.addWidget(label_muted("Max runs to fetch"))
         self._run_count = QComboBox()
-        for n in ["1", "2", "3", "4", "5", "6", "8", "10", "12", "16", "20"]:
+        for n in ["1", "2", "3", "4"]:
             self._run_count.addItem(n)
         self._run_count.setCurrentIndex(0)   # default = 4
         col_n.addWidget(self._run_count)
@@ -215,6 +216,13 @@ class OverviewPage(QWidget):
             self._validation_lbl.setText("")
 
         self._fetch_btn.setEnabled(bp_ok and run_ok)
+
+    def _on_run_input_changed(self, text: str) -> None:
+        if text.strip():
+            self._run_count.setCurrentIndex(0)
+            self._run_count.setEnabled(False)
+        else:
+            self._run_count.setEnabled(True)
 
     def _on_fetch_clicked(self):
         bp  = self._bp_input.text().strip()
@@ -519,7 +527,8 @@ class UploadRunsPage(QWidget):
             "  border:1px solid #30363D; border-radius:6px; padding:8px;"
             "}"
         )
-        self._terminal.setMinimumHeight(220)
+        self._terminal.setMinimumHeight(140)
+        # self._terminal.setMaximumHeight(140)
         self._terminal.setPlainText("Ready — fetch a project to begin.\n")
         log_card.layout().addWidget(self._terminal)
 
@@ -707,7 +716,13 @@ class UploadRunsPage(QWidget):
             self._pipeline_btn.clicked.disconnect()
         except (RuntimeError, TypeError):
             pass
-        self._pipeline_btn.clicked.connect(callback)
+
+        def _on_click():
+            self._pipeline_btn.setEnabled(False)
+            self._pipeline_btn.setText("  ⟳  Running…")
+            callback()
+
+        self._pipeline_btn.clicked.connect(_on_click)
 
     def auto_mark_uploaded(self, state: "AppState") -> None:
         self.load(state)  # refresh table; main_window logs status via update_pipeline_status
