@@ -22,6 +22,7 @@ from src.services.assessment_service import (
     compute_risk,
     register_user,
     login_user,
+    get_user_email,
     ServiceError,
 )
 
@@ -33,7 +34,7 @@ Base.metadata.create_all(engine)
 
 # ── Shared setup: create a user directly via repository ─────────────────────────
 session = SessionLocal()
-user = create_user(session, username="testuser", password_hash="placeholder")
+user = create_user(session, username="testuser", password_hash="placeholder", user_email="test@example.com")
 session.commit()
 user_id = user.user_id
 session.close()
@@ -154,9 +155,10 @@ except ServiceError:
 print("Test 12 PASS — ServiceError on compute_risk with no genus data")
 
 # ── Test 13: register_user ───────────────────────────────────────────────────────
-new_user = register_user("emma", "securepassword123")
+new_user = register_user("emma", "securepassword123", "emma@example.com")
 assert "user_id" in new_user
 assert new_user["username"] == "emma"
+assert new_user["email"] == "emma@example.com"
 print("Test 13 PASS — register_user")
 
 # ── Test 14: login_user ──────────────────────────────────────────────────────────
@@ -175,10 +177,23 @@ print("Test 14b PASS — login_user rejects wrong password")
 
 # ── Test 15: register_user duplicate username ─────────────────────────────────────
 try:
-    register_user("emma", "anotherpassword")
+    register_user("emma", "anotherpassword", "emma2@example.com")
     assert False, "Should have raised ServiceError"
 except ServiceError:
     pass
 print("Test 15 PASS — register_user rejects duplicate username")
+
+# ── Test 16: get_user_email ───────────────────────────────────────────────────────
+fetched_email = get_user_email(new_user["user_id"])
+assert fetched_email == "emma@example.com"
+print("Test 16 PASS — get_user_email returns correct email")
+
+# ── Test 17: get_user_email raises on missing user ────────────────────────────────
+try:
+    get_user_email(9999)
+    assert False, "Should have raised ServiceError"
+except ServiceError:
+    pass
+print("Test 17 PASS — get_user_email raises ServiceError for unknown user_id")
 
 print("\nAll tests passed.")

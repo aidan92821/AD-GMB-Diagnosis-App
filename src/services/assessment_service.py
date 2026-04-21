@@ -75,6 +75,8 @@ def get_user_email(user_id: int) -> str:
     try:
         user = get_user(session, user_id)
         return user.user_email
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
     finally:
         session.close()
 
