@@ -300,7 +300,7 @@ class AuthPage(QWidget):
             self._show_reg_error("Passwords do not match.")
             return
         try:
-            user = register_user(username, password)
+            user = register_user(username, password, email="")
             self._reg_username.clear()
             self._reg_password.clear()
             self._reg_confirm.clear()
