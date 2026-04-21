@@ -70,15 +70,23 @@ def get_or_create_user(username: str) -> dict:
     finally:
         session.close()
 
-def register_user(username: str, password: str) -> dict:
+def get_user_email(user_id: int) -> str:
+    session = SessionLocal()
+    try:
+        user = get_user(session, user_id)
+        return user.user_email
+    finally:
+        session.close()
+
+def register_user(username: str, password: str, email: str) -> dict:
     session = SessionLocal()
     try:
         if username_exists(session, username):
             raise ServiceError(f"Username {username!r} is already taken")
         hashed = hash_password(password)
-        user = repo_create_user(session, username=username, password_hash=hashed)
+        user = repo_create_user(session, username=username, password_hash=hashed, user_email=email)
         session.commit()
-        return {"user_id": user.user_id, "username": user.username}
+        return {"user_id": user.user_id, "username": user.username, "email": user.user_email}
     except RepositoryError as e:
         session.rollback()
         raise ServiceError(str(e)) from e

@@ -32,8 +32,8 @@ class IntegrityError(RepositoryError):
 
 
 # ==== USER ====
-def create_user(session: Session, *, username: str, password_hash: str) -> User:
-    user = User(username=username, password_hash=password_hash) # build python object in memory   
+def create_user(session: Session, *, username: str, password_hash: str, user_email: str) -> User:
+    user = User(username=username, password_hash=password_hash, user_email=user_email) # build python object in memory   
     session.add(user)                                           # stage it
     session.flush()                                             # send SQL to DB without committing for immediate use (can be rolledback)
     return user                                                 # return the object

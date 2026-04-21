@@ -24,10 +24,11 @@ def utcnow():
 class User(Base):
     __tablename__ = "user"
 
-    user_id  = Column(Integer, primary_key=True)
-    username = Column(String(64), nullable=False, unique=True)
+    user_id       = Column(Integer, primary_key=True)
+    user_email    = Column(String(64), nullable=False)
+    username      = Column(String(64), nullable=False, unique=True)
     password_hash = Column(String(256), nullable=False)
-    created_at = Column(DateTime(timezone=True), default=utcnow)
+    created_at    = Column(DateTime(timezone=True), default=utcnow)
 
     # One user owns many projects. Deleting a user deletes all their projects.
     projects = relationship("Project", back_populates="user", cascade="all, delete-orphan")
