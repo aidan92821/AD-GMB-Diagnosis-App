@@ -46,7 +46,7 @@ def find_median_drop(sns, quality_threshold: int) -> int:
     # find the first position where quality drops below threshold
     pos = median <= quality_threshold
     if pos.any():
-        trunc_len = pos.idmax()
+        trunc_len = pos.idxmax()
     else:
         trunc_len = len(median)
 

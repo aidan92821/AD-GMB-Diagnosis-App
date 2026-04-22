@@ -9,7 +9,12 @@ APP_DIR = Path(__file__).parent # gets the current directory
 ENV_DIR = APP_DIR / "qiime_env"
 SRA_BIN = APP_DIR / "bin" / "sratoolkit" / "bin"
 MAMBA_BIN = APP_DIR / "bin" / "micromamba"
-YML_FILE = APP_DIR / "qiime2.yml"
+
+_YML_FILES = {
+    "linux-64":  APP_DIR / "qiime2-linux.yml",
+    "osx-64":    APP_DIR / "qiime2.yml",
+    "osx-arm64": APP_DIR / "qiime2.yml",
+}
 
 MICROMAMBA_VERSION = "2.0.8"
 
@@ -68,6 +73,7 @@ def env_exists():
 # callback(line: str) -> None is a function used for streaming logs to the ui
 def create_env(callback=None):
     conda_platform = get_platform()
+    yml_file = _YML_FILES[conda_platform]
 
     env = os.environ.copy()
     env.update({
@@ -85,7 +91,7 @@ def create_env(callback=None):
         "--channel-priority", "flexible",
         "--platform", conda_platform,
 
-        "-f", str(YML_FILE)
+        "-f", str(yml_file)
     ]
 
     process = subprocess.Popen( #popen() is non blocking
