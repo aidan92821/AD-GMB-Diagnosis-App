@@ -77,7 +77,7 @@ class Run(Base):
 
 # ==== GENUS ====
 # Genus relative abundance
-# Composite PK: (run_id, genus) — one row per genus per run
+# Composite PK: (run_id, genus, simulation_id) — simulation_id is NULL for real runs
 class Genus(Base):
     __tablename__ = "genus"
 
@@ -205,4 +205,4 @@ class Simulation(Base):
     created_at    = Column(DateTime(timezone=True), default=utcnow)
 
     run       = relationship("Run", back_populates="simulations")
-    genus_data = relationship("Genus", back_populates="simulation", cascade="all, delete-orphan")
+    genus_data = relationship("Genus", back_populates="simulation")
