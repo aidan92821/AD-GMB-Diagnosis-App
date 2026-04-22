@@ -555,7 +555,7 @@ class UploadRunsPage(QWidget):
             "  border:1px solid #30363D; border-radius:6px; padding:8px;"
             "}"
         )
-        self._terminal.setMinimumHeight(50)
+        self._terminal.setMinimumHeight(70)
         # self._terminal.setMaximumHeight(140)
         self._terminal.setPlainText("Ready — fetch a project to begin.\n")
         log_card.layout().addWidget(self._terminal)

@@ -1299,23 +1299,45 @@ class MainWindow(QMainWindow):
         if qiime2_available:
             ver = stdout.strip().splitlines()[0] if stdout.strip() else "detected"
             self._upload_page.append_terminal_output(f"QIIME2 detected: {ver}")
+            self._upload_page.append_terminal_output("")
+            self._on_run_pipeline()
         else:
             self._upload_page.append_terminal_output(
-                "QIIME2 not found in environment — will fall back to in-app analysis."
+                "QIIME2 not found in environment.\n"
+                "Install QIIME2 (see README Setup Guide, Step 6) and try again."
             )
-        self._upload_page.append_terminal_output("")
-
-        self._on_run_pipeline()
+            self._upload_page.append_terminal_output("")
+            self._upload_page.update_pipeline_status(
+                "QIIME2 not found — install it to run the pipeline.", "err"
+            )
+            self._upload_page.show_pipeline_error(
+                "QIIME2 is not installed. See the README Setup Guide (Step 6) for installation instructions."
+            )
+            self._upload_page.reset_pipeline_btn(callback=self._on_check_env,
+                                                 cancel_callback=self._on_cancel)
+            self._status_badge.setText("QIIME2 not found")
+            self._status_badge.setObjectName("badge_red")
+            self._status_badge.style().unpolish(self._status_badge)
+            self._status_badge.style().polish(self._status_badge)
 
 
     def _on_check_env_error(self, exc: str) -> None:
         self._upload_page.append_terminal_output(
-            f"QIIME2 check failed ({exc}) — will fall back to in-app analysis."
+            f"QIIME2 environment check failed: {exc}"
         )
-
         self._upload_page.append_terminal_output("")
-
-        # TODO fall back to in app analysis
+        self._upload_page.update_pipeline_status(
+            "QIIME2 environment check failed.", "err"
+        )
+        self._upload_page.show_pipeline_error(
+            f"Could not check QIIME2 environment: {exc}"
+        )
+        self._upload_page.reset_pipeline_btn(callback=self._on_check_env,
+                                             cancel_callback=self._on_cancel)
+        self._status_badge.setText("Environment check failed")
+        self._status_badge.setObjectName("badge_red")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
 
 
     def _on_run_pipeline(self) -> None:
@@ -1368,20 +1390,17 @@ class MainWindow(QMainWindow):
     def _on_pipeline_error(self, msg: str) -> None:
         self._upload_page.reset_pipeline_btn(callback=self._on_check_env,
                                              cancel_callback=self._on_cancel)
-        # Translate common internal errors into friendlier messages
         if "db_import" in msg or "No module named" in msg:
-            display = (
-                "QIIME2 pipeline module is incomplete (missing db_import).\n"
-                "Running in-app analysis instead."
-            )
+            display = "QIIME2 pipeline module is incomplete (missing db_import)."
         else:
             display = msg
         self._upload_page.show_pipeline_error(display)
-        self._upload_page.update_pipeline_status(f"Pipeline error — running in-app analysis", "err")
+        self._upload_page.update_pipeline_status("Pipeline failed.", "err")
         self._upload_page.append_terminal_output(f"\n[ERROR] {msg}\n")
-        self._upload_page.append_terminal_output("Falling back to in-app analysis…\n")
-        self._status_badge.setText("Pipeline error — running in-app analysis…")
-        self._run_analysis()
+        self._status_badge.setText("Pipeline failed")
+        self._status_badge.setObjectName("badge_red")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
 
     def _run_parsing(self) -> None:
         self._status_badge.setText(

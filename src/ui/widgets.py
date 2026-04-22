@@ -9,8 +9,8 @@ from __future__ import annotations
 import math
 from PyQt6.QtWidgets import (QWidget, QFrame, QLabel, QVBoxLayout,
                              QSizePolicy, QTableWidgetItem, QTableWidget,
-                             QHeaderView)
-from PyQt6.QtCore    import Qt, QRect, QRectF, QPointF
+                             QHeaderView, QToolTip)
+from PyQt6.QtCore    import Qt, QRect, QRectF, QPointF, QPoint
 from PyQt6.QtGui     import (
     QPainter, QColor, QPen, QBrush, QLinearGradient, QFont, QPainterPath,
 )
@@ -72,14 +72,32 @@ class BarChartWidget(QWidget):
                  colors: list[str] | None = None,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._data   = data
-        self._colors = colors or GENUS_COLORS
+        self._data      = data
+        self._colors    = colors or GENUS_COLORS
+        self._bar_rects: list[tuple[QRect, str, float]] = []
         self.setMinimumHeight(120)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMouseTracking(True)
 
     def set_data(self, data: list[tuple[str, float]]) -> None:
         self._data = data
+        self._bar_rects = []
         self.update()
+
+    def mouseMoveEvent(self, event) -> None:
+        pos = event.position().toPoint()
+        for rect, label, value in self._bar_rects:
+            if rect.contains(pos):
+                QToolTip.showText(
+                    self.mapToGlobal(pos),
+                    f"{label}\n{value:.1f}%",
+                    self,
+                )
+                return
+        QToolTip.hideText()
+
+    def leaveEvent(self, event) -> None:
+        QToolTip.hideText()
 
     def paintEvent(self, _):
         if not self._data:
@@ -99,6 +117,7 @@ class BarChartWidget(QWidget):
         font = QFont(); font.setPointSize(8)
         p.setFont(font)
 
+        self._bar_rects = []
         for i, (label, value) in enumerate(self._data):
             bar_h  = int(chart_h * value / max_val)
             x      = gap + i * (bar_w + gap)
@@ -111,6 +130,8 @@ class BarChartWidget(QWidget):
             path = QPainterPath()
             path.addRoundedRect(QRectF(x, y, bar_w, bar_h), 3, 3)
             p.fillPath(path, color)
+
+            self._bar_rects.append((QRect(x, y, bar_w, bar_h), label, value))
 
         # X-axis labels: only first and last
         p.setPen(_color(TEXT_M))
@@ -184,13 +205,16 @@ class StackedBarWidget(QWidget):
                  colors: list[str] | None = None,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._data   = data
-        self._colors = colors or GENUS_COLORS
+        self._data      = data
+        self._colors    = colors or GENUS_COLORS
+        self._seg_rects: list[tuple[QRect, str, float]] = []
         self._recalc_height()
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMouseTracking(True)
 
     def set_data(self, data: dict[str, list[tuple[str, float]]]) -> None:
         self._data = data
+        self._seg_rects = []
         self._recalc_height()
 
         # Rebuild genus→color map whenever data changes
@@ -208,6 +232,21 @@ class StackedBarWidget(QWidget):
         h = len(self._data) * self.ROW_GAP + 8
         self.setFixedHeight(max(h, 20))
 
+    def mouseMoveEvent(self, event) -> None:
+        pos = event.position().toPoint()
+        for rect, genus, value in self._seg_rects:
+            if rect.contains(pos):
+                QToolTip.showText(
+                    self.mapToGlobal(pos),
+                    f"{genus}\n{value:.1f}%",
+                    self,
+                )
+                return
+        QToolTip.hideText()
+
+    def leaveEvent(self, event) -> None:
+        QToolTip.hideText()
+
     def paintEvent(self, _):
         if not self._data:
             return
@@ -218,6 +257,7 @@ class StackedBarWidget(QWidget):
         font = QFont(); font.setPointSize(8)
         p.setFont(font)
 
+        self._seg_rects = []
         y = 0
         for run_label, segments in self._data.items():
             # Run label
@@ -230,12 +270,13 @@ class StackedBarWidget(QWidget):
             avail = W - 28
             bar_y = y + 1
 
-            for j, (_, value) in enumerate(segments):
+            for j, (genus, value) in enumerate(segments):
                 seg_w = max(int(avail * value / total), 0)
                 color = _color(self._colors[j % len(self._colors)])
                 p.setBrush(QBrush(color))
                 p.setPen(Qt.PenStyle.NoPen)
                 p.drawRect(x, bar_y, seg_w, self.ROW_H)
+                self._seg_rects.append((QRect(x, bar_y, seg_w, self.ROW_H), genus, value))
                 x += seg_w
 
             y += self.ROW_GAP

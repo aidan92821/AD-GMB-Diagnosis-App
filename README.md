@@ -3,10 +3,32 @@
 A desktop application that fetches real gut microbiome sequencing data from public research databases, processes it through a bioinformatics pipeline, and generates diversity analysis and an experimental Alzheimer's disease risk assessment.
 
 ---
+### Login & Register
+![Login page](docs/screenshots/login.png)
+
+### Overview
+![Overview page](docs/screenshots/overview.png)
+
+### Diversity Analysis
+![Diversity page](docs/screenshots/diversity.png)
+
+### Taxonomy
+![Taxonomy page](docs/screenshots/taxonomy.png)
+
+### Alzheimer Risk Assessment
+![Alzheimer risk page](docs/screenshots/alzheimer.png)
+
+### Biomarker and Research
+![Research page](docs/screenshots/biomarker.png)
+
+<!-- ### Profile & Project History
+![Profile page](docs/screenshots/profile.png) --> 
+
+---
 
 ## What This App Does
 
-Research suggests the bacteria living in your gut (the **gut microbiome**) may be connected to brain health and Alzheimer's disease.  lets researchers:
+Research suggests the bacteria living in your gut (the **gut microbiome**) may be connected to brain health and Alzheimer's disease. Axis lets researchers:
 
 1. Look up any public gut microbiome study by its database ID
 2. Automatically download and process the raw DNA sequencing data
@@ -93,7 +115,7 @@ Research suggests the bacteria living in your gut (the **gut microbiome**) may b
                     Requires: QIIME2 conda env + downloaded FASTQ files
                     • Import FASTQ → QC → DADA2 denoising → SILVA classify
                     • Real ASV counts replace simulated data on all pages
-                    Falls back to in-app analysis if QIIME2 not installed
+                    Shows an error if QIIME2 is not installed — see Setup Step 6
           │
           ▼
 [7] ALZHEIMER RISK ASSESSMENT
@@ -112,10 +134,14 @@ Research suggests the bacteria living in your gut (the **gut microbiome**) may b
 AD-GMB-Diagnosis-App/
 ├── README.md
 ├── requirements.txt
+├── taxa_classifier/               ← SILVA classifier (.qza) stored here
 │
 └── src/
     ├── main.py                    ← entry point (run this)
-    ├── requirements.txt
+    ├── path_setup.py              ← adds src/ to sys.path for absolute imports
+    │
+    ├── assets/
+    │   └── styles.qss             ← global Qt stylesheet
     │
     ├── models/
     │   ├── app_state.py           ← shared runtime state (AppState, RunState)
@@ -126,15 +152,20 @@ AD-GMB-Diagnosis-App/
     │   ├── ncbi_service.py        ← fetches BioProject + run metadata from NCBI
     │   ├── analysis_service.py    ← computes diversity metrics and taxonomy
     │   ├── assessment_service.py  ← DB bridge: stores/retrieves runs, genera, diversity
-    │   └── pipeline_bridge.py     ← loads QIIME2 TSV outputs into AppState
+    │   └── pdf_exporter.py        ← generates PDF reports
     │
     ├── pipeline/
     │   ├── pipeline.py            ← orchestrates the full QIIME2 pipeline
     │   ├── fetch_data.py          ← downloads FASTQ files from NCBI via fasterq-dump
     │   ├── qiime_preproc.py       ← QIIME2 steps: import → QC → DADA2 → classify → export
+    │   ├── qiime2_runner.py       ← low-level QIIME2 command runner
     │   ├── qc.py                  ← read quality assessment and truncation point detection
-    │   ├── environment.py         ← resolves the qiime2 conda environment path
-    │   └── taxa_classifier/       ← stores the downloaded SILVA classifier (.qza)
+    │   ├── db_import.py           ← imports pipeline results into the database
+    │   ├── install_dependencies.py← checks and installs required pipeline tools
+    │   ├── qiime2.yml             ← conda environment definition for QIIME2
+    │   ├── bin/                   ← bundled SRA Toolkit binaries
+    │   ├── data/                  ← pipeline working data directory
+    │   └── taxa_classifier/       ← SILVA classifier (.qza) symlink/copy
     │
     ├── db/
     │   ├── database.py            ← SQLAlchemy session setup
@@ -145,25 +176,18 @@ AD-GMB-Diagnosis-App/
     ├── ui/
     │   ├── main_window.py         ← MainWindow: layout, background workers, page wiring
     │   ├── pages.py               ← page classes (Overview, Diversity, Taxonomy, etc.)
-    │   ├── upload_page.py         ← FASTQ upload UI and pipeline trigger
-    │   ├── dashboard_page.py      ← dashboard layout helpers
-    │   ├── intervention_page.py   ← Alzheimer risk + intervention suggestions
+    │   ├── auth_page.py           ← login and registration UI
+    │   ├── profile_page.py        ← account info and project history
     │   ├── export_page.py         ← PDF export page
     │   ├── sidebar.py             ← left navigation panel
-    │   ├── panels.py              ← reusable panel components
     │   ├── widgets.py             ← reusable primitive widgets
     │   └── helpers.py             ← UI utility functions
     │
     ├── resources/
-    │   └── styles.py              ← colour palette and global QSS stylesheet
+    │   └── styles.py              ← colour palette and stylesheet helpers
     │
-    ├── utils/
-    │   ├── data_loader.py         ← loads QIIME2 TSV outputs from disk
-    │   └── model.py               ← Alzheimer risk ML model
-    │
-    └── tests/
-        ├── test_ncbi_service.py
-        └── test_data_loader_integration.py
+    └── utils/
+        └── model.py               ← Alzheimer risk ML model
 ```
 
 ---
@@ -190,16 +214,31 @@ cd AD-GMB-Diagnosis-App
 ### Step 2 — Create a Python virtual environment
 
 ```bash
-cd src
 python -m venv venv
 source venv/bin/activate        # Windows: venv\Scripts\activate
 ```
 
 ---
 
+### Step 3 — Install Python dependencies
 
+```bash
+pip install -r requirements.txt
+```
 
-### Step 3 — Set your NCBI email
+This installs:
+- `PyQt6` — the desktop UI framework
+- `matplotlib` — charts and plots
+- `biopython` — NCBI API access
+- `sqlalchemy` — local database
+- `reportlab` — PDF export
+- `argon2-cffi` — secure password hashing for user accounts
+- `numpy` / `pandas` — numerical and tabular data processing
+- `pytest` — for running tests
+
+---
+
+### Step 4 — Set your NCBI email
 
 NCBI requires a valid email address for API access. Open `src/services/ncbi_service.py` and set:
 
@@ -212,61 +251,6 @@ Optionally, get a free API key at [ncbi.nlm.nih.gov/account](https://www.ncbi.nl
 ```python
 ENTREZ_API_KEY = "your-api-key"
 ```
-
----
-
-
-
-### Step 4  — Install QIIME2 for real ASV analysis
-
-QIIME2 is only needed if you want real DADA2-based denoising and SILVA taxonomic classification. The app runs full in-app analysis (diversity, taxonomy, AD risk) without it.
-
-> **Note for Apple Silicon Macs (M1/M2/M3):** The QIIME2 conda packages are built for x86_64 only. You must force Rosetta 2 emulation using `CONDA_SUBDIR=osx-64`. The steps below handle this automatically.
-
-**Step 7a — Set channel priority to flexible** (required to avoid package conflicts):
-
-```bash
-conda config --set channel_priority flexible
-```
-
-**Step 7b — Download the environment file:**
-
-```bash
-curl -L -O https://data.qiime2.org/distro/amplicon/qiime2-amplicon-2024.10-py310-osx-conda.yml
-```
-
-**Step 7c — Remove incompatible packages** (`deblur` and `sortmerna` are not available on macOS):
-
-```bash
-sed -i '' '/deblur/d; /sortmerna/d' qiime2-amplicon-2024.10-py310-osx-conda.yml
-```
-
-**Step 7d — Create the environment** (uses Rosetta emulation on Apple Silicon):
-
-```bash
-CONDA_SUBDIR=osx-64 conda env create -n qiime2-amplicon-2024.10 --file qiime2-amplicon-2024.10-py310-osx-conda.yml
-```
-
-This step downloads ~3–5 GB and takes 10–20 minutes.
-
-**Step 7e — Lock the environment to x86_64:**
-
-```bash
-conda activate qiime2-amplicon-2024.10
-conda config --env --set subdir osx-64
-```
-
-**Step 7f — Verify:**
-
-```bash
-qiime --version
-```
-
-**Windows:** Use WSL2 and follow the Linux instructions (omit `CONDA_SUBDIR=osx-64`).
-
-The SILVA classifier (~1.4 GB) is downloaded automatically on the first pipeline run.
-
-> **Note:** `deblur` (removed above) is an alternative denoising method. The pipeline uses DADA2, so removing deblur has no effect on results.
 
 ---
 
@@ -284,19 +268,58 @@ Verify the install:
 fasterq-dump --version
 ```
 
-### Step 6 — Install Python dependencies
+---
+
+### Step 6 — Install QIIME2 for real ASV analysis (optional)
+
+QIIME2 is only needed if you want real DADA2-based denoising and SILVA taxonomic classification. The app runs full in-app analysis (diversity, taxonomy, AD risk) without it.
+
+> **Note for Apple Silicon Macs (M1/M2/M3):** The QIIME2 conda packages are built for x86_64 only. You must force Rosetta 2 emulation using `CONDA_SUBDIR=osx-64`. The steps below handle this automatically.
+
+**Step 6a — Set channel priority to flexible** (required to avoid package conflicts):
 
 ```bash
-pip install -r requirements.txt
+conda config --set channel_priority flexible
 ```
 
-This installs:
-- `PyQt6` — the desktop UI framework
-- `matplotlib` — charts and plots
-- `biopython` — NCBI API access
-- `sqlalchemy` — local database
-- `reportlab` — PDF export
-- `pytest` — for running tests
+**Step 6b — Download the environment file:**
+
+```bash
+curl -L -O https://data.qiime2.org/distro/amplicon/qiime2-amplicon-2024.10-py310-osx-conda.yml
+```
+
+**Step 6c — Remove incompatible packages** (`deblur` and `sortmerna` are not available on macOS):
+
+```bash
+sed -i '' '/deblur/d; /sortmerna/d' qiime2-amplicon-2024.10-py310-osx-conda.yml
+```
+
+**Step 6d — Create the environment** (uses Rosetta emulation on Apple Silicon):
+
+```bash
+CONDA_SUBDIR=osx-64 conda env create -n qiime2-amplicon-2024.10 --file qiime2-amplicon-2024.10-py310-osx-conda.yml
+```
+
+This step downloads ~3–5 GB and takes 10–20 minutes.
+
+**Step 6e — Lock the environment to x86_64:**
+
+```bash
+conda activate qiime2-amplicon-2024.10
+conda config --env --set subdir osx-64
+```
+
+**Step 6f — Verify:**
+
+```bash
+qiime --version
+```
+
+**Windows:** Use WSL2 and follow the Linux instructions (omit `CONDA_SUBDIR=osx-64`).
+
+The SILVA classifier (~1.4 GB) is downloaded automatically on the first pipeline run.
+
+> **Note:** `deblur` (removed above) is an alternative denoising method. The pipeline uses DADA2, so removing deblur has no effect on results.
 
 ---
 
@@ -308,10 +331,6 @@ python main.py
 ```
 
 The app opens immediately. You can enter any BioProject accession (e.g. `PRJNA1020741`) and explore simulated analysis results right away — no QIIME2 installation needed for this mode.
-
----
-
-Once installed, FASTQ files are downloaded automatically to `data/<BioProject>/fastq/` after every fetch. No manual steps needed.
 
 ---
 
@@ -332,7 +351,7 @@ In-app analysis runs automatically
 [Optional] Click "Run Pipeline" for real QIIME2 DADA2 analysis
 ```
 
-1. Launch the app: `python main.py`
+1. Launch the app: `python src/main.py`
 2. Register or log in
 3. On the **Overview** page, enter a BioProject accession (e.g. `PRJNA1020741`)
 4. Select max runs from the dropdown (1–20) and click **Fetch**
@@ -347,27 +366,24 @@ If `fasterq-dump` is not installed, the app still works — it fetches NCBI meta
 
 ### Without QIIME2
 
-The **Run Pipeline** button checks for QIIME2 before starting. If not found, it falls back to in-app analysis automatically — no crash, no manual action needed.
+The **Run Pipeline** button checks for QIIME2 before starting. If QIIME2 is not found, an error is shown with instructions to install it — see Setup Step 6.
 
 ### Example BioProject accessions to try
 
-| Accession | Description |
-|---|---|
-| `PRJNA1020741` | Human gut microbiome study |
-| `PRJNA31257` | Homo sapiens gut microbiome |
-| `PRJNA743840` | Human gut 16S rRNA amplicon study |
+| Accession | Run  | Description |
+|---|---|---|
+| `PRJNA1020741` || Human gut microbiome study |
+|`PRJNA1028813` |SRR26409620|  
+| `PRJNA31257` ||Homo sapiens gut microbiome |
+| `PRJNA743840` || Human gut 16S rRNA amplicon study |
 
 
-
-Project : PRJNA1028813
-Process : SRR26409620
 
 ---
 
 ## Running Tests
 
 ```bash
-cd src
 pytest tests/ -v
 ```
 
@@ -380,10 +396,11 @@ pytest tests/ -v
 | Shared runtime data | `models/app_state.py` |
 | NCBI API calls | `services/ncbi_service.py` |
 | Analysis computation | `services/analysis_service.py` |
+| PDF report generation | `services/pdf_exporter.py` |
 | Database persistence | `db/` + `services/assessment_service.py` |
 | QIIME2 pipeline steps | `pipeline/` |
 | UI pages and layout | `ui/` |
-| Theming and styles | `resources/styles.py` |
+| Theming and styles | `resources/styles.py` + `assets/styles.qss` |
 
 The UI layers never call the pipeline or database directly — they receive data through explicit `page.load(state)` calls from `MainWindow`. This means all analysis logic can be tested without starting the Qt application.
 
@@ -396,4 +413,4 @@ The UI layers never call the pipeline or database directly — they receive data
 | **In-app analysis** | Nothing extra | Genus profiles interpolated from published AD microbiome literature; real Shannon/Simpson/Bray-Curtis math; classical MDS PCoA | Default — runs automatically after every fetch |
 | **Real QIIME2 pipeline** | QIIME2 env + fasterq-dump | Downloads FASTQ → DADA2 denoising → SILVA classification → real ASV counts | Research-grade results with actual sequencing data |
 
-When real pipeline results are available they automatically replace the in-app results on all pages. If QIIME2 is not installed, clicking "Run Pipeline" falls back to in-app analysis with an informational message.
+When real pipeline results are available they automatically replace the in-app results on all pages. If QIIME2 is not installed or the pipeline fails, an error is shown — the pipeline does not silently fall back to in-app analysis.
