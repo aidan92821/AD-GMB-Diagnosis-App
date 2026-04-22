@@ -1,5 +1,5 @@
 # ── Local data & databases ────────────────────────────────────────────────────
-*.db
+# *.db
 exports/
 
 # ── Pipeline data (generated at runtime) ──────────────────────────────────────
