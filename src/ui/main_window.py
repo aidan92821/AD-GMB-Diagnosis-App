@@ -45,13 +45,16 @@ from src.pipeline.fetch_data import (fetch_runs, download_runs,
                                      write_manifest, cleanup)
 from src.pipeline.db_import import (parse_feat_tax_seqs, parse_feature_counts,
                                     parse_genus_table)
+from src.pipeline.compute_diversity import compute_and_store_all
 
-from src.services.assessment_service import (save_ncbi_project, create_project, 
-                                             create_run,ingest_run_data, 
+from src.services.assessment_service import (save_ncbi_project, create_project,
+                                             create_run, ingest_run_data,
                                              get_run_id_by_srr, get_feature_counts,
-                                             get_tree, store_alpha_diversities,
+                                             get_genus_data, get_tree,
+                                             store_alpha_diversities,
                                              store_beta_diversity, ServiceError,
-                                             get_beta_diversity_matrix, store_pcoa)
+                                             get_beta_diversity_matrix, store_pcoa,
+                                             get_is_run_in_genus)
 
 # ── Sidebar nav ───────────────────────────────────────────────────────────────
 
@@ -277,14 +280,16 @@ class _ParseWorkerReal(QObject):
         self._user = user
 
     def run(self):
-        try:            
+        try:
+            new_run_ids: list[int] = []
+
             # parse the paired end tables
             if self._state.paired_runs:
                 abundances     = parse_genus_table(genus=f"{self._data_dir}/qiime/paired/genus-table.tsv")
                 feature_seqs   = parse_feat_tax_seqs(tax=f"{self._data_dir}/qiime/paired/taxonomy.tsv",
                                                    seqs=f"{self._data_dir}/reps-tree/paired/dna-sequences.fasta")
                 feature_counts = parse_feature_counts(feat=f"{self._data_dir}/qiime/paired/feature-table.tsv")
-                
+
                 # TODO: allow for project retrieval if just getting more runs for the current project
                 project = create_project(user_id=self._user['user_id'], name=self._state.bioproject_id)
 
@@ -295,7 +300,8 @@ class _ParseWorkerReal(QObject):
                         db_run = create_run(project_id=project['project_id'], source='ncbi', srr_accession=run,
                                             bio_proj_accession=self._state.bioproject_id, library_layout='paired')
                         ingest_run_data(run_id=db_run['run_id'], genus_rows=row, features=feature_seqs, feature_counts=feature_counts[run])
-            
+                        new_run_ids.append(db_run['run_id'])
+
             # parse the single end tables
             if self._state.single_runs:
                 abundances     = parse_genus_table(genus=f"{self._data_dir}/qiime/single/genus-table.tsv")
@@ -318,11 +324,16 @@ class _ParseWorkerReal(QObject):
                         run_id = db_run['run_id']
                         label = self._state.runs[run]['label'] # R1, R2, R3, or R4
                         self._state.lbs[label] = run_id
+                        new_run_ids.append(run_id)
                     ingest_run_data(run_id=run_id, genus_rows=row, features=feature_seqs, feature_counts=feature_counts[run])
-            
+
+            # compute alpha + beta diversity and persist to DB
+            if new_run_ids:
+                compute_and_store_all(new_run_ids)
+
             # remove all the intermediate files
             cleanup(self._state.bioproject_id)
-            
+
             self.finished.emit(self._state)
         except Exception as exc:
             self.errored.emit(str(exc))
@@ -340,16 +351,54 @@ class _AnalysisWorkerReal(QObject):
 
     def run(self):
         try:
-            self.progress.emit("Computing alpha diversity")
-            self._fill_alpha(self._state, self._state.lbs)
+            run_ids = list(self._state.lbs.values())
+            if run_ids:
+                self.progress.emit("Computing diversity metrics…")
+                compute_and_store_all(run_ids)
 
-            if self._state.run_count > 1:    
-                self.progress.emit("Computing beta diversity")
-                self._fill_beta(self._state, self._state.lbs)
-                
-                self.progress.emit("Computing PCoA…")
-                self._fill_pcoa(self._state, self._state.lbs)
-            
+            # Populate genus_abundances and asv_features from DB
+            self.progress.emit("Loading analysis results…")
+            for label, run_id in self._state.lbs.items():
+                try:
+                    genus_rows = get_genus_data(run_id)
+                    if genus_rows:
+                        pairs = sorted(
+                            [(g["genus"], round(g["relative_abundance"] * 100, 2)) for g in genus_rows],
+                            key=lambda x: -x[1]
+                        )
+                        self._state.genus_abundances[label] = pairs
+                except ServiceError:
+                    pass
+
+                try:
+                    fcs = get_feature_counts(run_id)
+                    if fcs:
+                        total = sum(fc["abundance"] for fc in fcs) or 1
+                        features = []
+                        for fc in sorted(fcs, key=lambda x: -x["abundance"])[:15]:
+                            pct = fc["abundance"] / total * 100
+                            genus = "Unclassified"
+                            if fc.get("taxonomy"):
+                                for part in fc["taxonomy"].split(";"):
+                                    s = part.strip()
+                                    if s.startswith("g__"):
+                                        g = s[3:].strip()
+                                        if g and g.lower() not in ("", "uncultured", "unknown"):
+                                            genus = g
+                                        break
+                            features.append({
+                                "id": fc["feature_id"],
+                                "genus": f"g__{genus}",
+                                "count": fc["abundance"],
+                                "pct": round(pct, 2),
+                            })
+                        self._state.asv_features[label] = features
+                except ServiceError:
+                    pass
+
+            self._state.asv_count  = sum(len(f) for f in self._state.asv_features.values())
+            self._state.genus_count = len({g for pairs in self._state.genus_abundances.values() for g, _ in pairs})
+
             self.finished.emit(self._state)
         except Exception as exc:
             self.errored.emit(str(exc))
@@ -1266,7 +1315,37 @@ class MainWindow(QMainWindow):
                         APP_DIR / f"data/{bio}/fastq/single/{srr}.fastq")
                     w.writerow([srr, path])
 
+    def _all_runs_cached(self) -> bool:
+        """Return True if every SRR in the current state already has genus data in the DB."""
+        srrs = list(self._state.runs.keys())
+        if not srrs:
+            return False
+        for srr in srrs:
+            try:
+                run_id = get_run_id_by_srr(srr)
+                if not get_is_run_in_genus(run_id):
+                    return False
+                # Populate lbs so _AnalysisWorkerReal can find the run_ids
+                label = self._state.runs[srr].get('label')
+                if label:
+                    self._state.lbs[label] = run_id
+            except ServiceError:
+                return False
+        return True
+
     def _on_check_env(self) -> None:
+        # If all runs are already in the DB, skip pipeline entirely
+        if self._all_runs_cached():
+            self._upload_page.show_terminal(True)
+            self._upload_page.clear_terminal()
+            self._upload_page.append_terminal_output(
+                "All runs already processed — loading results from database…\n"
+            )
+            self._upload_page.update_pipeline_status("Loading cached results…", "info")
+            self._upload_page.reset_pipeline_btn(
+                callback=self._on_check_env, cancel_callback=self._on_cancel)
+            self._run_analysis()
+            return
 
         # Detect whether QIIME2 is available and report in the terminal
         self._upload_page.show_terminal(True)

@@ -8,6 +8,7 @@ import os
 from qiime_preproc import qiime_preprocess, download_classifier
 from services.assessment_service import create_project, create_run, ingest_run_data, get_or_create_user, get_project_overview
 from qiime2_runner import QiimeRunner
+from compute_diversity import compute_and_store_all
 
 # get email from user -> db -> retrieve from db to use as argument here
 def run_fetch(bioproject: str, email: str, srr: str=None, n_runs=1):
@@ -54,7 +55,12 @@ def preprocess_parse_import(runner: QiimeRunner, bioproject: str, lib_layout: st
     else:
         project = get_project_overview(project_id=project_id)
     # add runs and import bulk processed data to database
+    new_run_ids = []
     for run, row in abundances.items():
         db_run = create_run(project_id=project['project_id'], source='ncbi', srr_accession=run,
                             bio_proj_accession=bioproject, library_layout=lib_layout)
         ingest_run_data(run_id=db_run['run_id'], genus_rows=row, features=feature_seqs, feature_counts=feature_counts)
+        new_run_ids.append(db_run['run_id'])
+
+    # compute and store alpha + beta diversity
+    compute_and_store_all(new_run_ids)
