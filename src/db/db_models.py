@@ -72,6 +72,7 @@ class Run(Base):
     trees             = relationship("Tree",          back_populates="run", cascade="all, delete-orphan")
     alpha_diversities = relationship("AlphaDiversity", back_populates="run", cascade="all, delete-orphan")
     pcoa_coords       = relationship("PCoA", back_populates="run", cascade="all, delete-orphan")
+    simulations       = relationship("Simulation",    back_populates="run", cascade="all, delete-orphan")
 
 
 # ==== GENUS ====
@@ -83,8 +84,11 @@ class Genus(Base):
     run_id            = Column(Integer, ForeignKey("run.run_id"), primary_key=True, nullable=False)
     genus             = Column(String(128), primary_key=True, nullable=False)
     relative_abundance = Column(Float, nullable=False)
+    simulation_id     = Column(Integer, ForeignKey("simulation.simulation_id"), primary_key=True, nullable=True)
 
-    run = relationship("Run", back_populates="genus_data")
+
+    run        = relationship("Run",        back_populates="genus_data")
+    simulation = relationship("Simulation", back_populates="genus_data")
 
     __table_args__ = (
         # Relative abundance must be between 0 and 1
@@ -192,3 +196,13 @@ class PCoA(Base):
         # One coordinate pair per run per metric — enforces upsert safety at DB level
         UniqueConstraint("run_id", "metric", name="uq_pcoa_run_metric"),
     )
+
+class Simulation(Base):
+    __tablename__ = "simulation"
+
+    simulation_id = Column(Integer, primary_key=True)
+    run_id        = Column(Integer, ForeignKey("run.run_id"), nullable=False)
+    created_at    = Column(DateTime(timezone=True), default=utcnow)
+
+    run       = relationship("Run", back_populates="simulations")
+    genus_data = relationship("Genus", back_populates="simulation", cascade="all, delete-orphan")

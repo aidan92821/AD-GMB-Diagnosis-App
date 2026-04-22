@@ -44,6 +44,8 @@ from src.db.repository import (
     username_exists,
     create_pcoa,
     get_pcoa_for_project,
+    create_simulation as repo_create_simulation,
+    get_simulations_for_run as repo_get_simulations_for_run,
 )
 
 
@@ -709,6 +711,37 @@ def delete_project(project_id: int) -> None:
         session.commit()
     except Exception as e:
         session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+# ==== Simulation ====
+
+def create_simulation(run_id: int) -> dict:
+    """Create a new simulation record for a run. Returns simulation_id."""
+    session = SessionLocal()
+    try:
+        run = get_run(session, run_id)
+        sim = repo_create_simulation(session, run=run)
+        session.commit()
+        return {"simulation_id": sim.simulation_id, "run_id": run_id}
+    except RepositoryError as e:
+        session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+def get_simulations_for_run(run_id: int) -> list[dict]:
+    """Return all simulation IDs for a run."""
+    session = SessionLocal()
+    try:
+        sims = repo_get_simulations_for_run(session, run_id)
+        return [{"simulation_id": s.simulation_id, "run_id": s.run_id,
+                 "created_at": s.created_at.isoformat() if s.created_at else None}
+                for s in sims]
+    except RepositoryError as e:
         raise ServiceError(str(e)) from e
     finally:
         session.close()

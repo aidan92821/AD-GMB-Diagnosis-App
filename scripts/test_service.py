@@ -23,6 +23,8 @@ from src.services.assessment_service import (
     register_user,
     login_user,
     get_user_email,
+    create_simulation,
+    get_simulations_for_run,
     ServiceError,
 )
 
@@ -195,5 +197,19 @@ try:
 except ServiceError:
     pass
 print("Test 17 PASS — get_user_email raises ServiceError for unknown user_id")
+
+# ── Test 18: create_simulation ────────────────────────────────────────────────────
+sim = create_simulation(run1_id)
+assert "simulation_id" in sim
+assert sim["run_id"] == run1_id
+sim_id = sim["simulation_id"]
+print("Test 18 PASS — create_simulation")
+
+# ── Test 19: get_simulations_for_run ─────────────────────────────────────────────
+sims = get_simulations_for_run(run1_id)
+assert len(sims) == 1
+assert sims[0]["simulation_id"] == sim_id
+assert get_simulations_for_run(run2_id) == []
+print("Test 19 PASS — get_simulations_for_run")
 
 print("\nAll tests passed.")

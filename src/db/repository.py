@@ -11,7 +11,7 @@ from sqlalchemy import select, desc, exists, or_, and_
 
 from src.db.db_models import (
     User, Project, Run, Genus, Feature, FeatureCount,
-    Tree, AlphaDiversity, BetaDiversity, PCoA,
+    Tree, AlphaDiversity, BetaDiversity, PCoA, Simulation,
 )
 
 from argon2 import PasswordHasher
@@ -399,4 +399,17 @@ def get_pcoa_for_project(
         .where(Run.project_id == project_id, PCoA.metric == metric)
     )
     return list(session.execute(stmt).scalars().all())
- 
+
+
+# ==== SIMULATION ====
+
+def create_simulation(session: Session, *, run: Run) -> Simulation:
+    sim = Simulation(run_id=run.run_id)
+    session.add(sim)
+    session.flush()
+    return sim
+
+
+def get_simulations_for_run(session: Session, run_id: int) -> list[Simulation]:
+    stmt = select(Simulation).where(Simulation.run_id == run_id)
+    return list(session.execute(stmt).scalars().all())
