@@ -167,14 +167,6 @@ def create_tables(runner: QiimeRunner, bioproject: str, lib_layout: str, callbac
     reps_tree_dir = str((APP_DIR / f"data/{bioproject}/reps-tree/{lib_layout}").resolve())
     Path(reps_tree_dir).mkdir(parents=True, exist_ok=True)
 
-    # representative sequences (asvs to seqs) (rep-seqs.fasta)
-    # this needs to go in a separate directory for conservation
-    runner.run([
-        'qiime', 'tools', 'export',
-        '--input-path', f"{io_dir}/rep-seqs.qza",
-        '--output-path', reps_tree_dir
-    ])
-
     # feature table (asv counts) (feature-table.tsv)
     runner.run([
         'qiime', 'tools', 'export',
