@@ -231,6 +231,7 @@ def qiime_preprocess(runner: QiimeRunner, bioproject: str, lib_layout: str, call
 
     APP_DIR = Path(__file__).parent
     ref_phylo_db_dir_path = str((APP_DIR / REF_PHYLO_DB_DIR).resolve())
+    os.makedirs(ref_phylo_db_dir_path, exist_ok=True)
 
     if REF_PHYLO_DB not in os.listdir(ref_phylo_db_dir_path):
         _log(f"Getting reference phylogeny database...")
