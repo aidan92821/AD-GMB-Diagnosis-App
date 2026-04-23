@@ -218,7 +218,15 @@ def create_tables(runner: QiimeRunner, bioproject: str, lib_layout: str, callbac
         '--to-tsv'
     ], callback=callback)
 
-    # move rep-seqs.qza to a persistent folder
+    # export representative sequences to FASTA (dna-sequences.fasta)
+    # must happen before the .qza is moved, while it still lives in io_dir
+    runner.run([
+        'qiime', 'tools', 'export',
+        '--input-path', f"{io_dir}/rep-seqs.qza",
+        '--output-path', reps_tree_dir
+    ], callback=callback)
+
+    # move rep-seqs.qza to a persistent folder for phylogeny inference
     runner.mv(file=f"{io_dir}/rep-seqs.qza", dir=reps_tree_dir)
 
 
