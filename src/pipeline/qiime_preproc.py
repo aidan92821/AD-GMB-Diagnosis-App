@@ -273,6 +273,7 @@ def get_ref_phylo_db():
 
     APP_DIR = Path(__file__).parent
     ref_phylo_db_dir_path = (APP_DIR / REF_PHYLO_DB_DIR).resolve()
+    ref_phylo_db_dir_path.mkdir(parents=True, exist_ok=True)
     ref_phylo_db_path = ref_phylo_db_dir_path / REF_PHYLO_DB
 
     urllib.request.urlretrieve(REF_PHYLO_LINK, ref_phylo_db_path)
