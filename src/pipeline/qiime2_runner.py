@@ -32,12 +32,13 @@ class QiimeRunner:
             self._current_process = None
 
     # args is the command with arguments separated into a list
-    def run(self, args: list[str], callback=None, env=None):
+    def run(self, args: list[str], callback=None, env=None, cwd=None):
 
         cmd = self.base_cmd + args
 
         process = subprocess.Popen(
             cmd,
+            cwd=cwd,
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -108,6 +109,30 @@ class QiimeRunner:
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1
+        )
+
+        process.wait()
+
+    def mv(self, file: str, dir: str):
+        cmd = [
+            'mv',
+            file,
+            f"{dir}/"
+        ]
+
+        process = subprocess.Popen(
+            cmd
+        )
+
+        process.wait()
+
+    def rm(self, files: list[str]):
+
+        cmd = ['rm']
+        cmd.extend(files)
+
+        process = subprocess.Popen(
+            cmd
         )
 
         process.wait()

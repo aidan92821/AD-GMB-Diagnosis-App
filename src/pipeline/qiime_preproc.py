@@ -1,11 +1,21 @@
+from __future__ import annotations
 import os
 from pathlib import Path
 from src.pipeline.qc import get_trunc
 import urllib.request
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from qiime2_runner import QiimeRunner
+
+
+REF_PHYLO_DB = "sepp-refs-silva-128.qza"
+REF_PHYLO_DB_DIR = "ref_phylo_db"
+REF_PHYLO_LINK = "https://data.qiime2.org/2023.5/common/sepp-refs-silva-128.qza"
 
 
 # lib_layout = 'paired' or 'single'
-def import_samples(runner, bioproject: str, lib_layout: str, callback=None):
+def import_samples(runner: QiimeRunner, bioproject: str, lib_layout: str, callback=None):
 
     APP_DIR = Path(__file__).parent
     input_dir = str((APP_DIR / f"data/{bioproject}/fastq/{lib_layout}").resolve())
@@ -34,7 +44,7 @@ def import_samples(runner, bioproject: str, lib_layout: str, callback=None):
 # 0 -> something weird happened
 # 1 -> single with key: 'single'
 # 2 -> paired with keys: 'forward', 'reverse' in that order
-def qc(runner, bioproject: str, lib_layout: str, callback=None):
+def qc(runner: QiimeRunner, bioproject: str, lib_layout: str, callback=None):
 
     APP_DIR = Path(__file__).parent
     io_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
@@ -51,7 +61,7 @@ def qc(runner, bioproject: str, lib_layout: str, callback=None):
 
 
 # lib_layout = 'paired' or 'single'
-def dada2_denoise(runner, bioproject: str, lib_layout: str, trunc_f: int=None, trunc_r: int=None, trunc_s: int=None, callback=None):
+def dada2_denoise(runner: QiimeRunner, bioproject: str, lib_layout: str, trunc_f: int=None, trunc_r: int=None, trunc_s: int=None, callback=None):
 
     APP_DIR = Path(__file__).parent
     io_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
@@ -95,7 +105,7 @@ classifier: silva-138-99-nb-classifier.qza
 source: https://data.qiime2.org/classifiers/sklearn-1.4.2/silva/silva-138-99-nb-classifier.qza
 '''
 # lib_layout: 'paired' or 'single'
-def classify_taxa(runner, bioproject: str, lib_layout: str, callback=None):
+def classify_taxa(runner: QiimeRunner, bioproject: str, lib_layout: str, callback=None):
 
     APP_DIR = Path(__file__).parent
     classifier_path = str((APP_DIR / "taxa_classifier/silva-138-99-nb-classifier.qza").resolve())
@@ -108,23 +118,53 @@ def classify_taxa(runner, bioproject: str, lib_layout: str, callback=None):
         '--i-reads', f"{io_dir}/rep-seqs.qza",
         '--o-classification', f"{io_dir}/taxonomy.qza"
     ], callback=callback)
+    
+
+def infer_phylogeny(runner: QiimeRunner, bioproject: str, lib_layout: str, callback=None) -> str:
+
+    APP_DIR = Path(__file__).parent
+    ref_phylo_db_dir_path = str((APP_DIR / REF_PHYLO_DB_DIR).resolve())
+    reps_tree_dir = str((APP_DIR / f"data/{bioproject}/reps-tree/{lib_layout}").resolve())
+
+    # get the number of cores from user's machine
+    # and calculate how many to use for the process
+    cores = os.cpu_count()
+    cores = str(max(cores - 4, 1))
+
+    try:
+        runner.run([
+            'qiime', 'fragment-insertion', 'sepp',
+            '--i-representative-sequences', f"{reps_tree_dir}/rep-seqs.qza",
+            '--i-reference-database', f"{ref_phylo_db_dir_path}/{REF_PHYLO_DB}",
+            '--o-tree', f"{reps_tree_dir}/insertion-tree.qza",
+            '--o-placements', f"{reps_tree_dir}/insertion-placements.qza",
+            '--p-threads', cores
+        ])
+
+        # produce the newick string from the inferred tree
+        runner.run([
+            'qiime', 'tools', 'export',
+            '--input-path', f"{reps_tree_dir}/insertion-tree.qza",
+            "--output-path", reps_tree_dir
+        ])
+    except Exception as e:
+        callback("** tree error:", str(e))
+
+    # clean up the intermediate files
+    runner.rm([f"{reps_tree_dir}/insertion-tree.qza",
+               f"{reps_tree_dir}/insertion-placements.qza",
+               f"{reps_tree_dir}/rep-seqs.qza"])
+    
+    return f"{reps_tree_dir}/tree.nwk"
 
 
 # lib_layout: 'paired' or 'single'
-def create_tables(runner, bioproject: str, lib_layout: str, callback=None):
+def create_tables(runner: QiimeRunner, bioproject: str, lib_layout: str, callback=None):
 
     APP_DIR = Path(__file__).parent
     io_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
     reps_tree_dir = str((APP_DIR / f"data/{bioproject}/reps-tree/{lib_layout}").resolve())
-
-    # representative sequences (asvs to seqs) (rep-seqs.fasta)
-    # this needs to go in a separate directory for conservation
     Path(reps_tree_dir).mkdir(parents=True, exist_ok=True)
-    runner.run([
-        'qiime', 'tools', 'export',
-        '--input-path', f"{io_dir}/rep-seqs.qza",
-        '--output-path', reps_tree_dir
-    ], callback=callback)
 
     # feature table (asv counts) (feature-table.tsv)
     runner.run([
@@ -178,13 +218,23 @@ def create_tables(runner, bioproject: str, lib_layout: str, callback=None):
         '--to-tsv'
     ], callback=callback)
 
+    # move rep-seqs.qza to a persistent folder
+    runner.mv(file=f"{io_dir}/rep-seqs.qza", dir=reps_tree_dir)
 
-def qiime_preprocess(runner, bioproject: str, lib_layout: str, callback=None):
+
+def qiime_preprocess(runner: QiimeRunner, bioproject: str, lib_layout: str, callback=None):
 
     def _log(msg: str):
         print(msg)
         if callback:
             callback(msg)
+
+    APP_DIR = Path(__file__).parent
+    ref_phylo_db_dir_path = str((APP_DIR / REF_PHYLO_DB_DIR).resolve())
+
+    if REF_PHYLO_DB not in os.listdir(ref_phylo_db_dir_path):
+        _log(f"Getting reference phylogeny database...")
+        get_ref_phylo_db()
 
     _log(f"[{lib_layout}] Importing samples…")
     import_samples(runner, bioproject=bioproject, lib_layout=lib_layout, callback=callback)
@@ -217,3 +267,13 @@ def download_classifier(classifier_url: str):
     classifier_file = output_dir / classifier_url.split("/")[-1]
 
     urllib.request.urlretrieve(classifier_url, classifier_file)
+
+
+def get_ref_phylo_db():
+
+    APP_DIR = Path(__file__).parent
+    ref_phylo_db_dir_path = (APP_DIR / REF_PHYLO_DB_DIR).resolve()
+    ref_phylo_db_path = ref_phylo_db_dir_path / REF_PHYLO_DB
+
+    urllib.request.urlretrieve(REF_PHYLO_LINK, ref_phylo_db_path)
+    

@@ -40,7 +40,7 @@ from ui.auth_page import AuthPage
 from ui.profile_page import ProfilePage
 
 from src.pipeline.qiime2_runner import QiimeRunner
-from src.pipeline.qiime_preproc import download_classifier, qiime_preprocess
+from src.pipeline.qiime_preproc import download_classifier, qiime_preprocess, infer_phylogeny
 from src.pipeline.fetch_data import (fetch_runs, download_runs, 
                                      write_manifest, cleanup)
 from src.pipeline.db_import import (parse_feat_tax_seqs, parse_feature_counts,
@@ -51,7 +51,8 @@ from src.services.assessment_service import (save_ncbi_project, create_project,
                                              get_run_id_by_srr, get_feature_counts,
                                              get_tree, store_alpha_diversities,
                                              store_beta_diversity, ServiceError,
-                                             get_beta_diversity_matrix, store_pcoa)
+                                             get_beta_diversity_matrix, store_pcoa,
+                                             create_tree_instance, get_run_feature_ids)
 
 # ── Sidebar nav ───────────────────────────────────────────────────────────────
 
@@ -238,6 +239,8 @@ class _PipelineWorkerReal(QObject):
             if s.startswith('Exported '):
                 m = _re.search(r'\bas\s+(\S+)', s)
                 return f'✓  Exported as {m.group(1)}' if m else '✓  Exported'
+            if s.startswith('Getting '):
+                return s
             # Errors
             if 'error' in s.lower():
                 return f'✗  {s}'
@@ -285,14 +288,11 @@ class _ParseWorkerReal(QObject):
                                                    seqs=f"{self._data_dir}/reps-tree/paired/dna-sequences.fasta")
                 feature_counts = parse_feature_counts(feat=f"{self._data_dir}/qiime/paired/feature-table.tsv")
                 
-                # TODO: allow for project retrieval if just getting more runs for the current project
-                project = create_project(user_id=self._user['user_id'], name=self._state.bioproject_id)
-
                 for run, row in abundances.items():
                     try:
                         _ = get_run_id_by_srr(run)
                     except ServiceError:
-                        db_run = create_run(project_id=project['project_id'], source='ncbi', srr_accession=run,
+                        db_run = create_run(project_id=self._state.db_project_id, source='ncbi', srr_accession=run,
                                             bio_proj_accession=self._state.bioproject_id, library_layout='paired')
                         ingest_run_data(run_id=db_run['run_id'], genus_rows=row, features=feature_seqs, feature_counts=feature_counts[run])
             
@@ -303,17 +303,13 @@ class _ParseWorkerReal(QObject):
                                                    seqs=f"{self._data_dir}/reps-tree/single/dna-sequences.fasta")
                 feature_counts = parse_feature_counts(feat=f"{self._data_dir}/qiime/single/feature-table.tsv")
 
-                # TODO: allow for project retrieval if just getting more runs for the current project
-                project = create_project(user_id=self._user['user_id'], name=self._state.bioproject_id)
-                self._state.db_project_id = project['project_id']
-
                 for run, row in abundances.items():
                     try:
                         run_id = get_run_id_by_srr(run)
                         label = self._state.runs[run]['label'] # R1, R2, R3, or R4
                         self._state.lbs[label] = run_id
                     except ServiceError:
-                        db_run = create_run(project_id=project['project_id'], source='ncbi', srr_accession=run,
+                        db_run = create_run(project_id=self._state.db_project_id, source='ncbi', srr_accession=run,
                                             bio_proj_accession=self._state.bioproject_id, library_layout='single')
                         run_id = db_run['run_id']
                         label = self._state.runs[run]['label'] # R1, R2, R3, or R4
@@ -341,22 +337,21 @@ class _AnalysisWorkerReal(QObject):
     def run(self):
         try:
             self.progress.emit("Computing alpha diversity")
-            self._fill_alpha(self._state, self._state.lbs)
+            self._fill_alpha(self._state.lbs)
 
             if self._state.run_count > 1:    
-                self.progress.emit("Computing beta diversity")
-                self._fill_beta(self._state, self._state.lbs)
+                self.progress.emit("Computing Bray-Curtis beta diversity")
+                self._fill_bray_curtis(self._state, self._state.lbs)
                 
                 self.progress.emit("Computing PCoA…")
-                self._fill_pcoa(self._state, self._state.lbs)
+                self._fill_pcoa(self._state, self._state.lbs, "bray-curtis")
             
             self.finished.emit(self._state)
         except Exception as exc:
             self.errored.emit(str(exc))
 
-    # TODO: put these static methods in analysis_service.py
     @staticmethod
-    def _fill_alpha(state: AppState, labels: dict) -> None:
+    def _fill_alpha(labels: dict) -> None:
         from skbio.diversity.alpha import shannon, simpson
         # compute shannon and simpson
         for run_id in labels.values():
@@ -379,36 +374,25 @@ class _AnalysisWorkerReal(QObject):
                 continue
 
     @staticmethod
-    def _fill_beta(state: AppState, labels: dict) -> None:
+    def _fill_bray_curtis(state: AppState, labels: dict) -> None:
         from skbio.diversity import beta_diversity # for bray-curtis
-        from skbio.diversity.beta import weighted_unifrac
-        from skbio import TreeNode # for weighted unifrac
 
         run_ids = list(labels.values())
         run_labels = list(labels.keys())
 
-        # get the union of feature IDs across runs
-        all_feature_ids: list[str] = []
+        # ASV counts of all feature ids per run
         counts_per_run: dict[int, dict[str, int]] = {}
 
-        for run_id in run_ids:
-            try:
-                rows = get_feature_counts(run_id)
-            except ServiceError:
-                rows = []
-            counts_per_run[run_id] = {r["feature_id"]: r["abundance"] for r in rows}
-            for fid in counts_per_run[run_id]:
-                if fid not in all_feature_ids:
-                    all_feature_ids.append(fid)
-
-        if not all_feature_ids:
+        try:
+            feature_ids = get_run_feature_ids(state.runs.keys[0]) # get the feature ids from the first run because they all share feat ids
+        except ServiceError:
             return
 
         # rows = samples (runs), columns = OTUs (features)
         # missing features for a run get count 0
         count_matrix = np.array(
             [
-                [counts_per_run[run_id].get(fid, 0) for fid in all_feature_ids]
+                [counts_per_run[run_id].get(fid, 0) for fid in feature_ids]
                 for run_id in run_ids
             ],
             dtype=int,
@@ -433,50 +417,11 @@ class _AnalysisWorkerReal(QObject):
                     store_beta_diversity(id_lo, id_hi, "bray_curtis", value)
                 except ServiceError:
                     continue
-
-        # with qiime2, all runs share the same reference phylogeny
-        # by using fragment insertion method
-        tree_node: TreeNode | None = None
-        for run_id in run_ids:
-            try:
-                tree_info = get_tree(run_id)
-            except ServiceError:
-                tree_info = None
-            if tree_info and tree_info.get("newick_path"):
-                try:
-                    tree_node = TreeNode.read(tree_info["newick_path"])
-                    break
-                except Exception:
-                    continue  # try the next run
-
-        if tree_node is None:
-            # skip unifrac silently
-            # TODO: make sure that te GUI knows this
-            return
-
-        # computes one pair at a time
-        for i, label_a in enumerate(run_labels):
-            for j, label_b in enumerate(run_labels):
-                if j <= i:
-                    continue
-                u_val = float(
-                    weighted_unifrac(
-                        count_matrix[i],
-                        count_matrix[j],
-                        all_feature_ids,
-                        tree_node,
-                    )
-                )
-                id_a  = labels[label_a]
-                id_b  = labels[label_b]
-                id_lo, id_hi = sorted([id_a, id_b])
-                try:
-                    store_beta_diversity(id_lo, id_hi, "unifrac", u_val)
-                except ServiceError:
-                    continue
+        
+        state.count_matrix = count_matrix # will be used later for unifrac
 
     @staticmethod
-    def _build_full_matrix(
+    def _build_dissimilarity_matrix(
         labels: list[str],
         flat: list[dict],
         run_id_map: dict[str, int],
@@ -542,22 +487,18 @@ class _AnalysisWorkerReal(QObject):
         }
     
     @staticmethod
-    def _fill_pcoa(state: AppState, labels: dict[str, int]) -> None:
+    def _fill_pcoa(state: AppState, labels: dict[str, int], metric: str) -> None:
         """
-        Derive and store PCoA coordinates from the already-computed beta
-        matrices.  Called after _fill_beta() so the matrices are in the DB.
+        Derive and store PCoA coordinates from the already-computed beta matrix.
         """
-        for metric in ("bray_curtis", "unifrac"):
-            try:
-                flat = get_beta_diversity_matrix(state.project_id, metric)
-            except ServiceError:
-                continue
+        try:
+            flat = get_beta_diversity_matrix(state.project_id, metric)
+        except ServiceError:
+            return
 
-            if not flat:
-                continue
-
-            run_labels = list(labels.keys())
-            matrix     = _AnalysisWorkerReal._build_full_matrix(run_labels, flat, labels)
+        if flat:
+            run_labels = state.run_labels
+            matrix     = _AnalysisWorkerReal._build_dissimilarity_matrix(run_labels, flat, labels)
             coords     = _AnalysisWorkerReal._pcoa_from_matrix(run_labels, matrix)
 
             for label, (pc1, pc2) in coords.items():
@@ -567,6 +508,105 @@ class _AnalysisWorkerReal(QObject):
                 except ServiceError:
                     continue
 
+
+class _PhylogenyWorker(QObject):
+    '''
+    this worker will run the full qiime2 preprocessing and create the tables ready for parsing
+    '''
+    finished = pyqtSignal(object)   # emits updated AppState
+    errored  = pyqtSignal(str)
+
+    def __init__(self, runner: QiimeRunner, state: AppState) -> None:
+        super().__init__()
+        self._runner = runner
+        self._state = state
+        self._bioproject = self._state.bioproject_id
+
+    def run(self):
+        try:
+            # first check to make sure it doesn't exist yet
+            try:
+                tree_info = get_tree(self._state.db_project_id)
+                self._state.tree_id = tree_info['tree_id']
+                self.finished.emit(self._state)
+            except ServiceError:
+                # only need to get one tree per bioproject
+                nwk = ""    
+                if self._state.single_runs:
+                    nwk = infer_phylogeny(runner=self._runner, bioproject=self._bioproject, lib_layout='single', callback=print)
+                elif self._state.paired_runs:
+                    nwk = infer_phylogeny(runner=self._runner, bioproject=self._bioproject, lib_layout='paired', callback=print)
+                # store newick file path in db
+                tree_info = create_tree_instance(project_id=self._state.db_project_id, newick_path=nwk)
+                self._state.tree_id = tree_info['tree_id']
+                self.finished.emit(self._state)
+        except Exception as exc:
+            self.errored.emit(str(exc))
+
+
+class _UnifracWorker(QObject):
+    
+    finished = pyqtSignal(object)   # emits updated AppState
+    errored  = pyqtSignal(str)
+
+    def __init__(self, runner: QiimeRunner, state: AppState) -> None:
+        super().__init__()
+        self._runner = runner
+        self._state = state
+        self._bioproject = self._state.bioproject_id
+        self._project_id = self._state.db_project_id
+
+    def run(self):
+        try:
+            if self._state.run_count > 1:
+                self._fill_unifrac(state=self._state, project_id=self._project_id, labels=self._state.lbs)
+                _AnalysisWorkerReal._fill_pcoa(state=self._state, labels=self._state.lbs, metric="unifrac")
+            self.finished.emit(self._state)
+        except Exception as exc:
+            self.errored.emit(str(exc))
+
+    @staticmethod
+    def _fill_unifrac(state: AppState, project_id: int, labels: dict):
+        from skbio.diversity.beta import weighted_unifrac
+        from skbio import TreeNode # for weighted unifrac
+        # with qiime2, all runs share the same reference phylogeny
+        # by using fragment insertion method
+        feature_ids = get_run_feature_ids(state.runs.keys[0])
+        tree_node: TreeNode | None = None
+        try:
+            tree_info = get_tree(project_id=project_id)
+        except ServiceError:
+            tree_info = None
+        if tree_info and tree_info.get("newick_path"):
+            tree_node = TreeNode.read(tree_info["newick_path"])
+
+        if tree_node is None:
+            # skip unifrac silently
+            # TODO: make sure that te GUI knows this?? (chung)
+            return
+
+        # compute one pair at a time
+        run_labels = state.run_labels
+        for i, label_a in enumerate(run_labels):
+            for j, label_b in enumerate(run_labels):
+                if j <= i:
+                    continue
+                u_val = float(
+                    weighted_unifrac(
+                        state.count_matrix[i],
+                        state.count_matrix[j],
+                        feature_ids,
+                        tree_node,
+                    )
+                )
+                id_a  = labels[label_a]
+                id_b  = labels[label_b]
+                id_lo, id_hi = sorted([id_a, id_b])
+                try:
+                    store_beta_diversity(id_lo, id_hi, "unifrac", u_val)
+                except ServiceError:
+                    continue
+    
 
 class _RiskPredictionWorker(QObject):
     finished = pyqtSignal(object)
@@ -881,15 +921,16 @@ class MainWindow(QMainWindow):
         # Persist project to DB so it appears on the profile page
         if self._current_user:
             try:
-                save_ncbi_project(
-                    user_id            = self._current_user["user_id"],
-                    bio_proj_accession = state.bioproject_id,
-                    title              = state.title or state.bioproject_id,
-                    runs               = [
-                        {"accession": accession, "layout": run_dict['library_layout']}
-                        for accession, run_dict in state.runs.items()
-                    ],
+                project = save_ncbi_project(
+                        user_id            = self._current_user["user_id"],
+                        bio_proj_accession = self._state.bioproject_id,
+                        title              = self._state.title or self._state.bioproject_id,
+                        runs               = [
+                            {"accession": accession, "layout": run_dict['library_layout']}
+                            for accession, run_dict in self._state.runs.items()
+                        ],
                 )
+                self._state.db_project_id = project["project_id"]
                 self._profile_page.refresh()
             except Exception:
                 pass   # DB failure must not interrupt analysis
@@ -914,7 +955,7 @@ class MainWindow(QMainWindow):
     # ── Download flow (fasterq-dump) ──────────────────────────────────────────
 
     def _start_download(self) -> None:
-        """Start fasterq-dump download; fall back to analysis-only if unavailable."""
+        """Start fasterq-dump download."""
         self._show_cancel(True)
         self._status_badge.setText("Downloading FASTQ files…")
         self._upload_page.update_pipeline_status("Downloading FASTQ files from NCBI…", "info")
@@ -946,7 +987,7 @@ class MainWindow(QMainWindow):
         # self._dl_thread.start()
 
     def _on_download_complete(self, state: "AppState") -> None:
-        """All (or some) runs downloaded — auto-populate Upload page, then run analysis."""
+        """All (or some) runs downloaded — auto-populate Upload page, then run pipeline."""
         self._show_cancel(False)
         self._state = state
         self._downloaded = True
@@ -995,7 +1036,7 @@ class MainWindow(QMainWindow):
 
     def _on_download_error(self, msg: str) -> None:
         self._show_cancel(False)
-        self._status_badge.setText("Download skipped — computing analysis…")
+        self._status_badge.setText("Error downloading — try uploading from disk")
         # Show a non-blocking info notice on the Upload page
         if "not found" in msg.lower() or "sra-tools" in msg.lower():
             self._upload_page.update_pipeline_status(
@@ -1009,7 +1050,6 @@ class MainWindow(QMainWindow):
         else:
             self._upload_page.update_pipeline_status(f"Download error: {msg[:80]}", "err")
         self._broadcast_state()
-        self._run_analysis()
 
     # ── Analysis flow ─────────────────────────────────────────────────────────
 
@@ -1056,8 +1096,73 @@ class MainWindow(QMainWindow):
         self._overview_page.load(state)
         self._broadcast_state()
 
+        # TODO: TEMPORARY
+        # self._on_phylogeny_run() 
+        # TODO: TEMPORARY -> have this run when Construct Phylogeny button is pushed
+
     def _on_analysis_error(self, msg: str) -> None:
         self._status_badge.setText(f"Analysis error: {msg[:60]}")
+
+
+    def _on_phylogeny_run(self) -> None:
+        self._status_badge.setText("Inferring phylogeny...")
+        self._status_badge.setObjectName("badge_yellow")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+        self._phylo_thread = QThread(self)
+        self._phylo_worker = _PhylogenyWorker(state=self._state, runner=self._runner)
+        self._phylo_worker.moveToThread(self._phylo_thread)
+        self._phylo_thread.started.connect(self._phylo_worker.run)
+        self._phylo_worker.finished.connect(self._on_phylo_complete)
+        self._phylo_worker.errored.connect(self._on_phylo_error)
+        self._phylo_worker.finished.connect(self._phylo_thread.quit)
+        self._phylo_worker.errored.connect(self._phylo_thread.quit)
+        self._phylo_thread.start()
+
+    def _on_phylo_complete(self, state: AppState) -> None:
+        self._status_badge.setText("Phylogeny complete")
+        self._status_badge.setObjectName("badge_green")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+        self._state.phylo_tree = True # TODO: i don't know if this is needed but just in case (chung you can remove)
+
+        # TODO: display the phylogenetic tree (chung)
+
+        # TODO: TEMPORARY
+        self._on_unifrac_run()
+        # TODO: TEMPORARY
+
+    def _on_phylo_error(self, msg: str) -> None:
+        self._status_badge.setText("Error inferring phylogeny")
+        self._status_badge.setObjectName("badge_red")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+
+
+    def _on_unifrac_run(self) -> None:
+        self._status_badge.setText("Computing Unifrac...")
+        self._status_badge.setObjectName("badge_yellow")
+        self._unifrac_thread = QThread(self)
+        self._unifrac_worker = _UnifracWorker(runner=self._runner, state=self._state)
+        self._unifrac_worker.moveToThread(self._unifrac_thread)
+        self._unifrac_thread.started.connect(self._unifrac_worker.run)
+        self._unifrac_worker.finished.connect(self._on_unifrac_complete)
+        self._unifrac_worker.errored.connect(self._on_unifrac_error)
+        self._unifrac_worker.finished.connect(self._unifrac_thread.quit)
+        self._unifrac_worker.errored.connect(self._unifrac_thread.quit)
+        self._unifrac_thread.start()
+
+    def _on_unifrac_complete(self) -> None:
+        self._status_badge.setText("Unifrac complete")
+        self._status_badge.setObjectName("badge_green")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+
+    def _on_unifrac_error(self, msg: str) -> None:
+        self._status_badge.setText("Error computing Unifrac")
+        self._status_badge.setObjectName("badge_red")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
 
     # ── Cancel ────────────────────────────────────────────────────────────────
 

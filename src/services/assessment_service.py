@@ -29,7 +29,7 @@ from src.db.repository import (
     get_run_exists_feature_table,
     get_run_exists_feature_count_table,
     create_tree,
-    get_tree_for_run,
+    get_tree_for_project,
     create_alpha_diversity,
     get_alpha_diversity_for_run,
     get_run_exists_alpha_table,
@@ -244,9 +244,8 @@ def ingest_run_data(
 ) -> dict:
     """
     Bulk-insert all QIIME2 output for a run in a single transaction.
-
-    Stores genus abundances, ASV features, feature counts, and optionally a
-    phylogenetic tree. If anything fails, everything rolls back.
+    Stores genus abundances, ASV features and feature counts. 
+    If anything fails, everything rolls back.
     """
     session = SessionLocal()
     try:
@@ -275,18 +274,12 @@ def ingest_run_data(
         if not get_run_exists_feature_count_table(session, run_id):
             create_feature_count_bulk(session, run_id=run_id, counts=feature_counts)
 
-        # Tree is optional — only store if a path was provided
-        tree = None
-        if newick_path:
-            tree = create_tree(session, run=run, newick_path=newick_path)
-
         session.commit()
         return {
             "run_id": run_id,
             "genera_inserted": len(genus_abundances),
             "features_inserted": len(features),
             "feature_counts_inserted": len(feature_counts),
-            "tree_path": tree.newick_path if tree else None,
         }
     except RepositoryError as e:
         session.rollback()
@@ -391,18 +384,18 @@ def get_is_run_in_feature_count(run_id: int) -> bool:
         session.close()
 
 # ==== Tree ====
-def get_tree(run_id: int) -> dict | None:
+def get_tree(project_id: int) -> dict | None:
     """
-    Return the phylogenetic tree path for a run, or None if not yet uploaded.
+    Return the phylogenetic tree path for a project, or None if not yet uploaded.
     """
     session = SessionLocal()
     try:
-        tree = get_tree_for_run(session, run_id)
+        tree = get_tree_for_project(session, project_id)
         if tree is None:
             return None
         return {
             "tree_id": tree.tree_id,
-            "run_id": tree.run_id,
+            "project_id": tree.project_id,
             "newick_path": tree.newick_path,
             "created_at": tree.created_at.isoformat(),
         }
@@ -755,3 +748,22 @@ def _risk_label(probability: float) -> str:
     if probability < 66.0:
         return "Moderate"
     return "High"
+
+
+def create_tree_instance(project_id: int, newick_path: str):
+
+    session = SessionLocal()
+
+    try:
+        tree = create_tree(session=session, project=project_id, newick_path=newick_path)
+        return {
+            'tree_id': tree['tree_id'],
+            'project_id': tree['project_id'],
+            'newick_path': tree['newick_path'],
+            'created_at': tree['created_at'],
+        }
+    except Exception as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+        return None

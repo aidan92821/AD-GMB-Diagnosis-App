@@ -10,7 +10,11 @@ modifies state — only MainWindow writes to it.
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import numpy as np
+    import numpy.typing as npt
 
 
 @dataclass
@@ -38,13 +42,14 @@ class  AppState:
     project_uid:    str = ""           # SRA study ID, e.g. SRP296181
     title:          str = ""
     organism:       str = ""
-    single_runs:  list = field(default_factory=list) # holds the current single end SRRs to download
-    paired_runs:  list = field(default_factory=list) # holds the current paired end SRRs to download
+    single_runs:   list = field(default_factory=list) # holds the current single end SRRs to download
+    paired_runs:   list = field(default_factory=list) # holds the current paired end SRRs to download
     run_count:      int = 0
+    tree_id:       Optional[int] = None
 
     # ── Runs ──────────────────────────────────────────────────────────────────
     runs: dict = field(default_factory=dict)
-    lbs:  dict = field(default_factory=dict) # R1, R2, R3, R4
+    lbs:  dict = field(default_factory=dict) # R1, R2, R3, R4 (label: run_id)
 
     # ── Analysis results (filled after QIIME2 runs) ───────────────────────────
     asv_count:      int  = 0
@@ -60,11 +65,12 @@ class  AppState:
     # Alpha diversity: run_label → {"shannon": (min,q1,med,q3,max), "simpson": ...}
     alpha_diversity:   dict[str, dict]                    = field(default_factory=dict)
     # Beta diversity matrices
-    beta_bray_curtis:  list[list[float]]                  = field(default_factory=list)
-    beta_unifrac:      list[list[float]]                  = field(default_factory=list)
-    # PCoA coordinates: run_label → (pc1, pc2)
-    pcoa_bray_curtis:  dict[str, tuple[float, float]]     = field(default_factory=dict)
-    pcoa_unifrac:      dict[str, tuple[float, float]]     = field(default_factory=dict)
+    count_matrix: Optional[npt.NDArray[np.int_]] | None = None
+    # beta_bray_curtis:  list[list[float]]                  = field(default_factory=list)
+    # beta_unifrac:      list[list[float]]                  = field(default_factory=list)
+    # # PCoA coordinates: run_label → (pc1, pc2)
+    # pcoa_bray_curtis:  dict[str, tuple[float, float]]     = field(default_factory=dict)
+    # pcoa_unifrac:      dict[str, tuple[float, float]]     = field(default_factory=dict)
 
     # ── Risk ──────────────────────────────────────────────────────────────────
     risk_result: Optional[dict] = None

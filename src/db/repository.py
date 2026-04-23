@@ -262,18 +262,18 @@ def get_run_exists_feature_count_table(session: Session, run_id: int) -> bool:
 
 
 # ==== TREE ====
-def create_tree(session: Session, *, run: Run, newick_path: str) -> Tree:
-    tree = Tree(run_id=run.run_id, newick_path=newick_path)
+def create_tree(session: Session, *, project: Project, newick_path: str) -> Tree:
+    tree = Tree(project_id=project.project_id, newick_path=newick_path)
     session.add(tree)
     session.flush()
     return tree
 
 
-def get_tree_for_run(session: Session, run_id: int) -> Tree | None:
-    """Return the most recent tree for a run or None if none exists."""
+def get_tree_for_project(session: Session, project_id: int) -> Tree | None:
+    """Return the most recent tree for a project or None if none exists."""
     stmt = (
         select(Tree)
-        .where(Tree.run_id == run_id)
+        .where(Tree.project_id == project_id)
         .order_by(desc(Tree.created_at), desc(Tree.tree_id))
         .limit(1)
     )

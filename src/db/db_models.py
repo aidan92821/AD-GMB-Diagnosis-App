@@ -47,6 +47,7 @@ class Project(Base):
     user = relationship("User", back_populates="projects")
     # Deleting a project cascades to all its runs and everything under them.
     runs = relationship("Run", back_populates="project", cascade="all, delete-orphan")
+    trees = relationship("Tree", back_populates="project", cascade="all, delete-orphan")
 
 
 # ==== RUN ====
@@ -69,7 +70,6 @@ class Run(Base):
     project           = relationship("Project", back_populates="runs")
     genus_data        = relationship("Genus",         back_populates="run", cascade="all, delete-orphan")
     features          = relationship("Feature",       back_populates="run", cascade="all, delete-orphan")
-    trees             = relationship("Tree",          back_populates="run", cascade="all, delete-orphan")
     alpha_diversities = relationship("AlphaDiversity", back_populates="run", cascade="all, delete-orphan")
     pcoa_coords       = relationship("PCoA", back_populates="run", cascade="all, delete-orphan")
     simulations       = relationship("Simulation",    back_populates="run", cascade="all, delete-orphan")
@@ -138,17 +138,17 @@ class FeatureCount(Base):
 
 
 # ==== TREE ====
-# Phylogenetic tree built from features for a run
+# Phylogenetic tree built from features for a project
 # The actual tree is stored as a .nwk file on disk and we store the path here
 class Tree(Base):
     __tablename__ = "tree"
 
     tree_id     = Column(Integer, primary_key=True)
-    run_id      = Column(Integer, ForeignKey("run.run_id"), nullable=False)
+    project_id  = Column(Integer, ForeignKey("project.project_id"), nullable=False)
     newick_path = Column(Text, nullable=False)  # path to .nwk file on disk
     created_at  = Column(DateTime(timezone=True), default=utcnow)
 
-    run = relationship("Run", back_populates="trees")
+    project = relationship("Project", back_populates="trees")
 
 
 # ==== ALPHA DIVERSITY ====
