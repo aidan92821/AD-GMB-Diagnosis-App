@@ -42,9 +42,12 @@ def preprocess_parse_import(runner: QiimeRunner, bioproject: str, lib_layout: st
                      lib_layout=lib_layout)
     
     # parse the data tables for db
-    abundances = parse_genus_table(genus=f"{data_dir}/qiime/{lib_layout}/genus-table.tsv")
-    feature_seqs = parse_feat_tax_seqs(tax=f"{data_dir}/qiime/{lib_layout}/taxonomy.tsv",
-                        seqs=f"{data_dir}/reps-tree/{lib_layout}/dna-sequences.fasta")
+    genus_path = f"{data_dir}/qiime/{lib_layout}/genus-table.tsv"
+    taxonomy_path = f"{data_dir}/qiime/{lib_layout}/taxonomy.tsv"
+    seqs_path = f"{data_dir}/reps-tree/{lib_layout}/dna-sequences.fasta"
+
+    abundances = parse_genus_table(genus=genus_path) if os.path.exists(genus_path) else {}
+    feature_seqs = parse_feat_tax_seqs(tax=taxonomy_path, seqs=seqs_path) if os.path.exists(seqs_path) else []
     feature_counts = parse_feature_counts(feat=f"{data_dir}/qiime/{lib_layout}/feature-table.tsv")
     
     # if project does not exist, make one and add runs

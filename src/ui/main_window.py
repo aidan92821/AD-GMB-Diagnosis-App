@@ -224,6 +224,10 @@ class _PipelineWorkerReal(QObject):
             s = line.strip()
             if not s:
                 return None
+            # Warnings
+            if '** WARNING:' in s:
+                warning_text = s.replace('** WARNING:', '').strip()
+                return f'⚠️  {warning_text}'
             # Phase headers: [single] Importing samples…
             if s.startswith('['):
                 return s

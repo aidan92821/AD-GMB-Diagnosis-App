@@ -52,8 +52,10 @@ class QiimeRunner:
             if callback:
                 callback(line)
 
-        process.wait()
+        return_code = process.wait()
         self._current_process = None
+        if return_code != 0:
+            raise subprocess.CalledProcessError(returncode=return_code, cmd=cmd)
 
 
     # for esearch
