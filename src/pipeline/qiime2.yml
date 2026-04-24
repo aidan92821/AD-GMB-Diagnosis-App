@@ -349,7 +349,7 @@ dependencies:
 - pyparsing=3.2.0
 - pysocks=1.7.1
 - pytest=8.3.3
-- python=3.10.14
+- python=3.10
 - python-dateutil=2.8.2
 - python-fastjsonschema=2.20.0
 - python-isal=1.7.1

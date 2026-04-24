@@ -74,10 +74,13 @@ def qc(runner: QiimeRunner, bioproject: str, lib_layout: str, callback=None):
 def dada2_denoise(runner: QiimeRunner, bioproject: str, lib_layout: str, trunc_f: int=None, trunc_r: int=None, trunc_s: int=None, callback=None):
 
     APP_DIR = Path(__file__).parent
-    io_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
+    io_dir = Path(APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve()
 
-    # get the number of cores from user's machine
-    # and calculate how many to use for the process
+    if (io_dir / "table.qza").exists():
+        return
+
+    io_dir = str(io_dir)
+
     cores = os.cpu_count()
     cores = str(max(cores - 4, 1))
 
@@ -289,9 +292,19 @@ def qiime_preprocess(runner: QiimeRunner, bioproject: str, lib_layout: str, call
         classify_taxa(runner, bioproject=bioproject, lib_layout=lib_layout, callback=callback)
         has_taxonomy = True
     except Exception as e:
-        _log(f"[{lib_layout}] Taxonomy classification not available: {e}")
-        _log(f"[{lib_layout}] ** WARNING: Taxonomy assignment skipped. Genus-level analysis will not be available. **")
-        _log(f"[{lib_layout}] ** To enable taxonomy, install q2-feature-classifier plugin in QIIME environment. **")
+        error_msg = str(e)
+        if "No such plugin: 'q2-feature-classifier'" in error_msg or "no plugin/command named 'feature-classifier'" in error_msg:
+            _log(f"[{lib_layout}] Taxonomy classification not available: q2-feature-classifier plugin has been removed from QIIME 2 2024.10")
+            _log(f"[{lib_layout}] ** WARNING: Taxonomy assignment skipped. Genus-level analysis will not be available. **")
+            _log(f"[{lib_layout}] ** q2-feature-classifier is no longer available in QIIME 2. **")
+            _log(f"[{lib_layout}] ** For taxonomy classification, use external tools like: **")
+            _log(f"[{lib_layout}] ** - BLAST against SILVA database **")
+            _log(f"[{lib_layout}] ** - Kraken 2 with SILVA database **")
+            _log(f"[{lib_layout}] ** - SINTAX with SILVA classifier **")
+            _log(f"[{lib_layout}] ** - QIIME 2 2023.9 or earlier (if repositories available) **")
+        else:
+            _log(f"[{lib_layout}] Taxonomy classification failed: {e}")
+            _log(f"[{lib_layout}] ** WARNING: Taxonomy assignment skipped. Genus-level analysis will not be available. **")
         has_taxonomy = False
 
     _log(f"[{lib_layout}] Creating output tables…")

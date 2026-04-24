@@ -36,7 +36,14 @@ def fetch_runs(email, runner, bioproject: str, srr=None, n_runs=1) -> tuple[list
     ], es_process=esearch, env=env)
     
     
-    info = pd.read_csv(result)
+    try:
+        info = pd.read_csv(result)
+    except Exception as e:
+        raise ValueError(
+            f"Failed to parse run info from NCBI for bioproject '{bioproject}': {e}. "
+            "The NCBI response may have been empty or malformed — check your email "
+            "setting and network connection."
+        ) from e
 
     if info.empty:
         raise ValueError(f"No run info returned from NCBI for bioproject '{bioproject}'. "

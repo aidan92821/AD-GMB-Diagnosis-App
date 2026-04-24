@@ -60,14 +60,14 @@ class QiimeRunner:
 
     # for esearch
     def es_run(self, args: list[str], env=None):
-        
+
         cmd = self.base_cmd + args
 
         process = subprocess.Popen(
             cmd,
             env=env,
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stderr=subprocess.PIPE,
             text=True,
             bufsize=1
         )
