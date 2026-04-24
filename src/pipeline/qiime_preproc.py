@@ -148,7 +148,8 @@ def infer_phylogeny(runner: QiimeRunner, bioproject: str, lib_layout: str, callb
             "--output-path", reps_tree_dir
         ])
     except Exception as e:
-        callback("** tree error:", str(e))
+        if callback:
+            callback(f"** tree error: {e}")
 
     # clean up the intermediate files
     runner.rm([f"{reps_tree_dir}/insertion-tree.qza",
@@ -264,6 +265,9 @@ def qiime_preprocess(runner: QiimeRunner, bioproject: str, lib_layout: str, call
 
     _log(f"[{lib_layout}] Creating output tables…")
     create_tables(runner, bioproject=bioproject, lib_layout=lib_layout, callback=callback)
+
+    _log(f"[{lib_layout}] Inferring phylogeny…")
+    infer_phylogeny(runner, bioproject=bioproject, lib_layout=lib_layout, callback=callback)
 
     _log(f"[{lib_layout}] Preprocessing complete.")
     
