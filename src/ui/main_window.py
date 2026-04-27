@@ -295,41 +295,60 @@ class _ParseWorkerReal(QObject):
         self._user = user
 
     def run(self):
-        try:            
+        try:
+            all_feature_seqs: list = []
+            all_genera: set = set()
+
             # parse the paired end tables
             if self._state.paired_runs:
                 abundances     = parse_genus_table(genus=f"{self._data_dir}/qiime/paired/genus-table.tsv")
                 feature_seqs   = parse_feat_tax_seqs(tax=f"{self._data_dir}/qiime/paired/taxonomy.tsv",
                                                    seqs=f"{self._data_dir}/reps-tree/paired/dna-sequences.fasta")
                 feature_counts = parse_feature_counts(feat=f"{self._data_dir}/qiime/paired/feature-table.tsv")
-                
+                all_feature_seqs.extend(feature_seqs)
+                for row in abundances.values():
+                    all_genera.update(g for g, _ in row)
+
                 for run, row in abundances.items():
                     try:
-                        _ = get_run_id_by_srr(run)
+                        run_id = get_run_id_by_srr(run)
+                        label = self._state.runs[run]['label']
+                        self._state.lbs[label] = run_id
                     except ServiceError:
                         db_run = create_run(project_id=self._state.db_project_id, source='ncbi', srr_accession=run,
                                             bio_proj_accession=self._state.bioproject_id, library_layout='paired')
-                        ingest_run_data(run_id=db_run['run_id'], genus_rows=row, features=feature_seqs, feature_counts=feature_counts[run])
-            
+                        run_id = db_run['run_id']
+                        label = self._state.runs[run]['label']
+                        self._state.lbs[label] = run_id
+                    ingest_run_data(run_id=run_id, genus_rows=row, features=feature_seqs,
+                                    feature_counts=feature_counts.get(run, {}))
+
             # parse the single end tables
             if self._state.single_runs:
                 abundances     = parse_genus_table(genus=f"{self._data_dir}/qiime/single/genus-table.tsv")
                 feature_seqs   = parse_feat_tax_seqs(tax=f"{self._data_dir}/qiime/single/taxonomy.tsv",
                                                    seqs=f"{self._data_dir}/reps-tree/single/dna-sequences.fasta")
                 feature_counts = parse_feature_counts(feat=f"{self._data_dir}/qiime/single/feature-table.tsv")
+                all_feature_seqs.extend(feature_seqs)
+                for row in abundances.values():
+                    all_genera.update(g for g, _ in row)
 
                 for run, row in abundances.items():
                     try:
                         run_id = get_run_id_by_srr(run)
-                        label = self._state.runs[run]['label'] # R1, R2, R3, or R4
+                        label = self._state.runs[run]['label']
                         self._state.lbs[label] = run_id
                     except ServiceError:
                         db_run = create_run(project_id=self._state.db_project_id, source='ncbi', srr_accession=run,
                                             bio_proj_accession=self._state.bioproject_id, library_layout='single')
                         run_id = db_run['run_id']
-                        label = self._state.runs[run]['label'] # R1, R2, R3, or R4
+                        label = self._state.runs[run]['label']
                         self._state.lbs[label] = run_id
-                    ingest_run_data(run_id=run_id, genus_rows=row, features=feature_seqs, feature_counts=feature_counts[run])
+                    ingest_run_data(run_id=run_id, genus_rows=row, features=feature_seqs,
+                                    feature_counts=feature_counts.get(run, {}))
+
+            self._state.asv_count   = len(all_feature_seqs)
+            self._state.genus_count = len(all_genera)
             
             # Save Newick string to DB before cleanup removes intermediate files
             nwk = getattr(self._state, '_nwk_string', '') or ''
@@ -418,9 +437,17 @@ class _AnalysisWorkerReal(QObject):
         counts_per_run: dict[int, dict[str, int]] = {}
 
         try:
-            feature_ids = get_run_feature_ids(state.runs.keys[0]) # get the feature ids from the first run because they all share feat ids
-        except ServiceError:
+            first_run_id = list(labels.values())[0]
+            feature_ids = get_run_feature_ids(first_run_id)
+        except (ServiceError, IndexError):
             return
+
+        for run_id in run_ids:
+            try:
+                rows = get_feature_counts(run_id)
+                counts_per_run[run_id] = {r['feature_id']: int(r['abundance']) for r in rows}
+            except ServiceError:
+                counts_per_run[run_id] = {}
 
         # rows = samples (runs), columns = OTUs (features)
         # missing features for a run get count 0
@@ -526,7 +553,7 @@ class _AnalysisWorkerReal(QObject):
         Derive and store PCoA coordinates from the already-computed beta matrix.
         """
         try:
-            flat = get_beta_diversity_matrix(state.project_id, metric)
+            flat = get_beta_diversity_matrix(state.db_project_id, metric)
         except ServiceError:
             return
 
@@ -605,14 +632,19 @@ class _UnifracWorker(QObject):
         from skbio import TreeNode # for weighted unifrac
         # with qiime2, all runs share the same reference phylogeny
         # by using fragment insertion method
-        feature_ids = get_run_feature_ids(state.runs.keys[0])
+        try:
+            first_run_id = list(labels.values())[0]
+            feature_ids = get_run_feature_ids(first_run_id)
+        except (ServiceError, IndexError):
+            return
         tree_node: TreeNode | None = None
         try:
             tree_info = get_tree(project_id=project_id)
         except ServiceError:
             tree_info = None
-        if tree_info and tree_info.get("newick_path"):
-            tree_node = TreeNode.read(tree_info["newick_path"])
+        if tree_info and tree_info.get("newick_string"):
+            import io
+            tree_node = TreeNode.read(io.StringIO(tree_info["newick_string"]))
 
         if tree_node is None:
             # skip unifrac silently
@@ -1114,6 +1146,7 @@ class MainWindow(QMainWindow):
 
     def _on_analysis_complete(self, state: AppState) -> None:
         self._state = state
+        self._state.pipeline_complete = True
         self._status_badge.setText("Analysis complete")
         self._status_badge.setObjectName("badge_green")
         self._status_badge.style().unpolish(self._status_badge)

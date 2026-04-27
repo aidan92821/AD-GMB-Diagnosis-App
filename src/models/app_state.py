@@ -75,6 +75,9 @@ class  AppState:
     # ── Risk ──────────────────────────────────────────────────────────────────
     risk_result: Optional[dict] = None
 
+    # ── Pipeline gate ─────────────────────────────────────────────────────────
+    pipeline_complete: bool = False
+
     # ── DB linkage (set when project is saved to database) ────────────────────
     db_project_id: Optional[int] = None
 
