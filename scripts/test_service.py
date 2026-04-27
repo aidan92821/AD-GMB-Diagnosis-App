@@ -25,6 +25,8 @@ from src.services.assessment_service import (
     get_user_email,
     create_simulation,
     get_simulations_for_run,
+    ingest_simulation_genus,
+    get_simulation_genus,
     ServiceError,
 )
 
@@ -76,11 +78,9 @@ result = ingest_run_data(
         {"feature_id": "asv002", "sequence": "GCTA", "taxonomy": "k__Bacteria;p__Bacteroidetes"},
     ],
     feature_counts={"asv001": 4821, "asv002": 3204},
-    newick_path="data/trees/run1.nwk",
 )
 assert result["genera_inserted"] == 3
 assert result["features_inserted"] == 2
-assert result["tree_path"] == "data/trees/run1.nwk"
 print("Test 3 PASS — ingest_run_data")
 
 # ── Test 4: get_project_overview ─────────────────────────────────────────────────
@@ -106,11 +106,9 @@ assert any(c["taxonomy"] is not None for c in counts)
 print("Test 6 PASS — get_feature_counts")
 
 # ── Test 7: get_tree ─────────────────────────────────────────────────────────────
-tree = get_tree(run1_id)
-assert tree is not None
-assert tree["newick_path"] == "data/trees/run1.nwk"
-assert get_tree(run2_id) is None   # run2 has no tree
-print("Test 7 PASS — get_tree")
+tree = get_tree(project_id)
+assert tree is None   # no tree created yet — trees are created by the phylogeny step
+print("Test 7 PASS — get_tree returns None when no tree exists")
 
 # ── Test 8: store and get alpha diversities ──────────────────────────────────────
 stored = store_alpha_diversities(run1_id, {"shannon": 2.45, "simpson": 0.88})
@@ -211,5 +209,19 @@ assert len(sims) == 1
 assert sims[0]["simulation_id"] == sim_id
 assert get_simulations_for_run(run2_id) == []
 print("Test 19 PASS — get_simulations_for_run")
+
+# ── Test 20: ingest_simulation_genus ─────────────────────────────────────────
+sim_genus = {"Bacteroides": 0.50, "Faecalibacterium": 0.10}
+result = ingest_simulation_genus(run_id=run1_id, simulation_id=sim_id, genus_rows=sim_genus)
+assert result["simulation_id"] == sim_id
+assert result["genera_inserted"] == 2
+print("Test 20 PASS — ingest_simulation_genus")
+
+# ── Test 21: get_simulation_genus ────────────────────────────────────────────
+fetched = get_simulation_genus(sim_id)
+assert len(fetched) == 2
+names = {g["genus"] for g in fetched}
+assert "Bacteroides" in names and "Faecalibacterium" in names
+print("Test 21 PASS — get_simulation_genus")
 
 print("\nAll tests passed.")
