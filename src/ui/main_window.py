@@ -266,6 +266,17 @@ class _PipelineWorkerReal(QObject):
                 qiime_preprocess(runner=self._runner, bioproject=self._bioproject,
                                     lib_layout='single', callback=cb)
 
+            # Infer phylogenetic tree (one per project — prefer single layout)
+            self.progress.emit("[phylogeny] Building phylogenetic tree…")
+            nwk = ""
+            if self._state.single_runs:
+                nwk = infer_phylogeny(runner=self._runner, bioproject=self._bioproject,
+                                      lib_layout='single', callback=cb)
+            elif self._state.paired_runs:
+                nwk = infer_phylogeny(runner=self._runner, bioproject=self._bioproject,
+                                      lib_layout='paired', callback=cb)
+            self._state._nwk_string = nwk
+
             self.finished.emit(self._state)
         except Exception as exc:
             self.errored.emit(str(exc))
@@ -320,9 +331,28 @@ class _ParseWorkerReal(QObject):
                         self._state.lbs[label] = run_id
                     ingest_run_data(run_id=run_id, genus_rows=row, features=feature_seqs, feature_counts=feature_counts[run])
             
+            # Save Newick string to DB before cleanup removes intermediate files
+            nwk = getattr(self._state, '_nwk_string', '') or ''
+            if not nwk:
+                # fallback: read from disk if pipeline was re-run without phylogeny step
+                for layout in ('single', 'paired'):
+                    nwk_path = Path(self._data_dir) / f"reps-tree/{layout}/tree.nwk"
+                    if nwk_path.exists():
+                        nwk = nwk_path.read_text().strip()
+                        break
+            if nwk and self._state.db_project_id:
+                try:
+                    tree_info = create_tree_instance(
+                        project_id=self._state.db_project_id, newick_string=nwk
+                    )
+                    if tree_info:
+                        self._state.tree_id = tree_info.get('tree_id')
+                except Exception:
+                    pass
+
             # remove all the intermediate files
             cleanup(self._state.bioproject_id)
-            
+
             self.finished.emit(self._state)
         except Exception as exc:
             self.errored.emit(str(exc))
@@ -540,8 +570,8 @@ class _PhylogenyWorker(QObject):
                     nwk = infer_phylogeny(runner=self._runner, bioproject=self._bioproject, lib_layout='single', callback=print)
                 elif self._state.paired_runs:
                     nwk = infer_phylogeny(runner=self._runner, bioproject=self._bioproject, lib_layout='paired', callback=print)
-                # store newick file path in db
-                tree_info = create_tree_instance(project_id=self._state.db_project_id, newick_path=nwk)
+                # store newick string in db
+                tree_info = create_tree_instance(project_id=self._state.db_project_id, newick_string=nwk)
                 self._state.tree_id = tree_info['tree_id']
                 self.finished.emit(self._state)
         except Exception as exc:

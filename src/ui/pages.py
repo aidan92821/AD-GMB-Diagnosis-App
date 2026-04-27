@@ -824,160 +824,243 @@ class UploadRunsPage(QWidget):
 
 class DiversityPage(QWidget):
     """
-    Alpha bar charts + Beta PCoA scatter + dissimilarity heatmap.
-    Reads only pre-computed values from the DB — no computation here.
+    Matplotlib-based Diversity page.
+    Stat cards + alpha bar chart + beta PCoA scatter + dissimilarity heatmap.
+    Only shows data after state.pipeline_complete is True.
     """
- 
+
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._state: AppState | None = None
         self._alpha_metric = "shannon"
         self._beta_metric  = "bray_curtis"
-        # Caches keyed the same way as the DB queries to avoid redundant calls
-        # when the user switches pills back and forth.
-        # None = queried, got nothing.  Missing key = not yet queried.
-        self._alpha_cache: dict[int, dict[str, float]]              = {}
-        self._beta_cache:  dict[str, list[list[float]] | None]      = {}
+        self._alpha_cache: dict[int, dict[str, float]]                      = {}
+        self._feat_cache:  dict[int, int]                                   = {}
+        self._beta_cache:  dict[str, list[list[float]] | None]              = {}
         self._pcoa_cache:  dict[str, dict[str, tuple[float, float]] | None] = {}
         self._build()
  
     # ── Layout ────────────────────────────────────────────────────────────────
  
+    # ── Layout ────────────────────────────────────────────────────────────────
+
     def _build(self) -> None:
-        root = QVBoxLayout(self)
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+        import matplotlib.pyplot as plt
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll)
+
+        inner_w = QWidget()
+        scroll.setWidget(inner_w)
+        root = QVBoxLayout(inner_w)
         root.setContentsMargins(28, 24, 28, 24)
-        root.setSpacing(16)
-        root.addWidget(page_title("Diversity"))
- 
-        # ── Alpha card ────────────────────────────────────────────────────
+        root.setSpacing(20)
+
+        # ── Header ────────────────────────────────────────────────────────
+        hdr = QHBoxLayout()
+        hdr.addWidget(page_title("Diversity"))
+        hdr.addStretch()
+        root.addLayout(hdr)
+
+        # ── Stat cards ────────────────────────────────────────────────────
+        stat_row = QHBoxLayout()
+        stat_row.setSpacing(12)
+        self._stat_asv     = self._make_stat_card("—", "ASVs detected",   "#6366F1")
+        self._stat_shannon = self._make_stat_card("—", "Avg Shannon",     "#10B981")
+        self._stat_simpson = self._make_stat_card("—", "Avg Simpson",     "#F59E0B")
+        self._stat_genera  = self._make_stat_card("—", "Genera detected", "#8B5CF6")
+        for w in (self._stat_asv, self._stat_shannon, self._stat_simpson, self._stat_genera):
+            stat_row.addWidget(w)
+        root.addLayout(stat_row)
+
+        # ── Alpha chart card ──────────────────────────────────────────────
         alpha_card = card()
         root.addWidget(alpha_card)
- 
-        alpha_hdr = QHBoxLayout()
-        alpha_hdr.addWidget(section_title("Alpha diversity"))
-        alpha_hdr.addWidget(
-            label_hint("One bar per run · within-sample species richness")
-        )
-        self._alpha_sw = PillSwitcher(
-            ["Shannon", "Simpson"], obj_name="metric_pill"
-        )
+        ah = QHBoxLayout()
+        ah.addWidget(section_title("Alpha diversity — per run"))
+        ah.addWidget(label_hint("Within-sample species richness and evenness"))
+        ah.addStretch()
+        self._alpha_sw = PillSwitcher(["Shannon", "Simpson"], obj_name="metric_pill")
         self._alpha_sw.on_changed(self._on_alpha_metric)
-        alpha_hdr.addStretch()
-        alpha_hdr.addWidget(self._alpha_sw)
-        alpha_card.layout().addLayout(alpha_hdr)
- 
-        self._alpha_desc = label_muted(
-            "Shannon entropy (bits) — higher = more even, more diverse community"
-        )
-        alpha_card.layout().addWidget(self._alpha_desc)
- 
-        self._alpha_bar = _AlphaBarWidget(data=[], colors=[])
-        self._alpha_bar.setFixedHeight(160)
-        alpha_card.layout().addWidget(self._alpha_bar)
- 
+        ah.addWidget(self._alpha_sw)
+        alpha_card.layout().addLayout(ah)
+
+        self._alpha_fig, self._alpha_ax = plt.subplots(1, 1, figsize=(9, 3), facecolor="none")
+        self._alpha_canvas = FigureCanvasQTAgg(self._alpha_fig)
+        self._alpha_canvas.setMinimumHeight(200)
+        alpha_card.layout().addWidget(self._alpha_canvas)
         self._alpha_placeholder = _placeholder(
-            "Fetch a project and run analysis to compute alpha diversity."
+            "Run the QIIME2 pipeline to compute alpha diversity."
         )
         alpha_card.layout().addWidget(self._alpha_placeholder)
- 
-        # ── Beta card ─────────────────────────────────────────────────────
+        self._alpha_canvas.hide()
+
+        # ── Beta section ──────────────────────────────────────────────────
         beta_hdr = QHBoxLayout()
-        beta_hdr.addWidget(section_title("Beta diversity"))
-        self._beta_sw = PillSwitcher(
-            ["Bray-Curtis", "UniFrac"], obj_name="metric_pill"
-        )
-        self._beta_sw.on_changed(self._on_beta_metric)
+        beta_hdr.addWidget(section_title("Beta diversity — between runs"))
         beta_hdr.addStretch()
+        self._beta_sw = PillSwitcher(["Bray-Curtis", "UniFrac"], obj_name="metric_pill")
+        self._beta_sw.on_changed(self._on_beta_metric)
+        beta_hdr.addWidget(QLabel("Metric:"))
         beta_hdr.addWidget(self._beta_sw)
- 
+        root.addLayout(beta_hdr)
+
         beta_row = QHBoxLayout()
-        beta_row.setSpacing(12)
- 
-        # PCoA scatter
+        beta_row.setSpacing(16)
+
         pcoa_card = card()
         pcoa_card.layout().addWidget(section_title("PCoA scatter"))
         pcoa_card.layout().addWidget(
-            label_hint(
-                "Runs projected by community dissimilarity. "
-                "Closer = more similar microbiomes."
-            )
+            label_hint("Runs projected by dissimilarity — closer = more similar")
         )
-        self._pcoa = PCoAWidget(coords={}, colors={})
-        self._pcoa.setMinimumHeight(200)
-        pcoa_card.layout().addWidget(self._pcoa)
-        self._pcoa_placeholder  = _placeholder(
-            "Run analysis to compute beta diversity."
-        )
-        self._pcoa_no_unifrac   = _placeholder(
-            "UniFrac requires a phylogenetic tree (Newick). "
-            "Re-run analysis with a tree file to enable this metric."
+        self._pcoa_fig = plt.figure(figsize=(5, 4), facecolor="none")
+        self._pcoa_ax  = self._pcoa_fig.add_subplot(111)
+        self._pcoa_canvas = FigureCanvasQTAgg(self._pcoa_fig)
+        self._pcoa_canvas.setMinimumHeight(280)
+        pcoa_card.layout().addWidget(self._pcoa_canvas)
+        self._pcoa_placeholder = _placeholder("Run the pipeline with ≥2 runs to compute PCoA.")
+        self._pcoa_no_unifrac  = _placeholder(
+            "UniFrac requires a phylogenetic tree — run phylogeny first."
         )
         pcoa_card.layout().addWidget(self._pcoa_placeholder)
         pcoa_card.layout().addWidget(self._pcoa_no_unifrac)
+        self._pcoa_canvas.hide()
+        self._pcoa_no_unifrac.hide()
         beta_row.addWidget(pcoa_card, 3)
- 
-        # Dissimilarity heatmap
+
         hm_card = card()
         hm_card.layout().addWidget(section_title("Dissimilarity heatmap"))
-        hm_card.layout().addWidget(
-            label_hint("Pairwise dissimilarity between runs.")
-        )
-        self._heatmap = HeatmapWidget(labels=[], values=[])
-        hm_card.layout().addWidget(self._heatmap, 0, Qt.AlignmentFlag.AlignLeft)
-        hm_card.layout().addWidget(
-            label_hint("0.0 = identical  ·  1.0 = maximally different")
-        )
-        self._hm_placeholder  = _placeholder(
-            "Run analysis to compute dissimilarity heatmap."
-        )
-        self._hm_no_unifrac   = _placeholder(
-            "UniFrac requires a phylogenetic tree."
-        )
+        hm_card.layout().addWidget(label_hint("0.0 = identical  ·  1.0 = maximally different"))
+        self._hm_fig = plt.figure(figsize=(4, 4), facecolor="none")
+        self._hm_ax  = self._hm_fig.add_subplot(111)
+        self._hm_canvas = FigureCanvasQTAgg(self._hm_fig)
+        self._hm_canvas.setMinimumHeight(280)
+        hm_card.layout().addWidget(self._hm_canvas)
+        self._hm_placeholder = _placeholder("Run the pipeline with ≥2 runs.")
+        self._hm_no_unifrac  = _placeholder("UniFrac requires a phylogenetic tree.")
         hm_card.layout().addWidget(self._hm_placeholder)
         hm_card.layout().addWidget(self._hm_no_unifrac)
+        self._hm_canvas.hide()
+        self._hm_no_unifrac.hide()
         beta_row.addWidget(hm_card, 2)
- 
-        # Single-run notice
+
         self._single_run_notice = _placeholder(
-            "Beta diversity requires at least two runs. "
-            "Add more runs to this project to enable this section."
+            "Beta diversity requires ≥2 runs. Add more runs to this project."
         )
- 
         beta_w = QWidget()
         beta_l = QVBoxLayout(beta_w)
         beta_l.setContentsMargins(0, 0, 0, 0)
         beta_l.setSpacing(10)
-        beta_l.addLayout(beta_hdr)
         beta_l.addLayout(beta_row)
         beta_l.addWidget(self._single_run_notice)
         root.addWidget(beta_w)
         root.addStretch()
- 
-        # Initial visibility
-        self._alpha_bar.hide()
-        self._alpha_placeholder.show()
-        self._pcoa.hide()
-        self._heatmap.hide()
-        self._pcoa_placeholder.hide()
-        self._hm_placeholder.hide()
-        self._pcoa_no_unifrac.hide()
-        self._hm_no_unifrac.hide()
-        self._single_run_notice.hide()
- 
+
+    @staticmethod
+    def _make_stat_card(value: str, label: str, accent: str) -> QFrame:
+        f = QFrame()
+        f.setObjectName("card")
+        f.setMinimumWidth(130)
+        l = QVBoxLayout(f)
+        l.setContentsMargins(16, 14, 16, 14)
+        l.setSpacing(4)
+        val_lbl = QLabel(value)
+        val_lbl.setStyleSheet(f"font-size:26px;font-weight:700;color:{accent};")
+        val_lbl.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        lbl = QLabel(label)
+        lbl.setObjectName("label_hint")
+        lbl.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        l.addWidget(val_lbl)
+        l.addWidget(lbl)
+        f._val_lbl = val_lbl
+        return f
+
+    @staticmethod
+    def _set_stat(frame: QFrame, value: str) -> None:
+        frame._val_lbl.setText(value)
+
     # ── Public API ────────────────────────────────────────────────────────────
- 
+
     def load(self, state: AppState) -> None:
         self._state = state
         self._alpha_cache.clear()
+        self._feat_cache.clear()
         self._beta_cache.clear()
         self._pcoa_cache.clear()
+
+        if not state.pipeline_complete:
+            self._reset_to_pending()
+            return
+
+        self._refresh_stats()
         self._refresh_alpha()
         self._refresh_beta()
- 
+
+    def _reset_to_pending(self) -> None:
+        for c in (self._stat_asv, self._stat_shannon, self._stat_simpson, self._stat_genera):
+            self._set_stat(c, "—")
+        self._alpha_canvas.hide()
+        self._alpha_placeholder.setText("Run the QIIME2 pipeline to compute diversity metrics.")
+        self._alpha_placeholder.show()
+        self._pcoa_canvas.hide()
+        self._pcoa_placeholder.setText("Run the QIIME2 pipeline to compute beta diversity.")
+        self._pcoa_placeholder.show()
+        self._pcoa_no_unifrac.hide()
+        self._hm_canvas.hide()
+        self._hm_placeholder.setText("Run the QIIME2 pipeline to compute beta diversity.")
+        self._hm_placeholder.show()
+        self._hm_no_unifrac.hide()
+        self._single_run_notice.hide()
+
+    # ── Stats ─────────────────────────────────────────────────────────────────
+
+    def _refresh_stats(self) -> None:
+        if not self._state or not self._state.lbs:
+            return
+        total_asvs   = 0
+        total_genera = 0
+        shannon_vals: list[float] = []
+        simpson_vals: list[float] = []
+
+        for label in self._state.run_labels:
+            run_id = self._state.lbs.get(label)
+            if run_id is None:
+                continue
+            if run_id not in self._feat_cache:
+                try:
+                    rows = get_feature_counts(run_id)
+                    self._feat_cache[run_id] = len(rows)
+                except ServiceError:
+                    self._feat_cache[run_id] = 0
+            total_asvs += self._feat_cache[run_id]
+
+            alpha = self._fetch_alpha(run_id)
+            if "shannon" in alpha:
+                shannon_vals.append(alpha["shannon"])
+            if "simpson" in alpha:
+                simpson_vals.append(alpha["simpson"])
+
+            try:
+                genera = get_genus_data(run_id)
+                total_genera += len(genera)
+            except ServiceError:
+                pass
+
+        self._set_stat(self._stat_asv, f"{total_asvs:,}")
+        self._set_stat(self._stat_shannon,
+            f"{sum(shannon_vals)/len(shannon_vals):.3f}" if shannon_vals else "—")
+        self._set_stat(self._stat_simpson,
+            f"{sum(simpson_vals)/len(simpson_vals):.3f}" if simpson_vals else "—")
+        self._set_stat(self._stat_genera, str(total_genera) if total_genera else "—")
+
     # ── Alpha ─────────────────────────────────────────────────────────────────
- 
+
     def _fetch_alpha(self, run_id: int) -> dict[str, float]:
-        """Cached fetch of {metric: scalar} for one run."""
         if run_id in self._alpha_cache:
             return self._alpha_cache[run_id]
         try:
@@ -987,70 +1070,69 @@ class DiversityPage(QWidget):
             result = {}
         self._alpha_cache[run_id] = result
         return result
- 
+
     def _refresh_alpha(self) -> None:
-        if not self._state or not self._state.run_labels:
-            self._alpha_bar.hide()
+        if not self._state or not self._state.lbs:
+            self._alpha_canvas.hide()
             self._alpha_placeholder.show()
             return
- 
-        run_colors = self._state.run_colors()
+
         bars:   list[tuple[str, float]] = []
         colors: list[str]               = []
- 
+        run_colors = self._state.run_colors()
+
         for label in self._state.run_labels:
             run_id = self._state.lbs.get(label)
             if run_id is None:
                 continue
-            value = self._fetch_alpha(run_id).get(self._alpha_metric)
-            if value is not None:
-                bars.append((label, value))
+            val = self._fetch_alpha(run_id).get(self._alpha_metric)
+            if val is not None:
+                bars.append((label, val))
                 colors.append(run_colors.get(label, "#6366F1"))
- 
+
         if not bars:
-            self._alpha_bar.hide()
+            self._alpha_canvas.hide()
             self._alpha_placeholder.show()
             return
- 
-        self._alpha_bar.set_data(bars)
-        self._alpha_bar._colors = colors
-        self._alpha_bar.update()
-        self._alpha_bar.show()
+
+        ax = self._alpha_ax
+        ax.clear()
+        labels_ax, values = zip(*bars)
+        xs = list(range(len(labels_ax)))
+        b  = ax.bar(xs, values, color=colors, width=0.5, zorder=3)
+        ax.bar_label(b, fmt="%.3f", padding=3, fontsize=9)
+        ax.set_xticks(xs)
+        ax.set_xticklabels(labels_ax, fontsize=10)
+        ylabel = ("Shannon entropy (bits)"
+                  if self._alpha_metric == "shannon"
+                  else "Simpson index (0–1)")
+        ax.set_ylabel(ylabel, fontsize=9)
+        ax.tick_params(axis="y", labelsize=8)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.set_facecolor("none")
+        ax.grid(axis="y", alpha=0.3, zorder=0)
+        self._alpha_fig.tight_layout(pad=1.0)
+        self._alpha_canvas.draw()
+        self._alpha_canvas.show()
         self._alpha_placeholder.hide()
- 
-        self._alpha_desc.setText(
-            "Shannon entropy (bits) — higher = more even, more diverse community"
-            if self._alpha_metric == "shannon" else
-            "Simpson index (0-1) — probability two random reads belong to different taxa"
-        )
- 
+
     # ── Beta ──────────────────────────────────────────────────────────────────
- 
+
     def _fetch_beta_matrix(self, metric: str) -> list[list[float]] | None:
-        """
-        Cached fetch of the full nxn dissimilarity matrix for the heatmap.
-        Reconstructs from flat upper-triangle DB rows — index mapping only,
-        no linear algebra.
-        """
         if metric in self._beta_cache:
             return self._beta_cache[metric]
- 
-        if not self._state or not hasattr(self._state, "project_id"):
+        if not self._state or not self._state.db_project_id:
             return None
- 
         try:
-            flat = get_beta_diversity_matrix(self._state.project_id, metric)
+            flat = get_beta_diversity_matrix(self._state.db_project_id, metric)
         except ServiceError:
             flat = []
- 
         if not flat:
             self._beta_cache[metric] = None
             return None
- 
-        # Reconstruct symmetric matrix for HeatmapWidget (index mapping only)
         labels    = self._state.run_labels
         n         = len(labels)
-        mat: list[list[float]] = [[0.0] * n for _ in range(n)]
+        mat       = [[0.0] * n for _ in range(n)]
         id_to_idx = {
             self._state.lbs[lbl]: i
             for i, lbl in enumerate(labels)
@@ -1063,77 +1145,52 @@ class DiversityPage(QWidget):
                 val       = float(row["value"])
                 mat[i][j] = val
                 mat[j][i] = val
- 
         self._beta_cache[metric] = mat
         return mat
- 
-    def _fetch_pcoa_coords(
-        self, metric: str
-    ) -> dict[str, tuple[float, float]] | None:
-        """
-        Cached fetch of pre-computed PCoA coordinates from the DB.
-        get_pcoa() returns [{"run_id": int, "pc1": float, "pc2": float}, ...]
-        We map run_id back to label using lbs (run label : run_id map).
-        """
+
+    def _fetch_pcoa_coords(self, metric: str) -> dict[str, tuple[float, float]] | None:
         if metric in self._pcoa_cache:
             return self._pcoa_cache[metric]
- 
-        if not self._state or not hasattr(self._state, "project_id"):
+        if not self._state or not self._state.db_project_id:
             return None
- 
         try:
-            rows = get_pcoa(self._state.project_id, metric)
+            rows = get_pcoa(self._state.db_project_id, metric)
         except ServiceError:
             rows = []
- 
         if not rows:
             self._pcoa_cache[metric] = None
             return None
- 
-        # Invert lbs: {run_id: label}
         id_to_label = {v: k for k, v in self._state.lbs.items()}
         coords = {
             id_to_label[r["run_id"]]: (float(r["pc1"]), float(r["pc2"]))
             for r in rows
             if r["run_id"] in id_to_label
         }
- 
         result = coords if coords else None
         self._pcoa_cache[metric] = result
         return result
- 
+
     def _refresh_beta(self) -> None:
-        # ── Single-run guard ──────────────────────────────────────────────
-        if self._state and getattr(self._state, "run_count", 1) < 2:
-            self._pcoa.hide()
-            self._heatmap.hide()
+        lbs_count = len(self._state.lbs) if self._state else 0
+        if lbs_count < 2:
+            self._pcoa_canvas.hide()
+            self._hm_canvas.hide()
             self._pcoa_placeholder.hide()
             self._hm_placeholder.hide()
             self._pcoa_no_unifrac.hide()
             self._hm_no_unifrac.hide()
             self._single_run_notice.show()
             return
- 
+
         self._single_run_notice.hide()
- 
-        if not self._state or not self._state.run_labels:
-            self._pcoa.hide()
-            self._heatmap.hide()
-            self._pcoa_placeholder.show()
-            self._hm_placeholder.show()
-            self._pcoa_no_unifrac.hide()
-            self._hm_no_unifrac.hide()
-            return
- 
-        matrix = self._fetch_beta_matrix(self._beta_metric)
-        coords = self._fetch_pcoa_coords(self._beta_metric)
-        missing = matrix is None or coords is None
-        unifrac_missing = self._beta_metric == "unifrac" and missing
- 
-        if missing:
-            self._pcoa.hide()
-            self._heatmap.hide()
-            if unifrac_missing:
+        metric = self._beta_metric
+        matrix = self._fetch_beta_matrix(metric)
+        coords = self._fetch_pcoa_coords(metric)
+
+        if matrix is None or coords is None:
+            self._pcoa_canvas.hide()
+            self._hm_canvas.hide()
+            if metric == "unifrac":
                 self._pcoa_placeholder.hide()
                 self._hm_placeholder.hide()
                 self._pcoa_no_unifrac.show()
@@ -1144,166 +1201,66 @@ class DiversityPage(QWidget):
                 self._pcoa_no_unifrac.hide()
                 self._hm_no_unifrac.hide()
             return
- 
-        # ── Render ────────────────────────────────────────────────────────
+
         self._pcoa_placeholder.hide()
         self._hm_placeholder.hide()
         self._pcoa_no_unifrac.hide()
         self._hm_no_unifrac.hide()
- 
-        self._pcoa.set_data(coords)
-        self._pcoa._colors = self._state.run_colors()
-        self._pcoa.update()
-        self._pcoa.show()
- 
-        self._heatmap.set_data(self._state.run_labels, matrix)
-        self._heatmap.show()
- 
+        self._render_pcoa(coords, metric)
+        self._render_heatmap(matrix)
+
+    def _render_pcoa(self, coords: dict, metric: str) -> None:
+        run_colors = self._state.run_colors()
+        ax = self._pcoa_ax
+        ax.clear()
+        for lbl, (x, y) in coords.items():
+            color = run_colors.get(lbl, "#6366F1")
+            ax.scatter(x, y, c=color, s=130, zorder=3, edgecolors="white", linewidths=0.8)
+            ax.annotate(lbl, (x, y), textcoords="offset points", xytext=(7, 4), fontsize=9)
+        title = "Bray-Curtis PCoA" if metric == "bray_curtis" else "UniFrac PCoA"
+        ax.set_title(title, fontsize=10, pad=6)
+        ax.set_xlabel("PC1", fontsize=9)
+        ax.set_ylabel("PC2", fontsize=9)
+        ax.tick_params(labelsize=8)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.set_facecolor("none")
+        self._pcoa_fig.tight_layout(pad=1.0)
+        self._pcoa_canvas.draw()
+        self._pcoa_canvas.show()
+
+    def _render_heatmap(self, matrix: list[list[float]]) -> None:
+        import numpy as np
+        labels = self._state.run_labels
+        ax = self._hm_ax
+        ax.clear()
+        mat = np.array(matrix)
+        im  = ax.imshow(mat, cmap="YlOrRd", vmin=0, vmax=1, aspect="auto")
+        ax.set_xticks(range(len(labels)))
+        ax.set_yticks(range(len(labels)))
+        ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=9)
+        ax.set_yticklabels(labels, fontsize=9)
+        for i in range(len(labels)):
+            for j in range(len(labels)):
+                ax.text(j, i, f"{mat[i, j]:.2f}",
+                        ha="center", va="center", fontsize=8,
+                        color="white" if mat[i, j] > 0.6 else "black")
+        self._hm_fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        ax.set_facecolor("none")
+        self._hm_fig.tight_layout(pad=1.0)
+        self._hm_canvas.draw()
+        self._hm_canvas.show()
+
     # ── Pill callbacks ────────────────────────────────────────────────────────
- 
+
     def _on_alpha_metric(self, label: str) -> None:
-        self._alpha_metric = (
-            "shannon" if "shannon" in label.lower() else "simpson"
-        )
-        self._refresh_alpha()
- 
+        self._alpha_metric = "shannon" if "shannon" in label.lower() else "simpson"
+        if self._state and self._state.pipeline_complete:
+            self._refresh_alpha()
+
     def _on_beta_metric(self, label: str) -> None:
-        self._beta_metric = (
-            "bray_curtis" if "bray" in label.lower() else "unifrac"
-        )
-        self._refresh_beta()
-    # """Alpha boxplots + Beta PCoA & heatmap — all driven by live AppState."""
-
-    # def __init__(self, parent=None):
-    #     super().__init__(parent)
-    #     self._state: AppState | None = None
-    #     self._alpha_metric = "shannon"
-    #     self._beta_metric  = "bray_curtis"
-    #     self._build()
-
-    # def _build(self):
-    #     root = QVBoxLayout(self)
-    #     root.setContentsMargins(28, 24, 28, 24)
-    #     root.setSpacing(16)
-    #     root.addWidget(page_title("Diversity"))
-
-    #     # ── Alpha card ──────────────────────────────────────────────────────
-    #     alpha_card = card()
-    #     root.addWidget(alpha_card)
-
-    #     hdr = QHBoxLayout()
-    #     hdr.addWidget(section_title("Alpha diversity"))
-    #     hdr.addWidget(label_hint("Each box = one run · shows within-sample species richness"))
-    #     self._alpha_sw = PillSwitcher(["Shannon", "Simpson"], obj_name="metric_pill")
-    #     self._alpha_sw.on_changed(self._on_alpha_metric)
-    #     hdr.addStretch(); hdr.addWidget(self._alpha_sw)
-    #     alpha_card.layout().addLayout(hdr)
-
-    #     self._boxplot = BoxPlotWidget(data={}, colors=[])
-    #     self._boxplot.setFixedHeight(150)
-    #     alpha_card.layout().addWidget(self._boxplot)
-    #     self._alpha_placeholder = _placeholder(
-    #         "Fetch a project and upload FASTQ files to compute alpha diversity.")
-    #     alpha_card.layout().addWidget(self._alpha_placeholder)
-
-    #     # ── Beta card ────────────────────────────────────────────────────────
-    #     beta_hdr = QHBoxLayout()
-    #     beta_hdr.addWidget(section_title("Beta diversity"))
-    #     self._beta_sw = PillSwitcher(["Bray-Curtis", "UniFrac"], obj_name="metric_pill")
-    #     self._beta_sw.on_changed(self._on_beta_metric)
-    #     beta_hdr.addStretch(); beta_hdr.addWidget(self._beta_sw)
-
-    #     beta_row = QHBoxLayout(); beta_row.setSpacing(12)
-
-    #     # PCoA
-    #     pcoa_card = card()
-    #     pcoa_card.layout().addWidget(section_title("PCoA scatter"))
-    #     pcoa_card.layout().addWidget(
-    #         label_hint("Runs plotted by community similarity. Closer = more similar microbiomes."))
-    #     self._pcoa = PCoAWidget(coords={}, colors={})
-    #     self._pcoa.setMinimumHeight(180)
-    #     pcoa_card.layout().addWidget(self._pcoa)
-    #     self._pcoa_placeholder = _placeholder(
-    #         "Upload FASTQ files to compute beta diversity PCoA.")
-    #     pcoa_card.layout().addWidget(self._pcoa_placeholder)
-    #     beta_row.addWidget(pcoa_card, 3)
-
-    #     # Heatmap
-    #     hm_card = card()
-    #     hm_card.layout().addWidget(section_title("Dissimilarity heatmap"))
-    #     hm_card.layout().addWidget(
-    #         label_hint("Pairwise dissimilarity between runs.  Darker = more similar."))
-    #     self._heatmap = HeatmapWidget(labels=[], values=[])
-    #     hm_card.layout().addWidget(self._heatmap, 0, Qt.AlignmentFlag.AlignLeft)
-    #     hm_card.layout().addWidget(label_hint("similar ←──────→ dissimilar"))
-    #     self._hm_placeholder = _placeholder(
-    #         "Upload FASTQ files to compute dissimilarity heatmap.")
-    #     hm_card.layout().addWidget(self._hm_placeholder)
-    #     beta_row.addWidget(hm_card, 2)
-
-    #     beta_w = QWidget()
-    #     beta_l = QVBoxLayout(beta_w)
-    #     beta_l.setContentsMargins(0, 0, 0, 0); beta_l.setSpacing(10)
-    #     beta_l.addLayout(beta_hdr); beta_l.addLayout(beta_row)
-    #     root.addWidget(beta_w)
-    #     root.addStretch()
-
-    # def load(self, state: AppState):
-    #     """Update all charts from live AppState."""
-    #     self._state = state
-    #     self._refresh_alpha()
-    #     self._refresh_beta()
-
-    # def _refresh_alpha(self):
-    #     if not self._state or not self._state.alpha_diversity:
-    #         self._boxplot.hide()
-    #         self._alpha_placeholder.show()
-    #         return
-
-    #     data   = {lbl: self._state.alpha_diversity[lbl][self._alpha_metric]
-    #               for lbl in self._state.run_labels
-    #               if lbl in self._state.alpha_diversity}
-    #     colors = list(self._state.run_colors().values())
-
-    #     self._boxplot.set_data(data)
-    #     self._boxplot._colors = colors
-    #     self._boxplot.update()
-    #     self._boxplot.show()
-    #     self._alpha_placeholder.hide()
-
-    # def _refresh_beta(self):
-    #     if not self._state or not self._state.beta_bray_curtis:
-    #         self._pcoa.hide()
-    #         self._pcoa_placeholder.show()
-    #         self._heatmap.hide()
-    #         self._hm_placeholder.show()
-    #         return
-
-    #     if self._beta_metric == "bray_curtis":
-    #         matrix = self._state.beta_bray_curtis
-    #         coords  = self._state.pcoa_bray_curtis
-    #     else:
-    #         matrix = self._state.beta_unifrac
-    #         coords  = self._state.pcoa_unifrac
-
-    #     self._pcoa.set_data(coords)
-    #     self._pcoa._colors = self._state.run_colors()
-    #     self._pcoa.update()
-    #     self._pcoa.show()
-    #     self._pcoa_placeholder.hide()
-
-    #     self._heatmap.set_data(self._state.run_labels, matrix)
-    #     self._heatmap.show()
-    #     self._hm_placeholder.hide()
-
-    # def _on_alpha_metric(self, label: str):
-    #     self._alpha_metric = "shannon" if "shannon" in label.lower() else "simpson"
-    #     self._refresh_alpha()
-
-    # def _on_beta_metric(self, label: str):
-    #     self._beta_metric = "bray_curtis" if "bray" in label.lower() else "unifrac"
-    #     self._refresh_beta()
-
+        self._beta_metric = "bray_curtis" if "bray" in label.lower() else "unifrac"
+        if self._state and self._state.pipeline_complete:
+            self._refresh_beta()
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  PAGE 4 – Taxonomy
@@ -1457,6 +1414,18 @@ class TaxonomyPage(QWidget):
 
         # emma load
         self._genus_cache.clear()       # invalidate cache on new project load
+
+        if not state.pipeline_complete:
+            self._bar.hide()
+            self._bar_placeholder.setText("Run the QIIME2 pipeline to compute taxonomy.")
+            self._bar_placeholder.show()
+            self._genus_table.hide()
+            self._genus_tbl_placeholder.setText("Run the QIIME2 pipeline to populate the genus table.")
+            self._genus_tbl_placeholder.show()
+            self._stacked.hide()
+            self._stacked_placeholder.setText("Run the QIIME2 pipeline to see composition.")
+            self._stacked_placeholder.show()
+            return
 
         labels = state.run_labels or ["—"]
 
@@ -1723,6 +1692,11 @@ class AsvTablePage(QWidget):
 
     def load(self, state: AppState):
         self._state = state
+
+        if not state.pipeline_complete:
+            self._show_placeholder()
+            return
+
         labels = state.run_labels or ["—"]
 
         new_sw = PillSwitcher(labels, obj_name="pill")

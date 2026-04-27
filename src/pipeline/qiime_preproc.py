@@ -133,42 +133,51 @@ def classify_taxa(runner: QiimeRunner, bioproject: str, lib_layout: str, callbac
     
 
 def infer_phylogeny(runner: QiimeRunner, bioproject: str, lib_layout: str, callback=None) -> str:
-
+    """
+    Build a rooted phylogenetic tree from representative sequences using
+    MAFFT + FastTree2 (no reference DB download required).
+    Returns the Newick string, or '' on failure.
+    Skips inference if tree.nwk already exists.
+    """
     APP_DIR = Path(__file__).parent
-    ref_phylo_db_dir_path = str((APP_DIR / REF_PHYLO_DB_DIR).resolve())
-    reps_tree_dir = str((APP_DIR / f"data/{bioproject}/reps-tree/{lib_layout}").resolve())
+    reps_tree_dir = (APP_DIR / f"data/{bioproject}/reps-tree/{lib_layout}").resolve()
+    nwk_file = reps_tree_dir / "tree.nwk"
 
-    # get the number of cores from user's machine
-    # and calculate how many to use for the process
-    cores = os.cpu_count()
-    cores = str(max(cores - 4, 1))
+    if nwk_file.exists():
+        if callback:
+            callback(f"[{lib_layout}] tree.nwk already exists — skipping phylogeny inference.")
+        return nwk_file.read_text().strip()
+
+    s = str(reps_tree_dir)
+    cores = str(max(os.cpu_count() - 4, 1))
 
     try:
         runner.run([
-            'qiime', 'fragment-insertion', 'sepp',
-            '--i-representative-sequences', f"{reps_tree_dir}/rep-seqs.qza",
-            '--i-reference-database', f"{ref_phylo_db_dir_path}/{REF_PHYLO_DB}",
-            '--o-tree', f"{reps_tree_dir}/insertion-tree.qza",
-            '--o-placements', f"{reps_tree_dir}/insertion-placements.qza",
-            '--p-threads', cores
-        ])
+            'qiime', 'phylogeny', 'align-to-tree-mafft-fasttree',
+            '--i-sequences',        f"{s}/rep-seqs.qza",
+            '--o-alignment',        f"{s}/aligned-rep-seqs.qza",
+            '--o-masked-alignment', f"{s}/masked-aligned-rep-seqs.qza",
+            '--o-tree',             f"{s}/unrooted-tree.qza",
+            '--o-rooted-tree',      f"{s}/rooted-tree.qza",
+            '--p-n-threads',        cores,
+        ], callback=callback)
 
-        # produce the newick string from the inferred tree
         runner.run([
             'qiime', 'tools', 'export',
-            '--input-path', f"{reps_tree_dir}/insertion-tree.qza",
-            "--output-path", reps_tree_dir
-        ])
+            '--input-path',  f"{s}/rooted-tree.qza",
+            '--output-path', s,
+        ], callback=callback)
     except Exception as e:
         if callback:
-            callback(f"** tree error: {e}")
+            callback(f"[{lib_layout}] Phylogeny inference failed: {e}")
+        return ""
 
-    # clean up the intermediate files
-    runner.rm([f"{reps_tree_dir}/insertion-tree.qza",
-               f"{reps_tree_dir}/insertion-placements.qza",
-               f"{reps_tree_dir}/rep-seqs.qza"])
-    
-    return f"{reps_tree_dir}/tree.nwk"
+    # clean up intermediate QZA files
+    for fname in ("aligned-rep-seqs.qza", "masked-aligned-rep-seqs.qza",
+                  "unrooted-tree.qza", "rooted-tree.qza"):
+        (reps_tree_dir / fname).unlink(missing_ok=True)
+
+    return nwk_file.read_text().strip() if nwk_file.exists() else ""
 
 
 # lib_layout: 'paired' or 'single'
@@ -253,13 +262,6 @@ def qiime_preprocess(runner: QiimeRunner, bioproject: str, lib_layout: str, call
 
     APP_DIR = Path(__file__).parent
 
-    # ensure reference phylogeny DB is present
-    ref_phylo_db_dir_path = str((APP_DIR / REF_PHYLO_DB_DIR).resolve())
-    os.makedirs(ref_phylo_db_dir_path, exist_ok=True)
-    if REF_PHYLO_DB not in os.listdir(ref_phylo_db_dir_path):
-        _log("Getting reference phylogeny database…")
-        get_ref_phylo_db()
-
     # ensure SILVA classifier is present
     silva_path = (APP_DIR / SILVA_CLASSIFIER_DIR / SILVA_CLASSIFIER).resolve()
     if not silva_path.exists():
@@ -272,7 +274,7 @@ def qiime_preprocess(runner: QiimeRunner, bioproject: str, lib_layout: str, call
     _log(f"[{lib_layout}] Running QC / demux summary…")
     trunc = qc(runner, bioproject=bioproject, lib_layout=lib_layout, callback=callback)
 
-    _log(f"[{lib_layout}] DADA2 denoising…")
+    _log(f"[{lib_layout}] Denoising…")
     if lib_layout == 'paired':
         dada2_denoise(runner, bioproject=bioproject, lib_layout=lib_layout,
                       trunc_f=trunc['forward'], trunc_r=trunc['reverse'], callback=callback)
@@ -280,35 +282,39 @@ def qiime_preprocess(runner: QiimeRunner, bioproject: str, lib_layout: str, call
         dada2_denoise(runner, bioproject=bioproject, lib_layout=lib_layout,
                       trunc_s=trunc['single'], callback=callback)
 
-    # if DADA2 failed, do not continue — rep-seqs.qza won't exist
     io_dir = APP_DIR / f"data/{bioproject}/qiime/{lib_layout}"
+    reps_tree_dir = APP_DIR / f"data/{bioproject}/reps-tree/{lib_layout}"
+
+    # If denoising did not produce table.qza, nothing left to do
     if not (io_dir / "table.qza").exists():
-        _log(f"[{lib_layout}] DADA2 did not produce output — skipping taxonomy and table steps. "
-             "Check that the selected run contains 16S amplicon data (not WGS/metatranscriptomic).")
+        _log(f"[{lib_layout}] Denoising did not produce output — skipping remaining steps. "
+             "Check that the run contains 16S amplicon data.")
         return
 
+    # Taxonomy — skip if already done (rep-seqs.qza may have been moved on a re-run)
     _log(f"[{lib_layout}] Classifying taxa…")
-    try:
-        classify_taxa(runner, bioproject=bioproject, lib_layout=lib_layout, callback=callback)
+    if (io_dir / "taxonomy.qza").exists():
+        _log(f"[{lib_layout}] Taxonomy already classified — skipping.")
         has_taxonomy = True
-    except Exception as e:
-        error_msg = str(e)
-        if "No such plugin: 'q2-feature-classifier'" in error_msg or "no plugin/command named 'feature-classifier'" in error_msg:
-            _log(f"[{lib_layout}] Taxonomy classification not available: q2-feature-classifier plugin has been removed from QIIME 2 2024.10")
-            _log(f"[{lib_layout}] ** WARNING: Taxonomy assignment skipped. Genus-level analysis will not be available. **")
-            _log(f"[{lib_layout}] ** q2-feature-classifier is no longer available in QIIME 2. **")
-            _log(f"[{lib_layout}] ** For taxonomy classification, use external tools like: **")
-            _log(f"[{lib_layout}] ** - BLAST against SILVA database **")
-            _log(f"[{lib_layout}] ** - Kraken 2 with SILVA database **")
-            _log(f"[{lib_layout}] ** - SINTAX with SILVA classifier **")
-            _log(f"[{lib_layout}] ** - QIIME 2 2023.9 or earlier (if repositories available) **")
-        else:
+    elif not (io_dir / "rep-seqs.qza").exists() and (reps_tree_dir / "rep-seqs.qza").exists():
+        _log(f"[{lib_layout}] rep-seqs.qza already moved to reps-tree — skipping taxonomy re-run.")
+        has_taxonomy = False
+    else:
+        try:
+            classify_taxa(runner, bioproject=bioproject, lib_layout=lib_layout, callback=callback)
+            has_taxonomy = True
+        except Exception as e:
             _log(f"[{lib_layout}] Taxonomy classification failed: {e}")
             _log(f"[{lib_layout}] ** WARNING: Taxonomy assignment skipped. Genus-level analysis will not be available. **")
-        has_taxonomy = False
+            has_taxonomy = False
 
+    # Create output tables — skip if already done
     _log(f"[{lib_layout}] Creating output tables…")
-    create_tables(runner, bioproject=bioproject, lib_layout=lib_layout, has_taxonomy=has_taxonomy, callback=callback)
+    if (io_dir / "feature-table.tsv").exists():
+        _log(f"[{lib_layout}] Output tables already exist — skipping.")
+    else:
+        create_tables(runner, bioproject=bioproject, lib_layout=lib_layout,
+                      has_taxonomy=has_taxonomy, callback=callback)
 
     _log(f"[{lib_layout}] Preprocessing complete.")
     
