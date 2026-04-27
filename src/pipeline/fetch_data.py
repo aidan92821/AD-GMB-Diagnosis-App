@@ -17,6 +17,85 @@ if TYPE_CHECKING:
 # this function downloads one run at a time if the run is specified
 # it can download up to 4 runs at a time if no run is specified
 # returns two lists of strings: paired end runs and single end runs (SRR Accessions)
+def _fetch_runs_from_ebi(bioproject: str, srr: str = None, n_runs: int = 1) -> tuple[list[str], list[str], dict]:
+    """Fetch run metadata from EBI ENA as a fallback when NCBI is unavailable."""
+    fields = ",".join([
+        "run_accession",
+        "library_layout",
+        "library_strategy",
+        "instrument_platform",
+        "instrument_model",
+        "sample_accession",
+        "scientific_name",
+        "read_count",
+        "base_count",
+        "study_accession",
+    ])
+    api_url = (
+        f"https://www.ebi.ac.uk/ena/portal/api/filereport"
+        f"?accession={bioproject}&result=read_run&fields={fields}&format=json"
+    )
+    try:
+        with urllib.request.urlopen(api_url, timeout=30) as resp:
+            data = json.loads(resp.read())
+    except Exception as e:
+        raise ValueError(f"EBI ENA API lookup failed for '{bioproject}': {e}") from e
+
+    if not data:
+        raise ValueError(f"No run info returned from EBI ENA for bioproject '{bioproject}'.")
+
+    if srr:
+        matched = [r for r in data if r.get("run_accession") == srr]
+        data = matched if matched else data[:1]
+    else:
+        data = data[:n_runs]
+
+    if not data:
+        raise ValueError(
+            f"No matching runs found for bioproject '{bioproject}'"
+            + (f" / SRR '{srr}'" if srr else "") + "."
+        )
+
+    runs = []
+    for i, rec in enumerate(data, start=1):
+        layout = str(rec.get("library_layout", "")).upper()
+        if layout not in {"PAIRED", "SINGLE"}:
+            layout = "PAIRED"
+        runs.append({
+            'run_accession'    : rec.get("run_accession", ""),
+            'label'            : f"R{i}",
+            'read_count'       : int(rec.get("read_count") or 0),
+            'base_count'       : int(rec.get("base_count") or 0),
+            'library_layout'   : layout,
+            'library_strategy' : rec.get("library_strategy", ""),
+            'platform'         : rec.get("instrument_platform", ""),
+            'instrument'       : rec.get("instrument_model", ""),
+            'sample_accession' : rec.get("sample_accession", ""),
+            'organism'         : rec.get("scientific_name", ""),
+            'uploaded'         : False,
+            'qiime_error'      : ""
+        })
+
+    first     = data[0]
+    sra_study = str(first.get("study_accession", "")).strip()
+    organism  = str(first.get("scientific_name", "")).strip()
+
+    project = {
+        'bioproject_id' : bioproject,
+        'project_uid'   : "",
+        'sra_study_id'  : sra_study,
+        'title'         : f"{bioproject}",
+        'description'   : "",
+        'organism'      : organism,
+        'runs'          : runs,
+    }
+
+    paired_runs = [r['run_accession'] for r in runs if r['library_layout'] == 'PAIRED']
+    single_runs = [r['run_accession'] for r in runs if r['library_layout'] == 'SINGLE']
+
+    return single_runs, paired_runs, project
+
+
 def fetch_runs(email, runner, bioproject: str, srr=None, n_runs=1) -> tuple[list[str], list[str], dict]:
 
     env = os.environ.copy()
@@ -26,7 +105,7 @@ def fetch_runs(email, runner, bioproject: str, srr=None, n_runs=1) -> tuple[list
 
     # fetch information about the runs in the bioproject into a csv
     esearch = runner.es_run([
-        "esearch", 
+        "esearch",
         "-db", "sra",
         "-query", bioproject
     ], env=env)
@@ -34,20 +113,16 @@ def fetch_runs(email, runner, bioproject: str, srr=None, n_runs=1) -> tuple[list
         "efetch",
         "-format", "runinfo"
     ], es_process=esearch, env=env)
-    
-    
+
     try:
         info = pd.read_csv(result)
     except Exception as e:
-        raise ValueError(
-            f"Failed to parse run info from NCBI for bioproject '{bioproject}': {e}. "
-            "The NCBI response may have been empty or malformed — check your email "
-            "setting and network connection."
-        ) from e
+        print(f"NCBI parse failed for '{bioproject}': {e}. Falling back to EBI ENA…")
+        return _fetch_runs_from_ebi(bioproject, srr=srr, n_runs=n_runs)
 
     if info.empty:
-        raise ValueError(f"No run info returned from NCBI for bioproject '{bioproject}'. "
-                         "Check that the accession is valid and your email is set.")
+        print(f"NCBI returned empty data for '{bioproject}'. Falling back to EBI ENA…")
+        return _fetch_runs_from_ebi(bioproject, srr=srr, n_runs=n_runs)
 
     # only bioproject is specified
     if srr is None or info.loc[info['Run'] == srr].empty:

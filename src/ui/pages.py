@@ -1800,53 +1800,267 @@ class AsvTablePage(QWidget):
 # ═════════════════════════════════════════════════════════════════════════════
 
 class PhylogenyPage(QWidget):
+    """
+    Renders the project's rooted phylogenetic tree (Newick) as a rectangular
+    phylogram using matplotlib.  Up to MAX_TIPS tips are shown; larger trees
+    are subsampled at regular intervals so the topology is representative.
+    """
+    MAX_TIPS = 70
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._state: AppState | None = None
         self._build()
 
-    def _build(self):
-        root = QVBoxLayout(self)
-        root.setContentsMargins(28, 24, 28, 24)
-        root.setSpacing(14)
+    # ── Layout ────────────────────────────────────────────────────────────────
 
+    def _build(self):
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+        from matplotlib.figure import Figure
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll)
+
+        inner_w = QWidget()
+        scroll.setWidget(inner_w)
+        root = QVBoxLayout(inner_w)
+        root.setContentsMargins(28, 24, 28, 24)
+        root.setSpacing(20)
+
+        # Header
         hdr = QHBoxLayout()
         hdr.addWidget(page_title("Phylogenetic Tree"))
-        hdr.addWidget(label_hint("derived from ASV sequences"))
-        self._run_sw = PillSwitcher(["—"], obj_name="pill")
-        hdr.addStretch(); hdr.addWidget(self._run_sw)
+        hdr.addWidget(label_hint("inferred from ASV representative sequences"))
+        hdr.addStretch()
         root.addLayout(hdr)
 
+        # Stat cards
+        stat_row = QHBoxLayout()
+        stat_row.setSpacing(12)
+        self._stat_tips   = self._make_stat("—", "Total Tips",      "#6366F1")
+        self._stat_nodes  = self._make_stat("—", "Internal Nodes",  "#10B981")
+        self._stat_depth  = self._make_stat("—", "Max Branch Depth","#F59E0B")
+        for w in (self._stat_tips, self._stat_nodes, self._stat_depth):
+            stat_row.addWidget(w)
+        stat_row.addStretch()
+        root.addLayout(stat_row)
+
+        # Tree card
         tree_card = card()
         root.addWidget(tree_card, 1)
-        self._tree_lbl = QLabel("Fetch a project and upload FASTQ files to see the phylogenetic tree.")
-        self._tree_lbl.setObjectName("tree_text")
-        self._tree_lbl.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        self._tree_lbl.setWordWrap(True)
-        tree_card.layout().addWidget(self._tree_lbl, 1)
-        root.addStretch()
+
+        self._placeholder = QLabel(
+            "Run the QIIME2 pipeline to generate the phylogenetic tree.")
+        self._placeholder.setObjectName("label_hint")
+        self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._placeholder.setWordWrap(True)
+        tree_card.layout().addWidget(self._placeholder)
+
+        fig_h = max(self.MAX_TIPS * 0.18, 8)
+        self._fig = Figure(figsize=(10, fig_h), tight_layout=True)
+        self._canvas = FigureCanvasQTAgg(self._fig)
+        self._canvas.hide()
+        tree_card.layout().addWidget(self._canvas, 1)
+
+        self._note = QLabel("")
+        self._note.setObjectName("label_hint")
+        self._note.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._note.hide()
+        tree_card.layout().addWidget(self._note)
+
+    @staticmethod
+    def _make_stat(value: str, label: str, accent: str) -> QFrame:
+        f = QFrame()
+        f.setObjectName("card")
+        f.setMinimumWidth(140)
+        lay = QVBoxLayout(f)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(4)
+        val_lbl = QLabel(value)
+        val_lbl.setStyleSheet(f"font-size:26px;font-weight:700;color:{accent};")
+        lbl = QLabel(label)
+        lbl.setObjectName("label_hint")
+        lay.addWidget(val_lbl)
+        lay.addWidget(lbl)
+        f._val_lbl = val_lbl
+        return f
+
+    @staticmethod
+    def _set_stat(frame: QFrame, value: str) -> None:
+        frame._val_lbl.setText(value)
+
+    # ── Public API ────────────────────────────────────────────────────────────
 
     def load(self, state: AppState):
         self._state = state
-        labels = state.run_labels or ["—"]
 
-        new_sw = PillSwitcher(labels, obj_name="pill")
-        new_sw.on_changed(self._on_run)
-        hdr_lay = self.layout().itemAt(0).layout()
-        old = hdr_lay.itemAt(hdr_lay.count() - 1)
-        if old and old.widget(): old.widget().deleteLater()
-        hdr_lay.addWidget(new_sw)
-        self._run_sw = new_sw
-
-        first = labels[0] if labels else "—"
-        self._on_run(first)
-
-    def _on_run(self, run: str):
-        if not self._state or not self._state.phylo_tree:
-            self._tree_lbl.setText("No tree data yet. Upload FASTQ files to compute.")
+        if not state.pipeline_complete:
+            self._show_placeholder(
+                "Run the QIIME2 pipeline to generate the phylogenetic tree.")
             return
-        self._tree_lbl.setText(
-            self._state.phylo_tree.get(run, "No tree for this run."))
+
+        newick = self._fetch_newick(state)
+        if not newick:
+            self._show_placeholder("No phylogenetic tree found for this project.")
+            return
+
+        self._render(newick)
+
+    # ── Internals ─────────────────────────────────────────────────────────────
+
+    def _show_placeholder(self, msg: str) -> None:
+        self._placeholder.setText(msg)
+        self._placeholder.show()
+        self._canvas.hide()
+        self._note.hide()
+        for w in (self._stat_tips, self._stat_nodes, self._stat_depth):
+            self._set_stat(w, "—")
+
+    @staticmethod
+    def _fetch_newick(state: AppState) -> str:
+        """Try DB first, then fall back to disk."""
+        if state.db_project_id:
+            try:
+                from src.services.assessment_service import get_tree
+                info = get_tree(state.db_project_id)
+                nwk = info.get("newick_string", "")
+                if nwk:
+                    return nwk
+            except Exception:
+                pass
+
+        # Disk fallback for cases where the pipeline just ran
+        from pathlib import Path
+        base = Path(__file__).parent.parent / "pipeline" / "data"
+        if state.bioproject_id:
+            for layout in ("single", "paired"):
+                p = base / state.bioproject_id / "reps-tree" / layout / "tree.nwk"
+                if p.exists():
+                    return p.read_text().strip()
+        return ""
+
+    def _render(self, newick: str) -> None:
+        import io, random
+        from skbio import TreeNode
+
+        try:
+            tree = TreeNode.read(io.StringIO(newick))
+        except Exception as exc:
+            self._show_placeholder(f"Could not parse tree: {exc}")
+            return
+
+        all_tips = list(tree.tips())
+        n_total  = len(all_tips)
+        n_internal = sum(1 for _ in tree.non_tips())
+
+        # Max root-to-tip depth
+        def _root_dist(node):
+            d = 0.0
+            while node.parent:
+                d += node.length or 0.0
+                node = node.parent
+            return d
+
+        try:
+            max_depth = max(_root_dist(t) for t in all_tips)
+            self._set_stat(self._stat_depth, f"{max_depth:.4f}")
+        except Exception:
+            self._set_stat(self._stat_depth, "—")
+
+        self._set_stat(self._stat_tips,  f"{n_total:,}")
+        self._set_stat(self._stat_nodes, f"{n_internal:,}")
+
+        # Subsample for display
+        note_txt = ""
+        if n_total > self.MAX_TIPS:
+            step = max(1, n_total // self.MAX_TIPS)
+            keep = {t.name for t in all_tips[::step]}
+            tree = tree.shear(keep)
+            n_shown = len(list(tree.tips()))
+            note_txt = (
+                f"Displaying {n_shown} of {n_total:,} tips "
+                f"(every {step}th tip sampled for readability)"
+            )
+
+        self._fig.clear()
+        ax = self._fig.add_subplot(111)
+        self._draw_tree(ax, tree)
+
+        self._canvas.draw()
+        self._placeholder.hide()
+        self._canvas.show()
+        if note_txt:
+            self._note.setText(note_txt)
+            self._note.show()
+        else:
+            self._note.hide()
+
+    def _draw_tree(self, ax, tree) -> None:
+        """Rectangular phylogram drawn with matplotlib."""
+        # ── Pass 1: x = cumulative branch length from root (preorder) ─────────
+        x_pos: dict[int, float] = {}
+        for node in tree.preorder():
+            parent_x = x_pos.get(id(node.parent), 0.0) if node.parent else 0.0
+            x_pos[id(node)] = parent_x + (node.length or 0.0)
+
+        # ── Pass 2: y = sequential for tips; midpoint of children for internals ─
+        y_pos: dict[int, float] = {}
+        tip_idx = [0]
+        for node in tree.postorder():
+            if node.is_tip():
+                y_pos[id(node)] = float(tip_idx[0])
+                tip_idx[0] += 1
+            else:
+                ys = [y_pos[id(c)] for c in node.children]
+                y_pos[id(node)] = (min(ys) + max(ys)) / 2.0
+
+        tips = [n for n in tree.tips()]
+        n    = len(tips)
+        if n == 0:
+            return
+
+        max_x = max(x_pos.values()) or 1.0
+        line_color  = "#374151"
+        tip_color   = "#6366F1"
+        label_color = "#374151"
+
+        # ── Pass 3: draw branches ─────────────────────────────────────────────
+        for node in tree.preorder():
+            nx = x_pos[id(node)]
+            ny = y_pos[id(node)]
+            if node.parent is not None:
+                px = x_pos[id(node.parent)]
+                py = y_pos[id(node.parent)]
+                # horizontal branch at this node's y
+                ax.plot([px, nx], [ny, ny], "-", color=line_color, lw=0.6,
+                        solid_capstyle="round")
+                # vertical connector at parent's x
+                ax.plot([px, px], [py, ny], "-", color=line_color, lw=0.6,
+                        solid_capstyle="round")
+            if node.is_tip():
+                ax.plot(nx, ny, "o", color=tip_color, ms=2.5, zorder=3)
+                name = (node.name or "")
+                if len(name) > 24:
+                    name = name[:21] + "…"
+                ax.text(nx + max_x * 0.012, ny, name,
+                        va="center", ha="left", fontsize=5.5, color=label_color)
+
+        # ── Axes styling ──────────────────────────────────────────────────────
+        ax.set_xlim(-max_x * 0.02, max_x * 1.55)
+        ax.set_ylim(-0.8, n - 0.2)
+        ax.set_yticks([])
+        ax.set_xlabel("Branch length (substitutions per site)", fontsize=8,
+                      color="#6B7280")
+        for spine in ("top", "right", "left"):
+            ax.spines[spine].set_visible(False)
+        ax.spines["bottom"].set_color("#E5E7EB")
+        ax.tick_params(axis="x", colors="#9CA3AF", labelsize=7)
+        ax.set_facecolor("#F9FAFB")
+        self._fig.patch.set_facecolor("#F9FAFB")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
