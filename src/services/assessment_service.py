@@ -740,6 +740,39 @@ def get_simulations_for_run(run_id: int) -> list[dict]:
         session.close()
 
 
+def ingest_simulation_genus(run_id: int, simulation_id: int, genus_rows: dict[str, float]) -> dict:
+    """
+    Store modified genus abundances for a simulation.
+    genus_rows: {genus_name: relative_abundance}  e.g. {"Bacteroides": 0.15, "Faecalibacterium": 0.22}
+    """
+    session = SessionLocal()
+    try:
+        run = get_run(session, run_id)
+        create_genus_bulk(session, run=run, genus_abundances=genus_rows, simulation_id=simulation_id)
+        session.commit()
+        return {"simulation_id": simulation_id, "run_id": run_id, "genera_inserted": len(genus_rows)}
+    except RepositoryError as e:
+        session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+def get_simulation_genus(simulation_id: int) -> list[dict]:
+    """Return all genus rows stored for a simulation."""
+    from src.db.db_models import Genus
+    session = SessionLocal()
+    try:
+        from sqlalchemy import select
+        stmt = select(Genus).where(Genus.simulation_id == simulation_id)
+        rows = list(session.execute(stmt).scalars().all())
+        return [{"genus": g.genus, "relative_abundance": g.relative_abundance} for g in rows]
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
 # ==== Private helpers ====
 def _risk_label(probability: float) -> str:
     """Translate a risk percentage into a human-readable label."""

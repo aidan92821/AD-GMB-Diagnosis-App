@@ -164,11 +164,12 @@ def create_genus_bulk(
         *,
         run: Run,
         genus_abundances: dict[str, float],   # {"Firmicutes": 0.35, ...}
+        simulation_id: int | None = None,
 ) -> list[Genus]:
     """Insert all genus-level relative abundances for a run at once."""
     rows = []
     for genus_name, abundance in genus_abundances.items():
-        row = Genus(run_id=run.run_id, genus=genus_name, relative_abundance=abundance)
+        row = Genus(run_id=run.run_id, genus=genus_name, relative_abundance=abundance, simulation_id=simulation_id)
         session.add(row)
         rows.append(row)
     session.flush()
