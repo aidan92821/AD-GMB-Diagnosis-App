@@ -74,7 +74,17 @@ def get_or_create_user(username: str) -> dict:
     finally:
         session.close()
 
-def register_user(username: str, password: str) -> dict:
+def register_user(username: str, password: str, email: str = "") -> dict:
+    if user_exists(username):
+        raise ServiceError(f"Username {username!r} is already taken")
+
+    current_key = get_master_key()
+    master_key = create_entry(username, password, master_key=current_key)
+
+    if current_key is None:
+        init_engine(master_key)
+        init_db()
+
     session = SessionLocal()
     try:
         hashed = hash_password(password)
