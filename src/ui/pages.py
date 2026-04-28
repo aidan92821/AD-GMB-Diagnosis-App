@@ -1915,6 +1915,43 @@ class _TreeNode:
         else:
             node.name = label.strip("'\"")
 
+    def to_newick(self) -> str:
+        """Serialize tree to a Newick string (iterative — no recursion limit)."""
+        buf = []
+        # Stack items: (node, next_child_index_to_push; -1 = first visit)
+        stk = [(self, -1)]
+
+        while stk:
+            node, ci = stk[-1]
+
+            if ci == -1:
+                if node.children:
+                    buf.append("(")
+                    stk[-1] = (node, 1)                   # child[0] pushed next
+                    stk.append((node.children[0], -1))
+                else:
+                    buf.append(node.name or "")
+                    if node.length is not None:
+                        buf.append(f":{node.length}")
+                    stk.pop()
+                    if stk and stk[-1][1] < len(stk[-1][0].children):
+                        buf.append(",")
+            elif ci < len(node.children):
+                stk[-1] = (node, ci + 1)
+                stk.append((node.children[ci], -1))
+            else:
+                buf.append(")")
+                if node.name:
+                    buf.append(node.name)
+                if node.length is not None:
+                    buf.append(f":{node.length}")
+                stk.pop()
+                if stk and stk[-1][1] < len(stk[-1][0].children):
+                    buf.append(",")
+
+        buf.append(";")
+        return "".join(buf)
+
 
 class PhylogenyPage(QWidget):
     """
@@ -2061,19 +2098,21 @@ class PhylogenyPage(QWidget):
         return ""
 
     def _render(self, newick: str) -> None:
-        import io, random
+        import io, re
+        from io import StringIO
+        from Bio import Phylo
 
+        # ── 1. Fast parse (stats + pruning) ───────────────────────────────────
         try:
-            tree = _TreeNode.read(io.StringIO(newick))
+            fast_tree = _TreeNode.read(io.StringIO(newick))
         except Exception as exc:
             self._show_placeholder(f"Could not parse tree: {exc}")
             return
 
-        all_tips = list(tree.tips())
-        n_total  = len(all_tips)
-        n_internal = sum(1 for _ in tree.non_tips())
+        all_tips   = list(fast_tree.tips())
+        n_total    = len(all_tips)
+        n_internal = sum(1 for _ in fast_tree.non_tips())
 
-        # Max root-to-tip depth
         def _root_dist(node):
             d = 0.0
             while node.parent:
@@ -2086,25 +2125,93 @@ class PhylogenyPage(QWidget):
             self._set_stat(self._stat_depth, f"{max_depth:.4f}")
         except Exception:
             self._set_stat(self._stat_depth, "—")
-
         self._set_stat(self._stat_tips,  f"{n_total:,}")
         self._set_stat(self._stat_nodes, f"{n_internal:,}")
 
-        # Subsample for display
-        note_txt = ""
-        if n_total > self.MAX_TIPS:
-            step = max(1, n_total // self.MAX_TIPS)
-            keep = {t.name for t in all_tips[::step]}
-            tree = tree.shear(keep)
-            n_shown = len(list(tree.tips()))
-            note_txt = (
-                f"Displaying {n_shown} of {n_total:,} tips "
-                f"(every {step}th tip sampled for readability)"
-            )
+        # ── 2. Build feature_id → genus map from DB ───────────────────────────
+        feature_genus: dict[str, str] = {}
+        if self._state:
+            try:
+                from src.services.assessment_service import (
+                    get_project_feature_taxonomy, get_feature_counts,
+                )
+                from src.pipeline.db_import import clean_genus
 
+                raw: dict[str, str] = {}
+
+                # Primary: lbs maps fresh-run IDs whose feature_ids match the
+                # current tree (correct when the pipeline just ran).
+                if self._state.lbs:
+                    for run_id in self._state.lbs.values():
+                        try:
+                            for row in get_feature_counts(run_id):
+                                fid = row.get("feature_id", "")
+                                tax = row.get("taxonomy") or ""
+                                if fid and tax:
+                                    raw[fid] = tax
+                        except Exception:
+                            pass
+
+                # Fallback: query all runs for this project (loading existing
+                # project from DB without a fresh pipeline run).
+                if not raw and self._state.db_project_id:
+                    raw = get_project_feature_taxonomy(self._state.db_project_id)
+
+                for fid, tax in raw.items():
+                    g = clean_genus(tax)
+                    if g and g != "Unclassified":
+                        feature_genus[fid] = g
+            except Exception:
+                pass
+
+        # ── 3. Prefer ASV tips (MD5 hashes) over reference tips ───────────────
+        _md5 = re.compile(r'^[0-9a-f]{32}$')
+        asv_tips = [t for t in all_tips if _md5.match(t.name or "")]
+        note_txt = ""
+
+        if asv_tips:
+            candidates = asv_tips
+            if len(candidates) > self.MAX_TIPS:
+                step       = max(1, len(candidates) // self.MAX_TIPS)
+                candidates = candidates[::step]
+                note_txt   = (
+                    f"Showing {len(candidates)} of {len(asv_tips)} ASV tips "
+                    f"({n_total:,} total in reference tree)"
+                )
+            else:
+                note_txt = (
+                    f"Showing all {len(candidates)} ASV tips "
+                    f"({n_total:,} total in reference tree)"
+                )
+            keep_names = {t.name for t in candidates}
+        else:
+            step       = max(1, n_total // self.MAX_TIPS)
+            keep_names = {t.name for t in all_tips[::step]}
+            note_txt   = f"Displaying {len(keep_names)} of {n_total:,} tips (subsampled)"
+
+        fast_tree.shear(keep_names)
+
+        # ── 4. Export pruned subtree → Bio.Phylo ──────────────────────────────
+        pruned_nwk = fast_tree.to_newick()
+        try:
+            bio_tree = Phylo.read(StringIO(pruned_nwk), "newick")
+        except Exception as exc:
+            self._show_placeholder(f"Bio.Phylo render error: {exc}")
+            return
+
+        # ── 5. Draw with genus labels ──────────────────────────────────────────
+        def _label(clade) -> str:
+            name = clade.name or ""
+            return feature_genus.get(name) or (name[:8] if name else "")
+
+        n_shown = len(bio_tree.get_terminals())
+        self._fig.set_size_inches(10, max(n_shown * 0.22, 6))
         self._fig.clear()
         ax = self._fig.add_subplot(111)
-        self._draw_tree(ax, tree)
+
+        Phylo.draw(bio_tree, axes=ax, do_show=False, label_func=_label)
+        ax.set_xlabel("Branch length")
+        ax.set_ylabel("")
 
         self._canvas.draw()
         self._placeholder.hide()
@@ -2115,68 +2222,6 @@ class PhylogenyPage(QWidget):
         else:
             self._note.hide()
 
-    def _draw_tree(self, ax, tree) -> None:
-        """Rectangular phylogram drawn with matplotlib."""
-        # ── Pass 1: x = cumulative branch length from root (preorder) ─────────
-        x_pos: dict[int, float] = {}
-        for node in tree.preorder():
-            parent_x = x_pos.get(id(node.parent), 0.0) if node.parent else 0.0
-            x_pos[id(node)] = parent_x + (node.length or 0.0)
-
-        # ── Pass 2: y = sequential for tips; midpoint of children for internals ─
-        y_pos: dict[int, float] = {}
-        tip_idx = [0]
-        for node in tree.postorder():
-            if node.is_tip():
-                y_pos[id(node)] = float(tip_idx[0])
-                tip_idx[0] += 1
-            else:
-                ys = [y_pos[id(c)] for c in node.children]
-                y_pos[id(node)] = (min(ys) + max(ys)) / 2.0
-
-        tips = [n for n in tree.tips()]
-        n    = len(tips)
-        if n == 0:
-            return
-
-        max_x = max(x_pos.values()) or 1.0
-        line_color  = "#374151"
-        tip_color   = "#6366F1"
-        label_color = "#374151"
-
-        # ── Pass 3: draw branches ─────────────────────────────────────────────
-        for node in tree.preorder():
-            nx = x_pos[id(node)]
-            ny = y_pos[id(node)]
-            if node.parent is not None:
-                px = x_pos[id(node.parent)]
-                py = y_pos[id(node.parent)]
-                # horizontal branch at this node's y
-                ax.plot([px, nx], [ny, ny], "-", color=line_color, lw=0.6,
-                        solid_capstyle="round")
-                # vertical connector at parent's x
-                ax.plot([px, px], [py, ny], "-", color=line_color, lw=0.6,
-                        solid_capstyle="round")
-            if node.is_tip():
-                ax.plot(nx, ny, "o", color=tip_color, ms=2.5, zorder=3)
-                name = (node.name or "")
-                if len(name) > 24:
-                    name = name[:21] + "…"
-                ax.text(nx + max_x * 0.012, ny, name,
-                        va="center", ha="left", fontsize=5.5, color=label_color)
-
-        # ── Axes styling ──────────────────────────────────────────────────────
-        ax.set_xlim(-max_x * 0.02, max_x * 1.55)
-        ax.set_ylim(-0.8, n - 0.2)
-        ax.set_yticks([])
-        ax.set_xlabel("Branch length (substitutions per site)", fontsize=8,
-                      color="#6B7280")
-        for spine in ("top", "right", "left"):
-            ax.spines[spine].set_visible(False)
-        ax.spines["bottom"].set_color("#E5E7EB")
-        ax.tick_params(axis="x", colors="#9CA3AF", labelsize=7)
-        ax.set_facecolor("#F9FAFB")
-        self._fig.patch.set_facecolor("#F9FAFB")
 
 
 # ═════════════════════════════════════════════════════════════════════════════

@@ -442,7 +442,17 @@ class _AnalysisWorkerReal(QObject):
 
     @staticmethod
     def _fill_bray_curtis(state: AppState, labels: dict) -> None:
-        from scipy.spatial.distance import cdist
+        # Bray-Curtis: BC(u,v) = sum|u-v| / sum(u+v); 0/0 → 0
+        def _braycurtis(mat: np.ndarray) -> np.ndarray:
+            n = mat.shape[0]
+            bc = np.zeros((n, n))
+            for _i in range(n):
+                for _j in range(_i + 1, n):
+                    num = np.abs(mat[_i] - mat[_j]).sum()
+                    den = (mat[_i] + mat[_j]).sum()
+                    v   = num / den if den > 0 else 0.0
+                    bc[_i, _j] = bc[_j, _i] = v
+            return bc
 
         run_ids = list(labels.values())
         run_labels = list(labels.keys())
@@ -473,7 +483,7 @@ class _AnalysisWorkerReal(QObject):
             dtype=float,
         )
 
-        bc_matrix = cdist(count_matrix, count_matrix, metric='braycurtis')
+        bc_matrix = _braycurtis(count_matrix)
 
         for i, label_a in enumerate(run_labels):
             for j, label_b in enumerate(run_labels):
@@ -525,7 +535,7 @@ class _AnalysisWorkerReal(QObject):
         matrix: np.ndarray,
     ) -> dict[str, tuple[float, float]]:
         """
-        Classical MDS via scipy.linalg.eigh on a symmetric dissimilarity matrix.
+        Classical MDS via numpy.linalg.eigh on a symmetric dissimilarity matrix.
         Returns {label: (pc1, pc2)}.
     
         eigh solves the full eigenproblem exactly for symmetric matrices and
@@ -533,7 +543,7 @@ class _AnalysisWorkerReal(QObject):
         Negative eigenvalues (numerical artefacts from non-Euclidean distances)
         are clamped to zero before taking the square root.
         """
-        from scipy.linalg import eigh
+        from numpy.linalg import eigh
 
         n = len(labels)
         if n < 2:
