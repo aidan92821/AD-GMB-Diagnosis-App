@@ -4,9 +4,10 @@ reportlab
 biopython==1.86
 pytest
 SQLAlchemy>=2.0
-argon2-cffi
-sqlalchemy>=2.0
 argon2-cffi>=23.1
+sqlalchemy>=2.0
+sqlcipher3
+cryptography
 numpy==2.2.6
 pandas==2.3.3
 python-dateutil==2.9.0.post0
