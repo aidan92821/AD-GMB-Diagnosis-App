@@ -7,13 +7,14 @@ application domain; they accept plain Python lists/dicts and paint them.
 
 from __future__ import annotations
 import math
-from PyQt6.QtWidgets import QWidget, QFrame, QLabel, QVBoxLayout, QSizePolicy
-from PyQt6.QtCore    import Qt, QRect, QRectF, QPointF
+from PyQt6.QtWidgets import (QWidget, QFrame, QLabel, QVBoxLayout,
+                             QSizePolicy, QTableWidgetItem, QTableWidget,
+                             QHeaderView, QToolTip)
+from PyQt6.QtCore    import Qt, QRect, QRectF, QPointF, QPoint
 from PyQt6.QtGui     import (
     QPainter, QColor, QPen, QBrush, QLinearGradient, QFont, QPainterPath,
 )
 from resources.styles import GENUS_COLORS, BORDER, TEXT_M, TEXT_HINT, BG_CARD
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -21,6 +22,42 @@ def _color(hex_str: str, alpha: int = 255) -> QColor:
     c = QColor(hex_str)
     c.setAlpha(alpha)
     return c
+
+
+def _build_genus_palette(n: int, base_colors: list[str]) -> list[str]:
+
+    if n <= len(base_colors):
+        return base_colors[:n]
+
+    palette = list(base_colors)
+    needed  = n - len(base_colors)
+
+    hue_step = 360 / (needed + 1)
+    hue_start = 37.0
+    for i in range(needed):
+        hue = int((hue_start + hue_step * i) % 360)
+        c   = QColor.fromHsl(hue, 155, 110)
+        palette.append(c.name())
+
+    return palette
+
+
+class NumericSortItem(QTableWidgetItem):
+    '''
+    QTableWidgetItem w/ float sort key instead of str
+    '''
+    def __init__(self, value: float, fmt: str = ",") -> None:
+        display = format(int(value), ",") if fmt == "," else format(value, fmt)
+        super().__init__(display)
+        self._numeric = float(value)
+        self.setTextAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+
+    def __lt__(self, other: QTableWidgetItem) -> bool:
+        if isinstance(other, NumericSortItem):
+            return self._numeric < other._numeric
+        return super().__lt__(other)
 
 
 # ── Vertical bar chart ────────────────────────────────────────────────────────
@@ -35,14 +72,32 @@ class BarChartWidget(QWidget):
                  colors: list[str] | None = None,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._data   = data
-        self._colors = colors or GENUS_COLORS
+        self._data      = data
+        self._colors    = colors or GENUS_COLORS
+        self._bar_rects: list[tuple[QRect, str, float]] = []
         self.setMinimumHeight(120)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.setMouseTracking(True)
 
     def set_data(self, data: list[tuple[str, float]]) -> None:
         self._data = data
+        self._bar_rects = []
         self.update()
+
+    def mouseMoveEvent(self, event) -> None:
+        pos = event.position().toPoint()
+        for rect, label, value in self._bar_rects:
+            if rect.contains(pos):
+                QToolTip.showText(
+                    self.mapToGlobal(pos),
+                    f"{label}\n{value:.1f}%",
+                    self,
+                )
+                return
+        QToolTip.hideText()
+
+    def leaveEvent(self, event) -> None:
+        QToolTip.hideText()
 
     def paintEvent(self, _):
         if not self._data:
@@ -62,6 +117,7 @@ class BarChartWidget(QWidget):
         font = QFont(); font.setPointSize(8)
         p.setFont(font)
 
+        self._bar_rects = []
         for i, (label, value) in enumerate(self._data):
             bar_h  = int(chart_h * value / max_val)
             x      = gap + i * (bar_w + gap)
@@ -75,6 +131,8 @@ class BarChartWidget(QWidget):
             path.addRoundedRect(QRectF(x, y, bar_w, bar_h), 3, 3)
             p.fillPath(path, color)
 
+            self._bar_rects.append((QRect(x, y, bar_w, bar_h), label, value))
+
         # X-axis labels: only first and last
         p.setPen(_color(TEXT_M))
         if self._data:
@@ -83,6 +141,53 @@ class BarChartWidget(QWidget):
             p.drawText(W - W // 3 - gap, H - pad_b + 4, W // 3, pad_b,
                        Qt.AlignmentFlag.AlignRight, self._data[-1][0])
         p.end()
+
+
+class _AlphaBarWidget(BarChartWidget):
+    """
+    BarChartWidget that additionally paints the numeric scalar value above
+    each bar.  Alpha diversity values (Shannon ~2–4 bits, Simpson 0–1) are
+    meaningful absolute numbers, not just relative heights.
+    """
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self._data:
+            return
+
+        from PyQt6.QtGui import QPainter, QFont, QColor
+        from PyQt6.QtCore import Qt as _Qt
+
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        W, H    = self.width(), self.height()
+        pad_b   = 24
+        pad_t   = 8
+        chart_h = H - pad_b - pad_t
+        max_val = max(v for _, v in self._data) or 1.0
+        n       = len(self._data)
+        gap     = 4
+        bar_w   = max(6, (W - gap * (n + 1)) // n)
+
+        font = QFont()
+        font.setPointSize(7)
+        p.setFont(font)
+
+        from resources.styles import TEXT_M
+        p.setPen(QColor(TEXT_M))
+
+        for i, (_, value) in enumerate(self._data):
+            bar_h = int(chart_h * value / max_val)
+            x     = gap + i * (bar_w + gap)
+            y     = pad_t + (chart_h - bar_h)
+            p.drawText(
+                x, y - 14, bar_w, 13,
+                _Qt.AlignmentFlag.AlignCenter,
+                f"{value:.3f}",
+            )
+        p.end()
+
 
 
 # ── Horizontal stacked bar chart ──────────────────────────────────────────────
@@ -100,19 +205,47 @@ class StackedBarWidget(QWidget):
                  colors: list[str] | None = None,
                  parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._data   = data
-        self._colors = colors or GENUS_COLORS
+        self._data      = data
+        self._colors    = colors or GENUS_COLORS
+        self._seg_rects: list[tuple[QRect, str, float]] = []
         self._recalc_height()
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMouseTracking(True)
 
     def set_data(self, data: dict[str, list[tuple[str, float]]]) -> None:
         self._data = data
+        self._seg_rects = []
         self._recalc_height()
+
+        # Rebuild genus→color map whenever data changes
+        all_keys = list(dict.fromkeys(
+            g for segs in data.values() for g, _ in segs
+        ))
+        pal = _build_genus_palette(len(all_keys), self._colors)
+        self._genus_color_map: dict[str, str] = {
+            g: pal[i] for i, g in enumerate(all_keys)
+        }
+
         self.update()
 
     def _recalc_height(self) -> None:
         h = len(self._data) * self.ROW_GAP + 8
         self.setFixedHeight(max(h, 20))
+
+    def mouseMoveEvent(self, event) -> None:
+        pos = event.position().toPoint()
+        for rect, genus, value in self._seg_rects:
+            if rect.contains(pos):
+                QToolTip.showText(
+                    self.mapToGlobal(pos),
+                    f"{genus}\n{value:.1f}%",
+                    self,
+                )
+                return
+        QToolTip.hideText()
+
+    def leaveEvent(self, event) -> None:
+        QToolTip.hideText()
 
     def paintEvent(self, _):
         if not self._data:
@@ -124,6 +257,7 @@ class StackedBarWidget(QWidget):
         font = QFont(); font.setPointSize(8)
         p.setFont(font)
 
+        self._seg_rects = []
         y = 0
         for run_label, segments in self._data.items():
             # Run label
@@ -136,12 +270,13 @@ class StackedBarWidget(QWidget):
             avail = W - 28
             bar_y = y + 1
 
-            for j, (_, value) in enumerate(segments):
+            for j, (genus, value) in enumerate(segments):
                 seg_w = max(int(avail * value / total), 0)
                 color = _color(self._colors[j % len(self._colors)])
                 p.setBrush(QBrush(color))
                 p.setPen(Qt.PenStyle.NoPen)
                 p.drawRect(x, bar_y, seg_w, self.ROW_H)
+                self._seg_rects.append((QRect(x, bar_y, seg_w, self.ROW_H), genus, value))
                 x += seg_w
 
             y += self.ROW_GAP
@@ -573,3 +708,111 @@ class RiskMeterWidget(QWidget):
         p.setPen(QPen(QColor("#FFFFFF"), 2))
         p.drawEllipse(QPointF(mx, my), r_dot // 2 + 1, r_dot // 2 + 1)
         p.end()
+
+
+class GenusTableWidget(QWidget):
+    """
+    Sortable two-column table: Genus name | Relative abundance (%).
+
+    data: list of {"genus": str, "relative_abundance": float}
+          as returned by assessment_service.get_genus_data(run_id).
+
+    The user can click either column header to sort ascending / descending.
+    """
+
+    def __init__(
+        self,
+        data: list[dict] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._data: list[dict] = data or []
+        self._build()
+        if self._data:
+            self._populate()
+
+    # ── Construction ──────────────────────────────────────────────────────
+
+    def _build(self) -> None:
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(6)
+
+        # Summary label (e.g. "14 genera")
+        self._summary = QLabel("")
+        self._summary.setStyleSheet(f"font-size:11px; color:{TEXT_HINT};")
+        root.addWidget(self._summary)
+
+        # Table
+        self._table = QTableWidget(0, 2)
+        self._table.setHorizontalHeaderLabels(["Genus", "Rel. Abundance (%)"])
+        self._table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch
+        )
+        self._table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self._table.horizontalHeader().setSortIndicatorShown(True)
+        self._table.setSortingEnabled(True)
+        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self._table.setAlternatingRowColors(True)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setShowGrid(False)
+        self._table.setStyleSheet(
+            "QTableWidget { border: none; }"
+            "QHeaderView::section { font-size: 11px; padding: 4px 8px; }"
+        )
+        # Default sort: descending abundance
+        self._table.sortItems(1, Qt.SortOrder.DescendingOrder)
+        self._table.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        root.addWidget(self._table)
+
+    # ── Public API ────────────────────────────────────────────────────────
+
+    def set_data(self, data: list[dict]) -> None:
+        """
+        Refresh the table.
+        data: [{"genus": str, "relative_abundance": float}, ...]
+        """
+        self._data = data
+        self._populate()
+
+    def clear(self) -> None:
+        self._table.setRowCount(0)
+        self._summary.setText("")
+
+    # ── Internal ──────────────────────────────────────────────────────────
+
+    def _populate(self) -> None:
+        # Disable sorting while inserting to avoid mid-insert re-sorts
+        self._table.setSortingEnabled(False)
+        self._table.setRowCount(len(self._data))
+
+        for row, entry in enumerate(self._data):
+            genus = entry.get("genus", "Unknown")
+            abundance = float(entry.get("relative_abundance", 0.0))
+
+            genus_item = QTableWidgetItem(genus)
+            genus_item.setTextAlignment(
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+            )
+
+            # Color dot prefix: reuse GENUS_COLORS palette by index
+            # (purely cosmetic — the dot is drawn via a styled QLabel in the
+            #  legend; here we tint the text a little instead)
+            abund_item = NumericSortItem(abundance, fmt=".2f")
+
+            self._table.setItem(row, 0, genus_item)
+            self._table.setItem(row, 1, abund_item)
+
+        # Re-enable sorting and apply default (abundance descending)
+        self._table.setSortingEnabled(True)
+        self._table.sortItems(1, Qt.SortOrder.DescendingOrder)
+
+        n = len(self._data)
+        self._summary.setText(
+            f"{n} genera"
+        )

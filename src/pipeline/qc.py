@@ -1,4 +1,5 @@
 import pandas as pd
+from pathlib import Path
 import os
 import zipfile
 
@@ -7,11 +8,15 @@ import zipfile
 # fastqs = list of fastq filenames
 def get_min_run_len(bioproject: str, lib_layout: str, fastqs: list[str]) -> int:
     
+    print('get min run length')
+    APP_DIR = Path(__file__).parent
+    input_dir = str((APP_DIR / f"data/{bioproject}/fastq/{lib_layout}").resolve())
+    
     lengths = []
 
     try:
         for fastq in fastqs:
-            with open(f"data/{bioproject}/fastq/{lib_layout}/{fastq}", 'r', encoding='utf-8') as f:
+            with open(f"{input_dir}/{fastq}", 'r', encoding='utf-8') as f:
                     line = f.readline().split()[2] # or find substr == length might be better
                     length = line.split(sep='=')
                     lengths.append(length[1])
@@ -27,6 +32,7 @@ def get_min_run_len(bioproject: str, lib_layout: str, fastqs: list[str]) -> int:
 # returns first base position where quality drops below threshold
 def find_median_drop(sns, quality_threshold: int) -> int:
     
+    print('find median drop')
     # transpose to get the percentiles as columns
     sns = sns.T
 
@@ -40,7 +46,7 @@ def find_median_drop(sns, quality_threshold: int) -> int:
     # find the first position where quality drops below threshold
     pos = median <= quality_threshold
     if pos.any():
-        trunc_len = pos.idmax()
+        trunc_len = pos.idxmax()
     else:
         trunc_len = len(median)
 
@@ -54,10 +60,12 @@ def find_median_drop(sns, quality_threshold: int) -> int:
 # 2 -> paired with keys: 'forward', 'reverse' in that order
 def get_trunc(bioproject: str, lib_layout: str):
 
+    print("get trunc")
     QUALITY_THRESHOLD = 25
 
-    input_dir_fastq = f"data/{bioproject}/fastq/{lib_layout}"
-    input_dir_qiime = f"data/{bioproject}/qiime/{lib_layout}"
+    APP_DIR = Path(__file__).parent
+    input_dir_fastq = str((APP_DIR / f"data/{bioproject}/fastq/{lib_layout}").resolve())
+    input_dir_qiime = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
 
     # organize the fastq types
     files = os.listdir(input_dir_fastq)

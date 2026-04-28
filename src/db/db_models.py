@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     Column, Integer, String, Float, DateTime, ForeignKey, Text,
-    CheckConstraint, ForeignKeyConstraint,
+    CheckConstraint, ForeignKeyConstraint, UniqueConstraint
 )
 from sqlalchemy.orm import declarative_base, relationship
 
@@ -24,10 +24,11 @@ def utcnow():
 class User(Base):
     __tablename__ = "user"
 
-    user_id  = Column(Integer, primary_key=True)
-    username = Column(String(64), nullable=False, unique=True)
+    user_id       = Column(Integer, primary_key=True)
+    user_email    = Column(String(64), nullable=True)
+    username      = Column(String(64), nullable=False, unique=True)
     password_hash = Column(String(256), nullable=False)
-    created_at = Column(DateTime(timezone=True), default=utcnow)
+    created_at    = Column(DateTime(timezone=True), default=utcnow)
 
     # One user owns many projects. Deleting a user deletes all their projects.
     projects = relationship("Project", back_populates="user", cascade="all, delete-orphan")
@@ -46,6 +47,7 @@ class Project(Base):
     user = relationship("User", back_populates="projects")
     # Deleting a project cascades to all its runs and everything under them.
     runs = relationship("Run", back_populates="project", cascade="all, delete-orphan")
+    trees = relationship("Tree", back_populates="project", cascade="all, delete-orphan")
 
 
 # ==== RUN ====
@@ -68,21 +70,25 @@ class Run(Base):
     project           = relationship("Project", back_populates="runs")
     genus_data        = relationship("Genus",         back_populates="run", cascade="all, delete-orphan")
     features          = relationship("Feature",       back_populates="run", cascade="all, delete-orphan")
-    trees             = relationship("Tree",          back_populates="run", cascade="all, delete-orphan")
     alpha_diversities = relationship("AlphaDiversity", back_populates="run", cascade="all, delete-orphan")
+    pcoa_coords       = relationship("PCoA", back_populates="run", cascade="all, delete-orphan")
+    simulations       = relationship("Simulation",    back_populates="run", cascade="all, delete-orphan")
 
 
 # ==== GENUS ====
 # Genus relative abundance
-# Composite PK: (run_id, genus) — one row per genus per run
+# Composite PK: (run_id, genus, simulation_id) — simulation_id is NULL for real runs
 class Genus(Base):
     __tablename__ = "genus"
 
     run_id            = Column(Integer, ForeignKey("run.run_id"), primary_key=True, nullable=False)
     genus             = Column(String(128), primary_key=True, nullable=False)
     relative_abundance = Column(Float, nullable=False)
+    simulation_id     = Column(Integer, ForeignKey("simulation.simulation_id"), primary_key=True, nullable=True)
 
-    run = relationship("Run", back_populates="genus_data")
+
+    run        = relationship("Run",        back_populates="genus_data")
+    simulation = relationship("Simulation", back_populates="genus_data")
 
     __table_args__ = (
         # Relative abundance must be between 0 and 1
@@ -132,17 +138,17 @@ class FeatureCount(Base):
 
 
 # ==== TREE ====
-# Phylogenetic tree built from features for a run
+# Phylogenetic tree built from features for a project
 # The actual tree is stored as a .nwk file on disk and we store the path here
 class Tree(Base):
     __tablename__ = "tree"
 
     tree_id     = Column(Integer, primary_key=True)
-    run_id      = Column(Integer, ForeignKey("run.run_id"), nullable=False)
+    project_id  = Column(Integer, ForeignKey("project.project_id"), nullable=False)
     newick_path = Column(Text, nullable=False)  # path to .nwk file on disk
     created_at  = Column(DateTime(timezone=True), default=utcnow)
 
-    run = relationship("Run", back_populates="trees")
+    project = relationship("Project", back_populates="trees")
 
 
 # ==== ALPHA DIVERSITY ====
@@ -173,3 +179,30 @@ class BetaDiversity(Base):
         # A run cannot be compared to itself
         CheckConstraint("run_id_1 != run_id_2", name="ck_beta_diff_runs"),
     )
+
+class PCoA(Base):
+    __tablename__ = "pcoa"
+ 
+    # Integer surrogate PK matches Tree — avoids a wide composite PK on floats
+    pcoa_id = Column(Integer, primary_key=True)
+    run_id  = Column(Integer, ForeignKey("run.run_id"), nullable=False)
+    metric  = Column(String(64), nullable=False)   # "bray_curtis" or "unifrac"
+    pc1     = Column(Float, nullable=False)
+    pc2     = Column(Float, nullable=False)
+ 
+    run = relationship("Run", back_populates="pcoa_coords")
+ 
+    __table_args__ = (
+        # One coordinate pair per run per metric — enforces upsert safety at DB level
+        UniqueConstraint("run_id", "metric", name="uq_pcoa_run_metric"),
+    )
+
+class Simulation(Base):
+    __tablename__ = "simulation"
+
+    simulation_id = Column(Integer, primary_key=True)
+    run_id        = Column(Integer, ForeignKey("run.run_id"), nullable=False)
+    created_at    = Column(DateTime(timezone=True), default=utcnow)
+
+    run       = relationship("Run", back_populates="simulations")
+    genus_data = relationship("Genus", back_populates="simulation")

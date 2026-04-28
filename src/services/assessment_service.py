@@ -23,22 +23,31 @@ from src.db.repository import (
     list_runs_for_project,
     create_genus_bulk,
     get_genus_for_run,
+    get_run_exists_genus_table,
     create_feature,
     list_features_for_run,
     create_feature_count_bulk,
     get_feature_counts_for_run,
+    get_run_exists_feature_table,
+    get_run_exists_feature_count_table,
     create_tree,
-    get_tree_for_run,
+    get_tree_for_project,
     create_alpha_diversity,
     get_alpha_diversity_for_run,
+    get_run_exists_alpha_table,
     create_beta_diversity as repo_create_beta_diversity,
     get_beta_diversity,
+    get_run_exists_beta_table,
     update_run_risk,
     RepositoryError,
     NotFoundError,
     hash_password,
     verify_password,
     username_exists,
+    create_pcoa,
+    get_pcoa_for_project,
+    create_simulation as repo_create_simulation,
+    get_simulations_for_run as repo_get_simulations_for_run,
 )
 
 
@@ -66,22 +75,12 @@ def get_or_create_user(username: str) -> dict:
         session.close()
 
 def register_user(username: str, password: str) -> dict:
-    if user_exists(username):
-        raise ServiceError(f"Username {username!r} is already taken")
-
-    current_key = get_master_key()
-    master_key = create_entry(username, password, master_key=current_key)
-
-    if current_key is None:
-        init_engine(master_key)
-        init_db()
-
     session = SessionLocal()
     try:
         hashed = hash_password(password)
-        user = repo_create_user(session, username=username, password_hash=hashed)
+        user = repo_create_user(session, username=username, password_hash=hashed, user_email=email)
         session.commit()
-        return {"user_id": user.user_id, "username": user.username}
+        return {"user_id": user.user_id, "username": user.username, "email": user.user_email}
     except RepositoryError as e:
         session.rollback()
         raise ServiceError(str(e)) from e
@@ -243,9 +242,8 @@ def ingest_run_data(
 ) -> dict:
     """
     Bulk-insert all QIIME2 output for a run in a single transaction.
-
-    Stores genus abundances, ASV features, feature counts, and optionally a
-    phylogenetic tree. If anything fails, everything rolls back.
+    Stores genus abundances, ASV features and feature counts. 
+    If anything fails, everything rolls back.
     """
     session = SessionLocal()
     try:
@@ -255,26 +253,24 @@ def ingest_run_data(
         genus_abundances = dict(genus_rows)
 
         # Insert genus-level relative abundances
-        create_genus_bulk(session, run=run, genus_abundances=genus_abundances)
+        if not get_run_exists_genus_table(session, run_id):
+            create_genus_bulk(session, run=run, genus_abundances=genus_abundances)
 
         # Insert each ASV feature (sequence + taxonomy)
-        for f in features:
-            create_feature(
-                session,
-                run=run,
-                feature_id=f["feature_id"],
-                sequence=f.get("sequence"),
-                taxonomy=f.get("taxonomy"),
-            )
+        if not get_run_exists_feature_table(session, run_id):
+            for f in features:
+                create_feature(
+                    session,
+                    run=run,
+                    feature_id=f["feature_id"],
+                    sequence=f.get("sequence"),
+                    taxonomy=f.get("taxonomy"),
+                )
 
         # Flush features to DB before inserting counts — feature_count has a FK to feature
         session.flush()
-        create_feature_count_bulk(session, run_id=run_id, counts=feature_counts)
-
-        # Tree is optional — only store if a path was provided
-        tree = None
-        if newick_path:
-            tree = create_tree(session, run=run, newick_path=newick_path)
+        if not get_run_exists_feature_count_table(session, run_id):
+            create_feature_count_bulk(session, run_id=run_id, counts=feature_counts)
 
         session.commit()
         return {
@@ -282,7 +278,6 @@ def ingest_run_data(
             "genera_inserted": len(genus_abundances),
             "features_inserted": len(features),
             "feature_counts_inserted": len(feature_counts),
-            "tree_path": tree.newick_path if tree else None,
         }
     except RepositoryError as e:
         session.rollback()
@@ -303,6 +298,20 @@ def get_genus_data(run_id: int) -> list[dict]:
             {"genus": g.genus, "relative_abundance": g.relative_abundance}
             for g in genera
         ]
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+def get_is_run_in_genus(run_id: int) -> bool:
+    """
+    check if there is already a run_id in genus table
+    """
+    session = SessionLocal()
+    try:
+        in_table = get_run_exists_genus_table(session=session, run_id=run_id)
+        return in_table
     except RepositoryError as e:
         raise ServiceError(str(e)) from e
     finally:
@@ -331,20 +340,60 @@ def get_feature_counts(run_id: int) -> list[dict]:
     finally:
         session.close()
 
-
-# ==== Tree ====
-def get_tree(run_id: int) -> dict | None:
+    
+def get_run_feature_ids(run_id: int) -> list:
     """
-    Return the phylogenetic tree path for a run, or None if not yet uploaded.
+    Return feature ids that are associated with a run
     """
     session = SessionLocal()
     try:
-        tree = get_tree_for_run(session, run_id)
+        feats = list_features_for_run(session=session, run_id=run_id)
+        feat_ids = [feat['feature_id'] for feat in feats]
+        return feat_ids
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+def get_is_run_in_feature(run_id: int) -> bool:
+    """
+    check if there is already a run_id in feature table
+    """
+    session = SessionLocal()
+    try:
+        in_table = get_run_exists_feature_table(session=session, run_id=run_id)
+        return in_table
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+def get_is_run_in_feature_count(run_id: int) -> bool:
+    """
+    check if there is already a run_id in feature count table
+    """
+    session = SessionLocal()
+    try:
+        in_table = get_run_exists_feature_count_table(session=session, run_id=run_id)
+        return in_table
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+# ==== Tree ====
+def get_tree(project_id: int) -> dict | None:
+    """
+    Return the phylogenetic tree path for a project, or None if not yet uploaded.
+    """
+    session = SessionLocal()
+    try:
+        tree = get_tree_for_project(session, project_id)
         if tree is None:
             return None
         return {
             "tree_id": tree.tree_id,
-            "run_id": tree.run_id,
+            "project_id": tree.project_id,
             "newick_path": tree.newick_path,
             "created_at": tree.created_at.isoformat(),
         }
@@ -362,13 +411,14 @@ def store_alpha_diversities(run_id: int, metrics: dict[str, float]) -> list[dict
     """
     session = SessionLocal()
     try:
-        run = get_run(session, run_id)
-        rows = []
-        for metric, value in metrics.items():
-            alpha = create_alpha_diversity(session, run=run, metric=metric, value=value)
-            rows.append({"run_id": run_id, "metric": alpha.metric, "value": alpha.value})
-        session.commit()
-        return rows
+        if not get_run_exists_alpha_table(session=session, run_id=run_id):
+            run = get_run(session, run_id)
+            rows = []
+            for metric, value in metrics.items():
+                alpha = create_alpha_diversity(session, run=run, metric=metric, value=value)
+                rows.append({"run_id": run_id, "metric": alpha.metric, "value": alpha.value})
+            session.commit()
+            return rows
     except RepositoryError as e:
         session.rollback()
         raise ServiceError(str(e)) from e
@@ -403,16 +453,18 @@ def store_beta_diversity(
     """
     session = SessionLocal()
     try:
-        r1 = get_run(session, run_id_1)
-        r2 = get_run(session, run_id_2)
-        beta = repo_create_beta_diversity(session, run_1=r1, run_2=r2, metric=metric, value=value)
-        session.commit()
-        return {
-            "run_id_1": beta.run_id_1,
-            "run_id_2": beta.run_id_2,
-            "metric": beta.metric,
-            "value": beta.value,
-        }
+        if not get_run_exists_beta_table(session=session, run_id_1=run_id_1,
+                                         run_id_2=run_id_2, metric=metric):
+            r1 = get_run(session, run_id_1)
+            r2 = get_run(session, run_id_2)
+            beta = repo_create_beta_diversity(session, run_1=r1, run_2=r2, metric=metric, value=value)
+            session.commit()
+            return {
+                "run_id_1": beta.run_id_1,
+                "run_id_2": beta.run_id_2,
+                "metric": beta.metric,
+                "value": beta.value,
+            }
     except RepositoryError as e:
         session.rollback()
         raise ServiceError(str(e)) from e
@@ -445,6 +497,50 @@ def get_beta_diversity_matrix(project_id: int, metric: str) -> list[dict]:
                         "value": b.value,
                     })
         return results
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+def store_pcoa(run_id: int, metric: str, pc1: float, pc2: float) -> dict:
+    """
+    Persist PCoA coordinates for a single run and metric.
+    Upserts — safe to call on re-analysis without creating duplicate rows.
+    Raises ServiceError if the run does not exist.
+    """
+    session = SessionLocal()
+    try:
+        run = get_run(session, run_id)
+        row = create_pcoa(session, run=run, metric=metric, pc1=pc1, pc2=pc2)
+        session.commit()
+        return {
+            "run_id": run_id,
+            "metric": metric,
+            "pc1":    row.pc1,
+            "pc2":    row.pc2,
+        }
+    except RepositoryError as e:
+        session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+ 
+ 
+def get_pcoa(project_id: int, metric: str) -> list[dict]:
+    """
+    Return PCoA coordinates for all runs in a project for a given metric.
+    Returns [{"run_id": int, "pc1": float, "pc2": float}, ...]
+    Returns [] if no coordinates have been computed yet (e.g. UniFrac was
+    skipped because no phylogenetic tree was available).
+    """
+    session = SessionLocal()
+    try:
+        rows = get_pcoa_for_project(session, project_id, metric)
+        return [
+            {"run_id": r.run_id, "pc1": r.pc1, "pc2": r.pc2}
+            for r in rows
+        ]
     except RepositoryError as e:
         raise ServiceError(str(e)) from e
     finally:
@@ -611,6 +707,70 @@ def delete_project(project_id: int) -> None:
         session.close()
 
 
+# ==== Simulation ====
+
+def create_simulation(run_id: int) -> dict:
+    """Create a new simulation record for a run. Returns simulation_id."""
+    session = SessionLocal()
+    try:
+        run = get_run(session, run_id)
+        sim = repo_create_simulation(session, run=run)
+        session.commit()
+        return {"simulation_id": sim.simulation_id, "run_id": run_id}
+    except RepositoryError as e:
+        session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+def get_simulations_for_run(run_id: int) -> list[dict]:
+    """Return all simulation IDs for a run."""
+    session = SessionLocal()
+    try:
+        sims = repo_get_simulations_for_run(session, run_id)
+        return [{"simulation_id": s.simulation_id, "run_id": s.run_id,
+                 "created_at": s.created_at.isoformat() if s.created_at else None}
+                for s in sims]
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+def ingest_simulation_genus(run_id: int, simulation_id: int, genus_rows: dict[str, float]) -> dict:
+    """
+    Store modified genus abundances for a simulation.
+    genus_rows: {genus_name: relative_abundance}  e.g. {"Bacteroides": 0.15, "Faecalibacterium": 0.22}
+    """
+    session = SessionLocal()
+    try:
+        run = get_run(session, run_id)
+        create_genus_bulk(session, run=run, genus_abundances=genus_rows, simulation_id=simulation_id)
+        session.commit()
+        return {"simulation_id": simulation_id, "run_id": run_id, "genera_inserted": len(genus_rows)}
+    except RepositoryError as e:
+        session.rollback()
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+def get_simulation_genus(simulation_id: int) -> list[dict]:
+    """Return all genus rows stored for a simulation."""
+    from src.db.db_models import Genus
+    session = SessionLocal()
+    try:
+        from sqlalchemy import select
+        stmt = select(Genus).where(Genus.simulation_id == simulation_id)
+        rows = list(session.execute(stmt).scalars().all())
+        return [{"genus": g.genus, "relative_abundance": g.relative_abundance} for g in rows]
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
 # ==== Private helpers ====
 def _risk_label(probability: float) -> str:
     """Translate a risk percentage into a human-readable label."""
@@ -619,3 +779,22 @@ def _risk_label(probability: float) -> str:
     if probability < 66.0:
         return "Moderate"
     return "High"
+
+
+def create_tree_instance(project_id: int, newick_path: str):
+
+    session = SessionLocal()
+
+    try:
+        tree = create_tree(session=session, project=project_id, newick_path=newick_path)
+        return {
+            'tree_id': tree['tree_id'],
+            'project_id': tree['project_id'],
+            'newick_path': tree['newick_path'],
+            'created_at': tree['created_at'],
+        }
+    except Exception as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+        return None

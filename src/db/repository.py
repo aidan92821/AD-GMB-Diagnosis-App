@@ -7,11 +7,11 @@
 from __future__ import annotations
 
 from sqlalchemy.orm import Session
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, exists, or_, and_
 
 from src.db.db_models import (
     User, Project, Run, Genus, Feature, FeatureCount,
-    Tree, AlphaDiversity, BetaDiversity,
+    Tree, AlphaDiversity, BetaDiversity, PCoA, Simulation,
 )
 
 from argon2 import PasswordHasher
@@ -32,8 +32,8 @@ class IntegrityError(RepositoryError):
 
 
 # ==== USER ====
-def create_user(session: Session, *, username: str, password_hash: str) -> User:
-    user = User(username=username, password_hash=password_hash) # build python object in memory   
+def create_user(session: Session, *, username: str, password_hash: str, user_email: str) -> User:
+    user = User(username=username, password_hash=password_hash, user_email=user_email) # build python object in memory   
     session.add(user)                                           # stage it
     session.flush()                                             # send SQL to DB without committing for immediate use (can be rolledback)
     return user                                                 # return the object
@@ -164,11 +164,12 @@ def create_genus_bulk(
         *,
         run: Run,
         genus_abundances: dict[str, float],   # {"Firmicutes": 0.35, ...}
+        simulation_id: int | None = None,
 ) -> list[Genus]:
     """Insert all genus-level relative abundances for a run at once."""
     rows = []
     for genus_name, abundance in genus_abundances.items():
-        row = Genus(run_id=run.run_id, genus=genus_name, relative_abundance=abundance)
+        row = Genus(run_id=run.run_id, genus=genus_name, relative_abundance=abundance, simulation_id=simulation_id)
         session.add(row)
         rows.append(row)
     session.flush()
@@ -184,6 +185,11 @@ def get_genus_for_run(session: Session, run_id: int) -> list[Genus]:
     )
     return list(session.execute(stmt).scalars().all())
 
+def get_run_exists_genus_table(session: Session, run_id: int) -> bool:
+    stmt = (
+        select(exists().where(Genus.run_id == run_id))
+    )
+    return bool(session.execute(stmt).scalar())
 
 # ==== FEATURE ====
 def create_feature(
@@ -243,19 +249,32 @@ def get_feature_counts_for_run(session: Session, run_id: int) -> list[FeatureCou
     return list(session.execute(stmt).scalars().all())
 
 
+def get_run_exists_feature_table(session: Session, run_id: int) -> bool:
+    stmt = (
+        select(exists().where(Feature.run_id == run_id))
+    )
+    return bool(session.execute(stmt).scalar())
+
+def get_run_exists_feature_count_table(session: Session, run_id: int) -> bool:
+    stmt = (
+        select(exists().where(FeatureCount.run_id == run_id))
+    )
+    return bool(session.execute(stmt).scalar())
+
+
 # ==== TREE ====
-def create_tree(session: Session, *, run: Run, newick_path: str) -> Tree:
-    tree = Tree(run_id=run.run_id, newick_path=newick_path)
+def create_tree(session: Session, *, project: Project, newick_path: str) -> Tree:
+    tree = Tree(project_id=project.project_id, newick_path=newick_path)
     session.add(tree)
     session.flush()
     return tree
 
 
-def get_tree_for_run(session: Session, run_id: int) -> Tree | None:
-    """Return the most recent tree for a run or None if none exists."""
+def get_tree_for_project(session: Session, project_id: int) -> Tree | None:
+    """Return the most recent tree for a project or None if none exists."""
     stmt = (
         select(Tree)
-        .where(Tree.run_id == run_id)
+        .where(Tree.project_id == project_id)
         .order_by(desc(Tree.created_at), desc(Tree.tree_id))
         .limit(1)
     )
@@ -280,6 +299,13 @@ def get_alpha_diversity_for_run(session: Session, run_id: int) -> list[AlphaDive
     """Return all alpha diversity metrics for a run."""
     stmt = select(AlphaDiversity).where(AlphaDiversity.run_id == run_id)
     return list(session.execute(stmt).scalars().all())
+
+
+def get_run_exists_alpha_table(session: Session, run_id: int) -> bool:
+    stmt = (
+        select(exists().where(AlphaDiversity.run_id == run_id))
+    )
+    return bool(session.execute(stmt).scalar())
 
 
 # ==== BETA DIVERSITY ====
@@ -317,4 +343,74 @@ def get_beta_diversity(
     )
     if metric:
         stmt = stmt.where(BetaDiversity.metric == metric)
+    return list(session.execute(stmt).scalars().all())
+
+
+def get_run_exists_beta_table(session: Session, run_id_1: int, run_id_2: int, metric: str) -> bool:
+    stmt = select(exists().where(
+        or_(
+            and_(BetaDiversity.run_id_1 == run_id_1, BetaDiversity.run_id_2 == run_id_2, BetaDiversity.metric == metric),
+            and_(BetaDiversity.run_id_1 == run_id_2, BetaDiversity.run_id_2 == run_id_1, BetaDiversity.metric == metric),
+        )
+    ))
+
+    return bool(session.execute(stmt).scalar())
+
+
+def create_pcoa(
+        session: Session,
+        *,
+        run: Run,
+        metric: str,
+        pc1: float,
+        pc2: float,
+) -> PCoA:
+    """
+    Upsert PCoA coordinates for a run + metric pair.
+    If a row already exists (e.g. re-running analysis) the coordinates are
+    overwritten in place rather than inserting a duplicate.
+    The UniqueConstraint on (run_id, metric) enforces this at the DB level.
+    """
+    stmt     = select(PCoA).where(PCoA.run_id == run.run_id, PCoA.metric == metric)
+    existing = session.execute(stmt).scalar_one_or_none()
+    if existing:
+        existing.pc1 = pc1
+        existing.pc2 = pc2
+        session.flush()
+        return existing
+    row = PCoA(run_id=run.run_id, metric=metric, pc1=pc1, pc2=pc2)
+    session.add(row)
+    session.flush()
+    return row
+ 
+ 
+def get_pcoa_for_project(
+        session: Session,
+        project_id: int,
+        metric: str,
+) -> list[PCoA]:
+    """
+    Return all PCoA rows for every run in a project, filtered by metric.
+    Joins through Run so we never need project_id on the PCoA table itself.
+    Returns [] when no coordinates have been stored yet (e.g. UniFrac skipped).
+    """
+    stmt = (
+        select(PCoA)
+        .join(Run, PCoA.run_id == Run.run_id)
+        .where(Run.project_id == project_id, PCoA.metric == metric)
+    )
+    return list(session.execute(stmt).scalars().all())
+
+
+# ==== SIMULATION ====
+
+def create_simulation(session: Session, *, run: Run) -> Simulation:
+    sim = Simulation(run_id=run.run_id)
+    session.add(sim)
+    session.flush()
+    return sim
+
+
+def get_simulations_for_run(session: Session, run_id: int) -> list[Simulation]:
+    stmt = select(Simulation).where(Simulation.run_id == run_id)
     return list(session.execute(stmt).scalars().all())

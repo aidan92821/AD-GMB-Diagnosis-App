@@ -6,14 +6,16 @@ whenever the shared state changes.  No page imports from example_data.
 """
 
 from __future__ import annotations
+from pathlib import Path as _Path
 
 from PyQt6.QtWidgets import (
     QWidget, QFrame, QLabel, QLineEdit, QComboBox,
     QPushButton, QHBoxLayout, QVBoxLayout, QGridLayout,
     QFileDialog, QTableWidget, QTableWidgetItem, QHeaderView,
-    QSizePolicy, QScrollArea,
+    QSizePolicy, QScrollArea, QPlainTextEdit,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QFont, QTextCursor
 
 from models.app_state import AppState
 from resources.styles import (
@@ -25,6 +27,7 @@ from models.example_data import ALZHEIMER_RISK   # risk only still uses example
 from ui.widgets import (
     BarChartWidget, StackedBarWidget, BoxPlotWidget,
     PCoAWidget, HeatmapWidget, RiskMeterWidget,
+    NumericSortItem, GenusTableWidget, _AlphaBarWidget
 )
 from ui.helpers import (
     card, page_title, section_title,
@@ -32,6 +35,10 @@ from ui.helpers import (
     btn_primary, btn_outline,
     PillSwitcher, hdivider, vdivider,
 )
+
+from src.services.assessment_service import (ServiceError, get_feature_counts,
+                                             get_genus_data, get_alpha_diversities,
+                                             get_beta_diversity_matrix, get_pcoa)
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -71,7 +78,7 @@ def _info_banner(msg: str, kind: str = "info") -> QFrame:
 # ═════════════════════════════════════════════════════════════════════════════
 
 class OverviewPage(QWidget):
-    fetch_requested = pyqtSignal(str, str, int)
+    fetch_requested = pyqtSignal(str, str, int, str, object)
 
     _BP_RE  = __import__("re").compile(r"^PRJ(NA|EA|DA|EB|DB|NB)\d+$",
                                         __import__("re").IGNORECASE)
@@ -118,15 +125,16 @@ class OverviewPage(QWidget):
         self._run_input = QLineEdit()
         self._run_input.setPlaceholderText("e.g. SRR001001  —  leave blank for all runs")
         self._run_input.textChanged.connect(self._validate_inputs)
+        self._run_input.textChanged.connect(self._on_run_input_changed)
         col_run.addWidget(run_lbl); col_run.addWidget(self._run_input)
         input_row.addLayout(col_run, 3)
 
         col_n = QVBoxLayout(); col_n.setSpacing(4)
         col_n.addWidget(label_muted("Max runs to fetch"))
         self._run_count = QComboBox()
-        for n in ["1", "2", "3", "4", "5", "6", "8", "10", "12", "16", "20"]:
+        for n in ["1", "2", "3", "4"]:
             self._run_count.addItem(n)
-        self._run_count.setCurrentIndex(3)   # default = 4
+        self._run_count.setCurrentIndex(0)   # default = 4
         col_n.addWidget(self._run_count)
         input_row.addLayout(col_n, 1)
         lay.addLayout(input_row)
@@ -210,12 +218,55 @@ class OverviewPage(QWidget):
 
         self._fetch_btn.setEnabled(bp_ok and run_ok)
 
+    def _on_run_input_changed(self, text: str) -> None:
+        if text.strip():
+            self._run_count.setCurrentIndex(0)
+            self._run_count.setEnabled(False)
+        else:
+            self._run_count.setEnabled(True)
+
+    _FETCH_BTN_STYLE = """
+        QPushButton { background-color:#4F46E5; color:#FFFFFF; border:none;
+          border-radius:8px; font-size:14px; font-weight:700; padding:0 22px; }
+        QPushButton:hover   { background-color:#4338CA; }
+        QPushButton:pressed { background-color:#3730A3; }
+        QPushButton:disabled { background-color:#C7D2FE; color:#818CF8; }
+    """
+    _FETCH_CANCEL_STYLE = """
+        QPushButton { background-color:#DC2626; color:#FFFFFF; border:none;
+          border-radius:8px; font-size:14px; font-weight:700; padding:0 22px; }
+        QPushButton:hover   { background-color:#B91C1C; }
+        QPushButton:pressed { background-color:#991B1B; }
+    """
+
+    def set_cancel_callback(self, cb) -> None:
+        self._cancel_callback = cb
+
+    def _restore_fetch_btn(self) -> None:
+        self._fetch_btn.setText("  ⬇  Fetch data  →")
+        self._fetch_btn.setStyleSheet(self._FETCH_BTN_STYLE)
+        self._fetch_btn.clicked.disconnect()
+        self._fetch_btn.clicked.connect(self._on_fetch_clicked)
+        self._fetch_btn.setEnabled(True)
+        self._bp_input.setEnabled(True)
+        self._run_input.setEnabled(True)
+        self._run_count.setEnabled(not self._run_input.text().strip())
+
     def _on_fetch_clicked(self):
         bp  = self._bp_input.text().strip()
         run = self._run_input.text().strip()
         n   = int(self._run_count.currentText())
-        self._fetch_btn.setEnabled(False)
-        self._fetch_btn.setText("  ⟳  Fetching…")
+        email = 'emmanicolego@gmail.com'
+        user = None
+
+        # Transform button to Cancel
+        self._fetch_btn.setText("  ✕  Cancel")
+        self._fetch_btn.setStyleSheet(self._FETCH_CANCEL_STYLE)
+        self._fetch_btn.clicked.disconnect()
+        cb = getattr(self, '_cancel_callback', None)
+        if cb:
+            self._fetch_btn.clicked.connect(cb)
+
         self._bp_input.setEnabled(False)
         self._run_input.setEnabled(False)
         self._run_count.setEnabled(False)
@@ -226,16 +277,13 @@ class OverviewPage(QWidget):
             "background:#EEF2FF; border:1px solid #C7D2FE; border-radius:6px;")
         self._status_lbl.setStyleSheet("font-size:12px; color:#4338CA;")
         self._status_bar.show()
-        self.fetch_requested.emit(bp, run, n)
+        self.fetch_requested.emit(bp, run, n, email, user)
 
     # ── called by MainWindow ──────────────────────────────────────────────────
 
     def load(self, state: AppState):
         """Populate overview from live AppState."""
-        self._fetch_btn.setEnabled(True)
-        self._fetch_btn.setText("  ⬇  Fetch data  →")
-        self._bp_input.setEnabled(True)
-        self._run_input.setEnabled(True)
+        self._restore_fetch_btn()
         self._run_count.setEnabled(True)
 
         self._status_lbl.setText(
@@ -249,11 +297,7 @@ class OverviewPage(QWidget):
         self._rebuild_runs_list(state)
 
     def show_fetch_error(self, message: str):
-        self._fetch_btn.setEnabled(True)
-        self._fetch_btn.setText("  ⬇  Fetch data  →")
-        self._bp_input.setEnabled(True)
-        self._run_input.setEnabled(True)
-        self._run_count.setEnabled(True)
+        self._restore_fetch_btn()
         self._status_lbl.setText(f"✗  {message}")
         self._status_bar.setStyleSheet(
             "background:#FEF2F2; border:1px solid #FECACA; border-radius:6px;")
@@ -273,65 +317,62 @@ class OverviewPage(QWidget):
         genus_val = str(state.genus_count)  if state.genus_count else "—"
         asv_sub   = "unique sequences"      if state.asv_count else "upload FASTQ to compute"
         genus_sub = "bacterial genera"      if state.genus_count else "upload FASTQ to compute"
+        uploaded_runs = sum(1 for r in state.runs.values() if r['uploaded'])
+        uploaded_sub  = (
+            f"{state.uploaded_count} FASTQ files on disk"
+            if uploaded_runs else "browse or fetch to upload"
+        )
         for value, label, sub in [
-            (state.project_id or state.bioproject_id, "Project ID",    ""),
+            (state.project_uid or state.bioproject_id, "Project ID",    ""),
             (state.bioproject_id,                     "BioProject ID", "NCBI accession"),
             (str(state.run_count),                    "Runs",          "  ".join(state.run_labels)),
             (asv_val,                                 "ASVs",          asv_sub),
             (genus_val,                               "Genera",        genus_sub),
             (state.library_layout,                    "Library",       "sequencing type"),
-            (f"{state.uploaded_count} / {state.run_count}", "Uploaded",
-             "FASTQ files ready"),
+            (f"{uploaded_runs} / {state.run_count}",  "Runs Uploaded", uploaded_sub),
         ]:
             self._stats_row.addWidget(stat_card(value, label, sub))
 
     def _rebuild_runs_list(self, state: AppState):
         _clear(self._runs_body)
         header = QHBoxLayout()
-        for col_text, fw in [("Run",0),("Accession",1),("Reads",1),("Layout",1),("Status",1),("QIIME2",2)]:
+        for col_text, fw in [("Run", 0), ("Accession", 2), ("Reads", 1), ("Layout", 1), ("Status", 1)]:
             lbl = QLabel(col_text)
             lbl.setStyleSheet(f"font-size:11px;font-weight:600;color:{TEXT_M};padding-bottom:4px;")
-            if fw: header.addWidget(lbl, fw)
-            else: lbl.setFixedWidth(36); header.addWidget(lbl)
+            if fw:
+                header.addWidget(lbl, fw)
+            else:
+                lbl.setFixedWidth(36); header.addWidget(lbl)
         self._runs_body.addLayout(header)
         rule = QFrame(); rule.setFrameShape(QFrame.Shape.HLine)
         rule.setStyleSheet(f"background:{BORDER}; max-height:1px;")
         self._runs_body.addWidget(rule)
 
-        for run in state.runs:
-            row = QHBoxLayout(); row.setContentsMargins(0, 6, 0, 6)
-            badge = QLabel(run.label)
+        for run in state.runs.values():
+            row = QHBoxLayout(); row.setContentsMargins(0, 5, 0, 5)
+            badge = QLabel(run['label'])
             badge.setFixedWidth(36)
             badge.setStyleSheet(
                 "font-size:11px;font-weight:700;color:#6366F1;"
                 "background:#EEF2FF;border-radius:4px;padding:2px 4px;")
             row.addWidget(badge)
 
-            acc = QLabel(run.accession)
+            acc = QLabel(run['run_accession'])
             acc.setStyleSheet("font-size:11px;color:#6B7280;font-family:monospace;")
-            row.addWidget(acc, 1)
+            row.addWidget(acc, 2)
 
-            reads = QLabel(f"{run.read_count:,}" if run.read_count else "—")
-            reads.setStyleSheet(f"font-size:12px;color:{TEXT_M};")
+            reads = QLabel(f"{run['read_count']:,}" if run['read_count'] else "—")
+            reads.setStyleSheet(f"font-size:11px;color:{TEXT_M};")
             row.addWidget(reads, 1)
 
-            layout_lbl = QLabel(run.layout.title())
+            layout_lbl = QLabel(run['library_layout'].title())
             layout_lbl.setStyleSheet(f"font-size:11px;color:{TEXT_M};")
             row.addWidget(layout_lbl, 1)
 
-            status_text  = "✓  Uploaded" if run.uploaded else "○  Pending"
-            status_color = SUCCESS_FG    if run.uploaded else TEXT_HINT
-            st = QLabel(status_text)
-            st.setStyleSheet(f"font-size:11px;color:{status_color};")
+            st = QLabel("✓  Uploaded" if run['uploaded'] else "○  Pending")
+            st.setStyleSheet(
+                f"font-size:11px;color:{SUCCESS_FG if run['uploaded'] else TEXT_HINT};")
             row.addWidget(st, 1)
-
-            if run.qiime_error:
-                qiime_lbl = QLabel(f"⚠  {run.qiime_error[:60]}")
-                qiime_lbl.setStyleSheet(f"font-size:10px;color:{DANGER_FG};")
-            else:
-                qiime_lbl = QLabel("—")
-                qiime_lbl.setStyleSheet(f"font-size:11px;color:{TEXT_HINT};")
-            row.addWidget(qiime_lbl, 2)
             self._runs_body.addLayout(row)
 
             div = QFrame(); div.setFrameShape(QFrame.Shape.HLine)
@@ -344,7 +385,8 @@ class OverviewPage(QWidget):
 # ═════════════════════════════════════════════════════════════════════════════
 
 class UploadRunsPage(QWidget):
-    file_selected = pyqtSignal(str, str)   # (run_label, file_path)
+    file_selected   = pyqtSignal(str, str, str)  # (run_label, slot, file_path)  — for NCBI pending runs
+    local_run_added = pyqtSignal(str, str, str)  # (layout, fwd_path, rev_or_empty)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -355,62 +397,274 @@ class UploadRunsPage(QWidget):
     def _build(self):
         self._root = QVBoxLayout(self)
         self._root.setContentsMargins(28, 24, 28, 24)
-        self._root.setSpacing(16)
+        self._root.setSpacing(12)
         self._root.addWidget(page_title("Upload Runs"))
 
-        info = card()
-        info.layout().addWidget(section_title("Upload .fastq or .fastq.gz files"))
-        info.layout().addWidget(label_hint(
-            "Validates 4-line FASTQ format: @SEQID · sequence (ACTG) · + · Phred scores\n"
-            "Fetch a project first to see the run list below."))
-        self._root.addWidget(info)
-
+        # ── Runs card: compact one-row-per-run table ───────────────────────────
         self._runs_card = card()
-        self._runs_card.layout().addWidget(section_title("Run files"))
+        self._runs_card.layout().setSpacing(6)
+        self._runs_card.layout().addWidget(section_title("Sequencing Runs"))
         self._runs_body = QVBoxLayout()
         self._runs_body.setSpacing(0)
         self._runs_card.layout().addLayout(self._runs_body)
         self._runs_body.addWidget(_placeholder("No runs loaded — fetch a project first."))
+
+        # Pipeline button (hidden until files ready)
+        self._pipeline_divider = hdivider()
+        self._runs_card.layout().addWidget(self._pipeline_divider)
+        self._pipeline_divider.hide()
+
+        self._pipeline_row_widget = QWidget()
+        pr_lay = QHBoxLayout(self._pipeline_row_widget)
+        pr_lay.setContentsMargins(0, 4, 0, 2)
+        pr_lay.setSpacing(12)
+        self._pipeline_hint = QLabel("Runs ready — click to start QIIME2 preprocessing.")
+        self._pipeline_hint.setObjectName("label_hint")
+        pr_lay.addWidget(self._pipeline_hint, 1)
+        self._pipeline_btn = btn_primary("  ▶  Run Pipeline")
+        self._pipeline_btn.setObjectName("btn_run_pipeline")
+        self._pipeline_btn.setFixedHeight(40)
+        self._pipeline_btn.setMinimumWidth(160)
+        self._pipeline_btn.setStyleSheet(
+            "background-color:#059669; color:white; border:none;"
+            "border-radius:8px; font-size:13px; font-weight:700; padding:0 20px;"
+        )
+        pr_lay.addWidget(self._pipeline_btn)
+        self._runs_card.layout().addWidget(self._pipeline_row_widget)
+        self._pipeline_row_widget.hide()
         self._root.addWidget(self._runs_card)
 
-        self._error_area = QVBoxLayout()
-        self._root.addLayout(self._error_area)
+        # ── Add Local FASTQ card ───────────────────────────────────────────────
+        local_card = card()
+        local_card.layout().setSpacing(8)
+        local_card.layout().addWidget(section_title("Add Local FASTQ Files"))
+        local_card.layout().addWidget(label_hint(
+            "Upload your own FASTQ files from your computer. "
+            "They will be included in the QIIME2 pipeline when you click Run Pipeline."))
+
+        # Type toggle — two large, clearly visible buttons
+        _SEL   = "background-color:#4F46E5; color:#FFFFFF; border:none; border-radius:8px; font-size:13px; font-weight:700; padding:8px 20px;"
+        _UNSEL = "background-color:#F3F4F6; color:#374151; border:1.5px solid #D1D5DB; border-radius:8px; font-size:13px; font-weight:600; padding:8px 20px;"
+        type_row = QHBoxLayout(); type_row.setSpacing(8)
+        self._btn_paired = QPushButton("⬤  Paired-end")
+        self._btn_paired.setFixedHeight(40)
+        self._btn_paired.setStyleSheet(_SEL)
+        self._btn_paired.clicked.connect(lambda: self._set_local_type("Paired-end"))
+        self._btn_single = QPushButton("○  Single-end")
+        self._btn_single.setFixedHeight(40)
+        self._btn_single.setStyleSheet(_UNSEL)
+        self._btn_single.clicked.connect(lambda: self._set_local_type("Single-end"))
+        type_row.addWidget(self._btn_paired, 1)
+        type_row.addWidget(self._btn_single, 1)
+        type_row.addStretch()
+        local_card.layout().addLayout(type_row)
+        self._local_type_active = "Paired-end"
+
+        # Paired-end file inputs
+        self._local_paired_widget = QWidget()
+        pw = QVBoxLayout(self._local_paired_widget)
+        pw.setContentsMargins(0, 4, 0, 0); pw.setSpacing(8)
+        self._local_fwd_path = QLineEdit()
+        self._local_fwd_path.setReadOnly(True)
+        self._local_fwd_path.setPlaceholderText("Forward reads  (_1.fastq / _R1.fastq)")
+        self._local_rev_path = QLineEdit()
+        self._local_rev_path.setReadOnly(True)
+        self._local_rev_path.setPlaceholderText("Reverse reads  (_2.fastq / _R2.fastq)")
+        for path_edit, row_lbl, tip in [
+            (self._local_fwd_path, "Forward (_1)", "Select forward / R1 FASTQ file"),
+            (self._local_rev_path, "Reverse (_2)", "Select reverse / R2 FASTQ file"),
+        ]:
+            fr = QHBoxLayout(); fr.setSpacing(8)
+            lbl_w = QLabel(row_lbl)
+            lbl_w.setFixedWidth(90)
+            lbl_w.setStyleSheet("font-size:12px; color:#6B7280;")
+            fr.addWidget(lbl_w)
+            fr.addWidget(path_edit, 1)
+            b = QPushButton("Browse…")
+            b.setFixedHeight(34); b.setFixedWidth(90)
+            b.setToolTip(tip)
+            b.setStyleSheet(
+                "background-color:#FFFFFF; color:#374151; border:1.5px solid #D1D5DB;"
+                "border-radius:6px; font-size:12px; font-weight:600; padding:0 12px;")
+            b.clicked.connect(lambda _, p=path_edit: self._browse_local_file(p))
+            fr.addWidget(b)
+            pw.addLayout(fr)
+        local_card.layout().addWidget(self._local_paired_widget)
+
+        # Single-end file input (hidden by default)
+        self._local_single_widget = QWidget()
+        sw = QHBoxLayout(self._local_single_widget)
+        sw.setContentsMargins(0, 4, 0, 0); sw.setSpacing(8)
+        lbl_sw = QLabel("FASTQ file")
+        lbl_sw.setFixedWidth(90)
+        lbl_sw.setStyleSheet("font-size:12px; color:#6B7280;")
+        sw.addWidget(lbl_sw)
+        self._local_single_path = QLineEdit()
+        self._local_single_path.setReadOnly(True)
+        self._local_single_path.setPlaceholderText("FASTQ file  (.fastq / .fastq.gz)")
+        sw.addWidget(self._local_single_path, 1)
+        b_s = QPushButton("Browse…")
+        b_s.setFixedHeight(34); b_s.setFixedWidth(90)
+        b_s.setStyleSheet(
+            "background-color:#FFFFFF; color:#374151; border:1.5px solid #D1D5DB;"
+            "border-radius:6px; font-size:12px; font-weight:600; padding:0 12px;")
+        b_s.clicked.connect(lambda _: self._browse_local_file(self._local_single_path))
+        sw.addWidget(b_s)
+        local_card.layout().addWidget(self._local_single_widget)
+        self._local_single_widget.hide()
+
+        # Add Run button — large and green, full attention
+        add_row = QHBoxLayout(); add_row.addStretch()
+        self._add_local_btn = QPushButton("＋  Add Run")
+        self._add_local_btn.setFixedHeight(42)
+        self._add_local_btn.setMinimumWidth(140)
+        self._add_local_btn.setStyleSheet(
+            "background-color:#059669; color:white; border:none;"
+            "border-radius:8px; font-size:14px; font-weight:700; padding:0 24px;")
+        self._add_local_btn.clicked.connect(self._on_add_local_run)
+        add_row.addWidget(self._add_local_btn)
+        local_card.layout().addLayout(add_row)
+        self._root.addWidget(local_card)
+
+        # ── Log / terminal card (always visible) ──────────────────────────────
+        log_card = card()
+        log_card.layout().setSpacing(6)
+        log_card.layout().setContentsMargins(14, 10, 14, 10)
+
+        log_hdr = QHBoxLayout()
+        log_hdr.setSpacing(8)
+        log_hdr.addWidget(section_title("Log"))
+        log_hdr.addStretch()
+        self._status_dot = QLabel("●")
+        self._status_dot.setStyleSheet("font-size:10px; color:#9CA3AF;")
+        log_hdr.addWidget(self._status_dot)
+        self._status_step_lbl = QLabel("Idle")
+        self._status_step_lbl.setStyleSheet("font-size:11px; color:#9CA3AF;")
+        log_hdr.addWidget(self._status_step_lbl)
+        log_card.layout().addLayout(log_hdr)
+
+        self._terminal = QPlainTextEdit()
+        self._terminal.setReadOnly(True)
+        mono = QFont("Menlo")
+        mono.setStyleHint(QFont.StyleHint.Monospace)
+        mono.setPointSize(10)
+        self._terminal.setFont(mono)
+        self._terminal.setStyleSheet(
+            "QPlainTextEdit {"
+            "  background:#0D1117; color:#C9D1D9;"
+            "  border:1px solid #30363D; border-radius:6px; padding:8px;"
+            "}"
+        )
+        self._terminal.setMinimumHeight(70)
+        # self._terminal.setMaximumHeight(140)
+        self._terminal.setPlainText("Ready — fetch a project to begin.\n")
+        log_card.layout().addWidget(self._terminal)
+
+        # Hidden error container kept for API compatibility
+        self._error_container = QWidget()
+        self._error_container.hide()
+        err_lay = QVBoxLayout(self._error_container)
+        err_lay.setContentsMargins(0, 0, 0, 0)
+        err_lay.setSpacing(4)
+        self._error_area = err_lay
+        log_card.layout().addWidget(self._error_container)
+
+        self._root.addWidget(log_card)
         self._root.addStretch()
 
     def load(self, state: AppState):
         self._state = state
         self._row_widgets = {}
         _clear(self._runs_body)
-        _clear(self._error_area)
 
-        for run in state.runs:
-            row = QHBoxLayout(); row.setSpacing(12)
-            lbl = QLabel(f"<b>{run.label}</b>  {run.accession}")
-            lbl.setObjectName("label_muted"); lbl.setFixedWidth(180)
-            row.addWidget(lbl)
+        _pipeline_dir = _Path(__file__).parent.parent / "pipeline" / "data"
 
-            status_lbl = QLabel("✓  Uploaded" if run.uploaded else "○  Pending")
+        for i, run in enumerate(state.runs.values(), start=1):
+            srr       = run['run_accession']
+            is_paired = run.get('library_layout', 'PAIRED').upper() == 'PAIRED'
+            uploaded  = run.get('uploaded', False)
+
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 6, 0, 6)
+            row.setSpacing(10)
+
+            # Label badge
+            badge = QLabel(run['label'])
+            badge.setFixedWidth(30)
+            badge.setStyleSheet(
+                "font-size:11px; font-weight:700; color:#6366F1;"
+                "background:#EEF2FF; border-radius:4px; padding:2px 4px;")
+            row.addWidget(badge)
+
+            # Accession (monospace)
+            acc = QLabel(srr)
+            acc.setStyleSheet("font-size:11px; color:#6B7280; font-family:monospace;")
+            row.addWidget(acc, 2)
+
+            # Type tag
+            tag = QLabel("PAIRED" if is_paired else "SINGLE")
+            tag.setStyleSheet(
+                f"font-size:10px; font-weight:700; padding:1px 5px; border-radius:3px;"
+                f"background:{'#EDE9FE' if is_paired else '#D1FAE5'};"
+                f"color:{'#6D28D9' if is_paired else '#065F46'};")
+            row.addWidget(tag)
+
+            # FASTQ file display — prefer stored path names, fall back to disk check
+            if is_paired:
+                stored_fwd = run.get('fastq_forward', '')
+                stored_rev = run.get('fastq_reverse', '')
+                disk_f1 = _pipeline_dir / state.bioproject_id / "fastq" / "paired" / f"{srr}_1.fastq"
+                disk_f2 = _pipeline_dir / state.bioproject_id / "fastq" / "paired" / f"{srr}_2.fastq"
+                fwd_ok   = bool(stored_fwd) or disk_f1.exists()
+                rev_ok   = bool(stored_rev) or disk_f2.exists()
+                fwd_name = _Path(stored_fwd).name if stored_fwd else (f"{srr}_1.fastq" if disk_f1.exists() else f"{srr}_1.fastq")
+                rev_name = _Path(stored_rev).name if stored_rev else (f"{srr}_2.fastq" if disk_f2.exists() else f"{srr}_2.fastq")
+                files_ok = fwd_ok and rev_ok
+                files_text = (
+                    f"{'✓' if fwd_ok else '○'}  {fwd_name}    "
+                    f"{'✓' if rev_ok else '○'}  {rev_name}"
+                )
+            else:
+                stored_s  = run.get('fastq_path', '')
+                disk_f1   = _pipeline_dir / state.bioproject_id / "fastq" / "single" / f"{srr}.fastq"
+                files_ok  = bool(stored_s) or disk_f1.exists()
+                file_name = _Path(stored_s).name if stored_s else f"{srr}.fastq"
+                files_text = f"{'✓' if files_ok else '○'}  {file_name}"
+            files_lbl = QLabel(files_text)
+            files_lbl.setStyleSheet(
+                f"font-size:10px; font-family:monospace;"
+                f"color:{'#059669' if files_ok else '#9CA3AF'};")
+            row.addWidget(files_lbl, 3)
+
+            # Upload status
+            status_lbl = QLabel("✓  Uploaded" if uploaded else "○  Pending")
+            status_lbl.setFixedWidth(84)
             status_lbl.setStyleSheet(
-                f"color:{'#065F46' if run.uploaded else '#9CA3AF'}; font-size:12px;")
-            row.addWidget(status_lbl); row.addStretch()
+                f"font-size:11px; color:{'#065F46' if uploaded else '#9CA3AF'};")
+            row.addWidget(status_lbl)
 
-            browse_btn = btn_outline(f"Browse file for {run.label}…")
-            browse_btn.clicked.connect(
-                lambda _, r=run.label: self._browse(r))
-            row.addWidget(browse_btn)
+            # Browse buttons only for pending NCBI runs (not local and not already uploaded)
+            is_local = srr.startswith("LOCAL_")
+            if not uploaded and not is_local:
+                if is_paired:
+                    for slot, lbl_txt, tip in [
+                        ('forward', 'Browse _1', 'Forward reads (SRR_1.fastq)'),
+                        ('reverse', 'Browse _2', 'Reverse reads (SRR_2.fastq)'),
+                    ]:
+                        b = btn_outline(lbl_txt)
+                        b.setFixedWidth(82); b.setToolTip(tip)
+                        b.clicked.connect(lambda _, r=run['label'], s=slot: self._browse(r, s))
+                        row.addWidget(b)
+                else:
+                    b = btn_outline("Browse")
+                    b.setFixedWidth(82); b.setToolTip("Select FASTQ file")
+                    b.clicked.connect(lambda _, r=run['label']: self._browse(r, 'single'))
+                    row.addWidget(b)
 
             self._runs_body.addLayout(row)
-            self._row_widgets[run.label] = {"status": status_lbl}
-            if run != state.runs[-1]:
+            self._row_widgets[run['label']] = {"status": status_lbl}
+            if i < state.run_count:
                 self._runs_body.addWidget(hdivider())
-
-        for run in state.runs:
-            if run.qiime_error:
-                b = QFrame(); b.setObjectName("banner_err")
-                bl = QHBoxLayout(b); bl.setContentsMargins(12, 8, 12, 8)
-                l = QLabel(f"{run.label} — {run.qiime_error}")
-                l.setObjectName("banner_text_err"); l.setWordWrap(True)
-                bl.addWidget(l); self._error_area.addWidget(b)
 
     def update_run_status(self, run_label: str, uploaded: bool, error: str = ""):
         """Called by MainWindow after FASTQ validation."""
@@ -425,84 +679,143 @@ class UploadRunsPage(QWidget):
             lbl.setStyleSheet(
                 f"color:{'#065F46' if uploaded else '#9CA3AF'}; font-size:12px;")
 
-    def _browse(self, run_label: str):
+    def _browse(self, run_label: str, slot: str) -> None:
+        titles = {
+            'forward': f"Select Forward reads (_1.fastq) for {run_label}",
+            'reverse': f"Select Reverse reads (_2.fastq) for {run_label}",
+            'single':  f"Select FASTQ file for {run_label}",
+        }
         path, _ = QFileDialog.getOpenFileName(
-            self, f"Select FASTQ for {run_label}", "",
+            self, titles.get(slot, f"Select FASTQ for {run_label}"), "",
             "FASTQ files (*.fastq *.fastq.gz);;All files (*)")
         if path:
-            self.file_selected.emit(run_label, path)
+            self.file_selected.emit(run_label, slot, path)
 
-    def show_run_pipeline_btn(self, ready: bool, callback) -> None:
-        """
-        Show the Run Pipeline button once at least one FASTQ is uploaded.
-        'ready' = True means ALL runs have files (button fully enabled).
-        'callback' = function to call when user clicks.
-        """
-        if not hasattr(self, "_pipeline_btn"):
-            from ui.helpers import btn_primary, hdivider
-            self._runs_card.layout().addWidget(hdivider())
+    # ── Local file upload helpers ──────────────────────────────────────────────
 
-            row = QHBoxLayout(); row.setSpacing(12)
-            hint = QLabel("Upload all run files then click Run Pipeline to start QIIME2 preprocessing.")
-            hint.setObjectName("label_hint"); hint.setWordWrap(True)
-            row.addWidget(hint, 1)
+    def _set_local_type(self, label: str) -> None:
+        _SEL   = "background-color:#4F46E5; color:#FFFFFF; border:none; border-radius:8px; font-size:13px; font-weight:700; padding:8px 20px;"
+        _UNSEL = "background-color:#F3F4F6; color:#374151; border:1.5px solid #D1D5DB; border-radius:8px; font-size:13px; font-weight:600; padding:8px 20px;"
+        self._local_type_active = label
+        is_paired = label == "Paired-end"
+        self._btn_paired.setText("⬤  Paired-end  (2 files)" if is_paired else "○  Paired-end  (2 files)")
+        self._btn_single.setText("⬤  Single-end  (1 file)" if not is_paired else "○  Single-end  (1 file)")
+        self._btn_paired.setStyleSheet(_SEL if is_paired else _UNSEL)
+        self._btn_single.setStyleSheet(_SEL if not is_paired else _UNSEL)
+        self._local_paired_widget.setVisible(is_paired)
+        self._local_single_widget.setVisible(not is_paired)
 
-            self._pipeline_btn = btn_primary("  ▶  Run Pipeline")
-            self._pipeline_btn.setFixedHeight(40)
-            self._pipeline_btn.setStyleSheet("""
-                QPushButton { background:#10B981; color:white; border:none;
-                  border-radius:8px; font-size:13px; font-weight:700; padding:0 20px; }
-                QPushButton:hover   { background:#059669; }
-                QPushButton:disabled { background:#D1FAE5; color:#6EE7B7; }
-            """)
-            row.addWidget(self._pipeline_btn)
-            self._runs_card.layout().addLayout(row)
+    def _on_local_type_changed(self, label: str) -> None:
+        self._set_local_type(label)
 
+    def _browse_local_file(self, target: QLineEdit) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select FASTQ file", "",
+            "FASTQ files (*.fastq *.fastq.gz);;All files (*)")
+        if path:
+            target.setText(path)
+
+    def _on_add_local_run(self) -> None:
+        is_paired = self._local_type_active == "Paired-end"
+        if is_paired:
+            fwd = self._local_fwd_path.text().strip()
+            rev = self._local_rev_path.text().strip()
+            if not fwd or not rev:
+                self._log("Select both forward and reverse FASTQ files first.", "warn")
+                return
+            self.local_run_added.emit("PAIRED", fwd, rev)
+            self._local_fwd_path.clear()
+            self._local_rev_path.clear()
+        else:
+            single = self._local_single_path.text().strip()
+            if not single:
+                self._log("Select a FASTQ file first.", "warn")
+                return
+            self.local_run_added.emit("SINGLE", single, "")
+            self._local_single_path.clear()
+
+    _PIPELINE_BTN_STYLE = (
+        "background-color:#059669; color:white; border:none;"
+        "border-radius:8px; font-size:13px; font-weight:700; padding:0 20px;"
+    )
+    _CANCEL_BTN_STYLE = (
+        "background-color:#DC2626; color:white; border:none;"
+        "border-radius:8px; font-size:13px; font-weight:700; padding:0 20px;"
+    )
+
+    def show_run_pipeline_btn(self, ready: bool, callback, cancel_callback=None) -> None:
+        """Show button as Run Pipeline; on click it transforms into a Cancel button."""
+        self._pipeline_divider.show()
+        self._pipeline_row_widget.show()
         self._pipeline_btn.setEnabled(ready)
-        self._pipeline_btn.setText(
-            "  ▶  Run Pipeline" if ready else "  ▶  Run Pipeline  (waiting for all files)")
-        # Reconnect to the callback (disconnect old first to avoid double-fire)
+        self._pipeline_btn.setText("  ▶  Run Pipeline")
+        self._pipeline_btn.setStyleSheet(self._PIPELINE_BTN_STYLE)
         try:
             self._pipeline_btn.clicked.disconnect()
         except (RuntimeError, TypeError):
             pass
-        self._pipeline_btn.clicked.connect(callback)
+
+        def _on_click():
+            self._pipeline_btn.setText("  ✕  Cancel")
+            self._pipeline_btn.setStyleSheet(self._CANCEL_BTN_STYLE)
+            try:
+                self._pipeline_btn.clicked.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            if cancel_callback:
+                self._pipeline_btn.clicked.connect(cancel_callback)
+            callback()
+
+        self._pipeline_btn.clicked.connect(_on_click)
+
+    def reset_pipeline_btn(self, callback, cancel_callback=None) -> None:
+        """Restore button to Run Pipeline state (call after complete, error, or cancel)."""
+        self.show_run_pipeline_btn(ready=True, callback=callback,
+                                   cancel_callback=cancel_callback)
 
     def auto_mark_uploaded(self, state: "AppState") -> None:
-        """
-        Called by MainWindow after fasterq-dump downloads complete.
-        Refreshes the run list (showing ✓ Uploaded for downloaded runs)
-        and shows the Run Pipeline button ready to fire.
-        """
-        self.load(state)
-        uploaded = [r for r in state.runs if r.uploaded]
-        if uploaded:
-            self.show_download_status(
-                f"✓  {len(uploaded)} of {state.run_count} run"
-                f"{'s' if state.run_count != 1 else ''} downloaded automatically "
-                f"to  data/{state.bioproject_id}/fastq/",
-                kind="ok",
-            )
+        self.load(state)  # refresh table; main_window logs status via update_pipeline_status
 
     def show_pipeline_error(self, message: str) -> None:
-        """Show a red error banner on the upload page after pipeline failure."""
-        if hasattr(self, "_dl_info_banner"):
-            self._dl_info_banner.deleteLater()
-            del self._dl_info_banner
-        if hasattr(self, "_pipeline_err_banner"):
-            self._pipeline_err_banner.deleteLater()
-        self._pipeline_err_banner = _info_banner(f"Pipeline error: {message[:200]}", kind="err")
-        self._root.insertWidget(self._root.count() - 1, self._pipeline_err_banner)
+        self._log(f"✗  Pipeline error: {message[:200]}", "err")
 
     def show_download_status(self, message: str, kind: str = "info") -> None:
-        """Show a non-blocking info/ok/warn banner about download state."""
-        if hasattr(self, "_dl_info_banner"):
-            try:
-                self._dl_info_banner.deleteLater()
-            except RuntimeError:
-                pass
-        self._dl_info_banner = _info_banner(message, kind=kind)
-        self._root.insertWidget(self._root.count() - 1, self._dl_info_banner)
+        self._log(message, kind)
+
+    def update_pipeline_status(self, message: str, kind: str = "info") -> None:
+        dot_colors = {
+            "ok": "#10B981", "warn": "#F59E0B",
+            "err": "#EF4444", "info": "#3B82F6", "run": "#8B5CF6",
+        }
+        text_colors = {
+            "ok": "#065F46", "warn": "#78350F",
+            "err": "#7F1D1D", "info": "#1E3A5F", "run": "#3B0764",
+        }
+        self._status_dot.setStyleSheet(
+            f"font-size:10px; color:{dot_colors.get(kind, '#3B82F6')};")
+        self._status_step_lbl.setStyleSheet(
+            f"font-size:11px; color:{text_colors.get(kind, '#1E3A5F')};")
+        self._status_step_lbl.setText(message)
+        self._log(message, kind)
+
+    def _log(self, text: str, kind: str = "info") -> None:
+        prefixes = {"ok": "✓", "warn": "⚠", "err": "✗", "run": "▶", "info": "ℹ"}
+        prefix = prefixes.get(kind, "ℹ")
+        line = f"{prefix}  {text.strip()}"
+        self._terminal.moveCursor(QTextCursor.MoveOperation.End)
+        self._terminal.insertPlainText(line + "\n")
+        self._terminal.moveCursor(QTextCursor.MoveOperation.End)
+
+    def append_terminal_output(self, text: str) -> None:
+        self._terminal.moveCursor(QTextCursor.MoveOperation.End)
+        self._terminal.insertPlainText(text if text.endswith("\n") else text + "\n")
+        self._terminal.moveCursor(QTextCursor.MoveOperation.End)
+
+    def show_terminal(self, visible: bool = True) -> None:
+        self._terminal.setVisible(visible)
+
+    def clear_terminal(self) -> None:
+        self._terminal.clear()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -510,137 +823,486 @@ class UploadRunsPage(QWidget):
 # ═════════════════════════════════════════════════════════════════════════════
 
 class DiversityPage(QWidget):
-    """Alpha boxplots + Beta PCoA & heatmap — all driven by live AppState."""
-
-    def __init__(self, parent=None):
+    """
+    Alpha bar charts + Beta PCoA scatter + dissimilarity heatmap.
+    Reads only pre-computed values from the DB — no computation here.
+    """
+ 
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._state: AppState | None = None
         self._alpha_metric = "shannon"
         self._beta_metric  = "bray_curtis"
+        # Caches keyed the same way as the DB queries to avoid redundant calls
+        # when the user switches pills back and forth.
+        # None = queried, got nothing.  Missing key = not yet queried.
+        self._alpha_cache: dict[int, dict[str, float]]              = {}
+        self._beta_cache:  dict[str, list[list[float]] | None]      = {}
+        self._pcoa_cache:  dict[str, dict[str, tuple[float, float]] | None] = {}
         self._build()
-
-    def _build(self):
+ 
+    # ── Layout ────────────────────────────────────────────────────────────────
+ 
+    def _build(self) -> None:
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 24, 28, 24)
         root.setSpacing(16)
         root.addWidget(page_title("Diversity"))
-
-        # ── Alpha card ──────────────────────────────────────────────────────
+ 
+        # ── Alpha card ────────────────────────────────────────────────────
         alpha_card = card()
         root.addWidget(alpha_card)
-
-        hdr = QHBoxLayout()
-        hdr.addWidget(section_title("Alpha diversity"))
-        hdr.addWidget(label_hint("Each box = one run · shows within-sample species richness"))
-        self._alpha_sw = PillSwitcher(["Shannon", "Simpson"], obj_name="metric_pill")
+ 
+        alpha_hdr = QHBoxLayout()
+        alpha_hdr.addWidget(section_title("Alpha diversity"))
+        alpha_hdr.addWidget(
+            label_hint("One bar per run · within-sample species richness")
+        )
+        self._alpha_sw = PillSwitcher(
+            ["Shannon", "Simpson"], obj_name="metric_pill"
+        )
         self._alpha_sw.on_changed(self._on_alpha_metric)
-        hdr.addStretch(); hdr.addWidget(self._alpha_sw)
-        alpha_card.layout().addLayout(hdr)
-
-        self._boxplot = BoxPlotWidget(data={}, colors=[])
-        self._boxplot.setFixedHeight(150)
-        alpha_card.layout().addWidget(self._boxplot)
+        alpha_hdr.addStretch()
+        alpha_hdr.addWidget(self._alpha_sw)
+        alpha_card.layout().addLayout(alpha_hdr)
+ 
+        self._alpha_desc = label_muted(
+            "Shannon entropy (bits) — higher = more even, more diverse community"
+        )
+        alpha_card.layout().addWidget(self._alpha_desc)
+ 
+        self._alpha_bar = _AlphaBarWidget(data=[], colors=[])
+        self._alpha_bar.setFixedHeight(160)
+        alpha_card.layout().addWidget(self._alpha_bar)
+ 
         self._alpha_placeholder = _placeholder(
-            "Fetch a project and upload FASTQ files to compute alpha diversity.")
+            "Fetch a project and run analysis to compute alpha diversity."
+        )
         alpha_card.layout().addWidget(self._alpha_placeholder)
-
-        # ── Beta card ────────────────────────────────────────────────────────
+ 
+        # ── Beta card ─────────────────────────────────────────────────────
         beta_hdr = QHBoxLayout()
         beta_hdr.addWidget(section_title("Beta diversity"))
-        self._beta_sw = PillSwitcher(["Bray-Curtis", "UniFrac"], obj_name="metric_pill")
+        self._beta_sw = PillSwitcher(
+            ["Bray-Curtis", "UniFrac"], obj_name="metric_pill"
+        )
         self._beta_sw.on_changed(self._on_beta_metric)
-        beta_hdr.addStretch(); beta_hdr.addWidget(self._beta_sw)
-
-        beta_row = QHBoxLayout(); beta_row.setSpacing(12)
-
-        # PCoA
+        beta_hdr.addStretch()
+        beta_hdr.addWidget(self._beta_sw)
+ 
+        beta_row = QHBoxLayout()
+        beta_row.setSpacing(12)
+ 
+        # PCoA scatter
         pcoa_card = card()
         pcoa_card.layout().addWidget(section_title("PCoA scatter"))
         pcoa_card.layout().addWidget(
-            label_hint("Runs plotted by community similarity. Closer = more similar microbiomes."))
+            label_hint(
+                "Runs projected by community dissimilarity. "
+                "Closer = more similar microbiomes."
+            )
+        )
         self._pcoa = PCoAWidget(coords={}, colors={})
-        self._pcoa.setMinimumHeight(180)
+        self._pcoa.setMinimumHeight(200)
         pcoa_card.layout().addWidget(self._pcoa)
-        self._pcoa_placeholder = _placeholder(
-            "Upload FASTQ files to compute beta diversity PCoA.")
+        self._pcoa_placeholder  = _placeholder(
+            "Run analysis to compute beta diversity."
+        )
+        self._pcoa_no_unifrac   = _placeholder(
+            "UniFrac requires a phylogenetic tree (Newick). "
+            "Re-run analysis with a tree file to enable this metric."
+        )
         pcoa_card.layout().addWidget(self._pcoa_placeholder)
+        pcoa_card.layout().addWidget(self._pcoa_no_unifrac)
         beta_row.addWidget(pcoa_card, 3)
-
-        # Heatmap
+ 
+        # Dissimilarity heatmap
         hm_card = card()
         hm_card.layout().addWidget(section_title("Dissimilarity heatmap"))
         hm_card.layout().addWidget(
-            label_hint("Pairwise dissimilarity between runs.  Darker = more similar."))
+            label_hint("Pairwise dissimilarity between runs.")
+        )
         self._heatmap = HeatmapWidget(labels=[], values=[])
         hm_card.layout().addWidget(self._heatmap, 0, Qt.AlignmentFlag.AlignLeft)
-        hm_card.layout().addWidget(label_hint("similar ←──────→ dissimilar"))
-        self._hm_placeholder = _placeholder(
-            "Upload FASTQ files to compute dissimilarity heatmap.")
+        hm_card.layout().addWidget(
+            label_hint("0.0 = identical  ·  1.0 = maximally different")
+        )
+        self._hm_placeholder  = _placeholder(
+            "Run analysis to compute dissimilarity heatmap."
+        )
+        self._hm_no_unifrac   = _placeholder(
+            "UniFrac requires a phylogenetic tree."
+        )
         hm_card.layout().addWidget(self._hm_placeholder)
+        hm_card.layout().addWidget(self._hm_no_unifrac)
         beta_row.addWidget(hm_card, 2)
-
+ 
+        # Single-run notice
+        self._single_run_notice = _placeholder(
+            "Beta diversity requires at least two runs. "
+            "Add more runs to this project to enable this section."
+        )
+ 
         beta_w = QWidget()
         beta_l = QVBoxLayout(beta_w)
-        beta_l.setContentsMargins(0, 0, 0, 0); beta_l.setSpacing(10)
-        beta_l.addLayout(beta_hdr); beta_l.addLayout(beta_row)
+        beta_l.setContentsMargins(0, 0, 0, 0)
+        beta_l.setSpacing(10)
+        beta_l.addLayout(beta_hdr)
+        beta_l.addLayout(beta_row)
+        beta_l.addWidget(self._single_run_notice)
         root.addWidget(beta_w)
         root.addStretch()
-
-    def load(self, state: AppState):
-        """Update all charts from live AppState."""
+ 
+        # Initial visibility
+        self._alpha_bar.hide()
+        self._alpha_placeholder.show()
+        self._pcoa.hide()
+        self._heatmap.hide()
+        self._pcoa_placeholder.hide()
+        self._hm_placeholder.hide()
+        self._pcoa_no_unifrac.hide()
+        self._hm_no_unifrac.hide()
+        self._single_run_notice.hide()
+ 
+    # ── Public API ────────────────────────────────────────────────────────────
+ 
+    def load(self, state: AppState) -> None:
         self._state = state
+        self._alpha_cache.clear()
+        self._beta_cache.clear()
+        self._pcoa_cache.clear()
         self._refresh_alpha()
         self._refresh_beta()
-
-    def _refresh_alpha(self):
-        if not self._state or not self._state.alpha_diversity:
-            self._boxplot.hide()
+ 
+    # ── Alpha ─────────────────────────────────────────────────────────────────
+ 
+    def _fetch_alpha(self, run_id: int) -> dict[str, float]:
+        """Cached fetch of {metric: scalar} for one run."""
+        if run_id in self._alpha_cache:
+            return self._alpha_cache[run_id]
+        try:
+            rows   = get_alpha_diversities(run_id)
+            result = {r["metric"]: float(r["value"]) for r in rows}
+        except ServiceError:
+            result = {}
+        self._alpha_cache[run_id] = result
+        return result
+ 
+    def _refresh_alpha(self) -> None:
+        if not self._state or not self._state.run_labels:
+            self._alpha_bar.hide()
             self._alpha_placeholder.show()
             return
-
-        data   = {lbl: self._state.alpha_diversity[lbl][self._alpha_metric]
-                  for lbl in self._state.run_labels
-                  if lbl in self._state.alpha_diversity}
-        colors = list(self._state.run_colors().values())
-
-        self._boxplot.set_data(data)
-        self._boxplot._colors = colors
-        self._boxplot.update()
-        self._boxplot.show()
-        self._alpha_placeholder.hide()
-
-    def _refresh_beta(self):
-        if not self._state or not self._state.beta_bray_curtis:
-            self._pcoa.hide()
-            self._pcoa_placeholder.show()
-            self._heatmap.hide()
-            self._hm_placeholder.show()
+ 
+        run_colors = self._state.run_colors()
+        bars:   list[tuple[str, float]] = []
+        colors: list[str]               = []
+ 
+        for label in self._state.run_labels:
+            run_id = self._state.lbs.get(label)
+            if run_id is None:
+                continue
+            value = self._fetch_alpha(run_id).get(self._alpha_metric)
+            if value is not None:
+                bars.append((label, value))
+                colors.append(run_colors.get(label, "#6366F1"))
+ 
+        if not bars:
+            self._alpha_bar.hide()
+            self._alpha_placeholder.show()
             return
-
-        if self._beta_metric == "bray_curtis":
-            matrix = self._state.beta_bray_curtis
-            coords  = self._state.pcoa_bray_curtis
-        else:
-            matrix = self._state.beta_unifrac
-            coords  = self._state.pcoa_unifrac
-
+ 
+        self._alpha_bar.set_data(bars)
+        self._alpha_bar._colors = colors
+        self._alpha_bar.update()
+        self._alpha_bar.show()
+        self._alpha_placeholder.hide()
+ 
+        self._alpha_desc.setText(
+            "Shannon entropy (bits) — higher = more even, more diverse community"
+            if self._alpha_metric == "shannon" else
+            "Simpson index (0-1) — probability two random reads belong to different taxa"
+        )
+ 
+    # ── Beta ──────────────────────────────────────────────────────────────────
+ 
+    def _fetch_beta_matrix(self, metric: str) -> list[list[float]] | None:
+        """
+        Cached fetch of the full nxn dissimilarity matrix for the heatmap.
+        Reconstructs from flat upper-triangle DB rows — index mapping only,
+        no linear algebra.
+        """
+        if metric in self._beta_cache:
+            return self._beta_cache[metric]
+ 
+        if not self._state or not hasattr(self._state, "project_id"):
+            return None
+ 
+        try:
+            flat = get_beta_diversity_matrix(self._state.project_id, metric)
+        except ServiceError:
+            flat = []
+ 
+        if not flat:
+            self._beta_cache[metric] = None
+            return None
+ 
+        # Reconstruct symmetric matrix for HeatmapWidget (index mapping only)
+        labels    = self._state.run_labels
+        n         = len(labels)
+        mat: list[list[float]] = [[0.0] * n for _ in range(n)]
+        id_to_idx = {
+            self._state.lbs[lbl]: i
+            for i, lbl in enumerate(labels)
+            if lbl in self._state.lbs
+        }
+        for row in flat:
+            i = id_to_idx.get(row["run_id_1"])
+            j = id_to_idx.get(row["run_id_2"])
+            if i is not None and j is not None:
+                val       = float(row["value"])
+                mat[i][j] = val
+                mat[j][i] = val
+ 
+        self._beta_cache[metric] = mat
+        return mat
+ 
+    def _fetch_pcoa_coords(
+        self, metric: str
+    ) -> dict[str, tuple[float, float]] | None:
+        """
+        Cached fetch of pre-computed PCoA coordinates from the DB.
+        get_pcoa() returns [{"run_id": int, "pc1": float, "pc2": float}, ...]
+        We map run_id back to label using lbs (run label : run_id map).
+        """
+        if metric in self._pcoa_cache:
+            return self._pcoa_cache[metric]
+ 
+        if not self._state or not hasattr(self._state, "project_id"):
+            return None
+ 
+        try:
+            rows = get_pcoa(self._state.project_id, metric)
+        except ServiceError:
+            rows = []
+ 
+        if not rows:
+            self._pcoa_cache[metric] = None
+            return None
+ 
+        # Invert lbs: {run_id: label}
+        id_to_label = {v: k for k, v in self._state.lbs.items()}
+        coords = {
+            id_to_label[r["run_id"]]: (float(r["pc1"]), float(r["pc2"]))
+            for r in rows
+            if r["run_id"] in id_to_label
+        }
+ 
+        result = coords if coords else None
+        self._pcoa_cache[metric] = result
+        return result
+ 
+    def _refresh_beta(self) -> None:
+        # ── Single-run guard ──────────────────────────────────────────────
+        if self._state and getattr(self._state, "run_count", 1) < 2:
+            self._pcoa.hide()
+            self._heatmap.hide()
+            self._pcoa_placeholder.hide()
+            self._hm_placeholder.hide()
+            self._pcoa_no_unifrac.hide()
+            self._hm_no_unifrac.hide()
+            self._single_run_notice.show()
+            return
+ 
+        self._single_run_notice.hide()
+ 
+        if not self._state or not self._state.run_labels:
+            self._pcoa.hide()
+            self._heatmap.hide()
+            self._pcoa_placeholder.show()
+            self._hm_placeholder.show()
+            self._pcoa_no_unifrac.hide()
+            self._hm_no_unifrac.hide()
+            return
+ 
+        matrix = self._fetch_beta_matrix(self._beta_metric)
+        coords = self._fetch_pcoa_coords(self._beta_metric)
+        missing = matrix is None or coords is None
+        unifrac_missing = self._beta_metric == "unifrac" and missing
+ 
+        if missing:
+            self._pcoa.hide()
+            self._heatmap.hide()
+            if unifrac_missing:
+                self._pcoa_placeholder.hide()
+                self._hm_placeholder.hide()
+                self._pcoa_no_unifrac.show()
+                self._hm_no_unifrac.show()
+            else:
+                self._pcoa_placeholder.show()
+                self._hm_placeholder.show()
+                self._pcoa_no_unifrac.hide()
+                self._hm_no_unifrac.hide()
+            return
+ 
+        # ── Render ────────────────────────────────────────────────────────
+        self._pcoa_placeholder.hide()
+        self._hm_placeholder.hide()
+        self._pcoa_no_unifrac.hide()
+        self._hm_no_unifrac.hide()
+ 
         self._pcoa.set_data(coords)
         self._pcoa._colors = self._state.run_colors()
         self._pcoa.update()
         self._pcoa.show()
-        self._pcoa_placeholder.hide()
-
+ 
         self._heatmap.set_data(self._state.run_labels, matrix)
         self._heatmap.show()
-        self._hm_placeholder.hide()
-
-    def _on_alpha_metric(self, label: str):
-        self._alpha_metric = "shannon" if "shannon" in label.lower() else "simpson"
+ 
+    # ── Pill callbacks ────────────────────────────────────────────────────────
+ 
+    def _on_alpha_metric(self, label: str) -> None:
+        self._alpha_metric = (
+            "shannon" if "shannon" in label.lower() else "simpson"
+        )
         self._refresh_alpha()
-
-    def _on_beta_metric(self, label: str):
-        self._beta_metric = "bray_curtis" if "bray" in label.lower() else "unifrac"
+ 
+    def _on_beta_metric(self, label: str) -> None:
+        self._beta_metric = (
+            "bray_curtis" if "bray" in label.lower() else "unifrac"
+        )
         self._refresh_beta()
+    # """Alpha boxplots + Beta PCoA & heatmap — all driven by live AppState."""
+
+    # def __init__(self, parent=None):
+    #     super().__init__(parent)
+    #     self._state: AppState | None = None
+    #     self._alpha_metric = "shannon"
+    #     self._beta_metric  = "bray_curtis"
+    #     self._build()
+
+    # def _build(self):
+    #     root = QVBoxLayout(self)
+    #     root.setContentsMargins(28, 24, 28, 24)
+    #     root.setSpacing(16)
+    #     root.addWidget(page_title("Diversity"))
+
+    #     # ── Alpha card ──────────────────────────────────────────────────────
+    #     alpha_card = card()
+    #     root.addWidget(alpha_card)
+
+    #     hdr = QHBoxLayout()
+    #     hdr.addWidget(section_title("Alpha diversity"))
+    #     hdr.addWidget(label_hint("Each box = one run · shows within-sample species richness"))
+    #     self._alpha_sw = PillSwitcher(["Shannon", "Simpson"], obj_name="metric_pill")
+    #     self._alpha_sw.on_changed(self._on_alpha_metric)
+    #     hdr.addStretch(); hdr.addWidget(self._alpha_sw)
+    #     alpha_card.layout().addLayout(hdr)
+
+    #     self._boxplot = BoxPlotWidget(data={}, colors=[])
+    #     self._boxplot.setFixedHeight(150)
+    #     alpha_card.layout().addWidget(self._boxplot)
+    #     self._alpha_placeholder = _placeholder(
+    #         "Fetch a project and upload FASTQ files to compute alpha diversity.")
+    #     alpha_card.layout().addWidget(self._alpha_placeholder)
+
+    #     # ── Beta card ────────────────────────────────────────────────────────
+    #     beta_hdr = QHBoxLayout()
+    #     beta_hdr.addWidget(section_title("Beta diversity"))
+    #     self._beta_sw = PillSwitcher(["Bray-Curtis", "UniFrac"], obj_name="metric_pill")
+    #     self._beta_sw.on_changed(self._on_beta_metric)
+    #     beta_hdr.addStretch(); beta_hdr.addWidget(self._beta_sw)
+
+    #     beta_row = QHBoxLayout(); beta_row.setSpacing(12)
+
+    #     # PCoA
+    #     pcoa_card = card()
+    #     pcoa_card.layout().addWidget(section_title("PCoA scatter"))
+    #     pcoa_card.layout().addWidget(
+    #         label_hint("Runs plotted by community similarity. Closer = more similar microbiomes."))
+    #     self._pcoa = PCoAWidget(coords={}, colors={})
+    #     self._pcoa.setMinimumHeight(180)
+    #     pcoa_card.layout().addWidget(self._pcoa)
+    #     self._pcoa_placeholder = _placeholder(
+    #         "Upload FASTQ files to compute beta diversity PCoA.")
+    #     pcoa_card.layout().addWidget(self._pcoa_placeholder)
+    #     beta_row.addWidget(pcoa_card, 3)
+
+    #     # Heatmap
+    #     hm_card = card()
+    #     hm_card.layout().addWidget(section_title("Dissimilarity heatmap"))
+    #     hm_card.layout().addWidget(
+    #         label_hint("Pairwise dissimilarity between runs.  Darker = more similar."))
+    #     self._heatmap = HeatmapWidget(labels=[], values=[])
+    #     hm_card.layout().addWidget(self._heatmap, 0, Qt.AlignmentFlag.AlignLeft)
+    #     hm_card.layout().addWidget(label_hint("similar ←──────→ dissimilar"))
+    #     self._hm_placeholder = _placeholder(
+    #         "Upload FASTQ files to compute dissimilarity heatmap.")
+    #     hm_card.layout().addWidget(self._hm_placeholder)
+    #     beta_row.addWidget(hm_card, 2)
+
+    #     beta_w = QWidget()
+    #     beta_l = QVBoxLayout(beta_w)
+    #     beta_l.setContentsMargins(0, 0, 0, 0); beta_l.setSpacing(10)
+    #     beta_l.addLayout(beta_hdr); beta_l.addLayout(beta_row)
+    #     root.addWidget(beta_w)
+    #     root.addStretch()
+
+    # def load(self, state: AppState):
+    #     """Update all charts from live AppState."""
+    #     self._state = state
+    #     self._refresh_alpha()
+    #     self._refresh_beta()
+
+    # def _refresh_alpha(self):
+    #     if not self._state or not self._state.alpha_diversity:
+    #         self._boxplot.hide()
+    #         self._alpha_placeholder.show()
+    #         return
+
+    #     data   = {lbl: self._state.alpha_diversity[lbl][self._alpha_metric]
+    #               for lbl in self._state.run_labels
+    #               if lbl in self._state.alpha_diversity}
+    #     colors = list(self._state.run_colors().values())
+
+    #     self._boxplot.set_data(data)
+    #     self._boxplot._colors = colors
+    #     self._boxplot.update()
+    #     self._boxplot.show()
+    #     self._alpha_placeholder.hide()
+
+    # def _refresh_beta(self):
+    #     if not self._state or not self._state.beta_bray_curtis:
+    #         self._pcoa.hide()
+    #         self._pcoa_placeholder.show()
+    #         self._heatmap.hide()
+    #         self._hm_placeholder.show()
+    #         return
+
+    #     if self._beta_metric == "bray_curtis":
+    #         matrix = self._state.beta_bray_curtis
+    #         coords  = self._state.pcoa_bray_curtis
+    #     else:
+    #         matrix = self._state.beta_unifrac
+    #         coords  = self._state.pcoa_unifrac
+
+    #     self._pcoa.set_data(coords)
+    #     self._pcoa._colors = self._state.run_colors()
+    #     self._pcoa.update()
+    #     self._pcoa.show()
+    #     self._pcoa_placeholder.hide()
+
+    #     self._heatmap.set_data(self._state.run_labels, matrix)
+    #     self._heatmap.show()
+    #     self._hm_placeholder.hide()
+
+    # def _on_alpha_metric(self, label: str):
+    #     self._alpha_metric = "shannon" if "shannon" in label.lower() else "simpson"
+    #     self._refresh_alpha()
+
+    # def _on_beta_metric(self, label: str):
+    #     self._beta_metric = "bray_curtis" if "bray" in label.lower() else "unifrac"
+    #     self._refresh_beta()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -648,10 +1310,12 @@ class DiversityPage(QWidget):
 # ═════════════════════════════════════════════════════════════════════════════
 
 class TaxonomyPage(QWidget):
-    def __init__(self, parent=None):
+    # def __init__(self, parent=None):
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._state: AppState | None = None
         self._active_run = "R1"
+        self._genus_cache: dict[int, list[dict]] = {}
         self._build()
 
     def _build(self):
@@ -665,103 +1329,287 @@ class TaxonomyPage(QWidget):
         hdr.addStretch(); hdr.addWidget(self._run_sw)
         self._root.addLayout(hdr)
 
-        # Two-column row
-        cols = QHBoxLayout(); cols.setSpacing(12)
+        # emma taxonomy
+        # ── Row 1: bar chart  +  legend ───────────────────────────────────
+        cols = QHBoxLayout()
+        cols.setSpacing(12)
 
         bar_card = card()
-        bar_card.layout().addWidget(section_title("Top genera — relative abundance"))
+        bar_card.layout().addWidget(section_title("Top 10 genera by relative abundance"))
         self._bar = BarChartWidget(data=[], colors=GENUS_COLORS)
         self._bar.setFixedHeight(160)
         bar_card.layout().addWidget(self._bar)
-        self._bar_placeholder = _placeholder("Upload FASTQ files to compute taxonomy.")
+        self._bar_placeholder = _placeholder(
+            "Upload FASTQ files to compute taxonomy."
+        )
         bar_card.layout().addWidget(self._bar_placeholder)
         cols.addWidget(bar_card, 3)
 
         tax_card = card()
-        tax_card.layout().addWidget(section_title("Genus abundance breakdown"))
-        self._legend_layout = QVBoxLayout(); self._legend_layout.setSpacing(4)
+        tax_card.layout().addWidget(section_title("Genus abundance overview"))
+        self._legend_layout = QVBoxLayout()
+        self._legend_layout.setSpacing(4)
         tax_card.layout().addLayout(self._legend_layout)
         self._legend_placeholder = _placeholder("No data yet.")
         self._legend_layout.addWidget(self._legend_placeholder)
         cols.addWidget(tax_card, 2)
+
         self._root.addLayout(cols)
 
-        # Stacked bar
+        # ── Row 2: sortable genus table (all genera, current run) ─────────
+        genus_tbl_card = card()
+        genus_tbl_card.layout().addWidget(
+            section_title("Genus abundance table")
+        )
+        genus_tbl_card.layout().addWidget(
+            label_muted(
+                "Switch runs with the run button above."
+            )
+        )
+        self._genus_table = GenusTableWidget()
+        self._genus_table.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        genus_tbl_card.layout().addWidget(self._genus_table)
+        self._genus_tbl_placeholder = _placeholder(
+            "Upload FASTQ files to populate the genus table."
+        )
+        genus_tbl_card.layout().addWidget(self._genus_tbl_placeholder)
+        self._genus_table.hide()
+        self._root.addWidget(genus_tbl_card, 1)
+
+        # ── Row 3: stacked bar (all runs) ─────────────────────────────────
         comp_card = card()
-        comp_card.layout().addWidget(section_title("Genus composition — all runs"))
+        comp_card.layout().addWidget(
+            section_title("Genus composition across runs")
+        )
         self._stacked = StackedBarWidget(data={}, colors=GENUS_COLORS)
         comp_card.layout().addWidget(self._stacked)
         self._stacked_placeholder = _placeholder(
-            "Upload FASTQ files to see composition across all runs.")
+            "Upload FASTQ files to see composition across all runs."
+        )
         comp_card.layout().addWidget(self._stacked_placeholder)
         self._root.addWidget(comp_card)
         self._root.addStretch()
+        # emma taxonomy
+
+        # # Two-column row
+        # cols = QHBoxLayout(); cols.setSpacing(12)
+
+        # bar_card = card()
+        # bar_card.layout().addWidget(section_title("Top genera — relative abundance"))
+        # self._bar = BarChartWidget(data=[], colors=GENUS_COLORS)
+        # self._bar.setFixedHeight(160)
+        # bar_card.layout().addWidget(self._bar)
+        # self._bar_placeholder = _placeholder("Upload FASTQ files to compute taxonomy.")
+        # bar_card.layout().addWidget(self._bar_placeholder)
+        # cols.addWidget(bar_card, 3)
+
+        # tax_card = card()
+        # tax_card.layout().addWidget(section_title("Genus abundance breakdown"))
+        # self._legend_layout = QVBoxLayout(); self._legend_layout.setSpacing(4)
+        # tax_card.layout().addLayout(self._legend_layout)
+        # self._legend_placeholder = _placeholder("No data yet.")
+        # self._legend_layout.addWidget(self._legend_placeholder)
+        # cols.addWidget(tax_card, 2)
+        # self._root.addLayout(cols)
+
+        # # Stacked bar
+        # comp_card = card()
+        # comp_card.layout().addWidget(section_title("Genus composition — all runs"))
+        # self._stacked = StackedBarWidget(data={}, colors=GENUS_COLORS)
+        # comp_card.layout().addWidget(self._stacked)
+        # self._stacked_placeholder = _placeholder(
+        #     "Upload FASTQ files to see composition across all runs.")
+        # comp_card.layout().addWidget(self._stacked_placeholder)
+        # self._root.addWidget(comp_card)
+        # self._root.addStretch()
 
     def load(self, state: AppState):
         self._state = state
 
-        # Rebuild run switcher if run labels changed
-        old_active = self._active_run
+        # # Rebuild run switcher if run labels changed
+        # old_active = self._active_run
+        # labels = state.run_labels or ["—"]
+
+        # # Reconnect switcher
+        # new_sw = PillSwitcher(labels, obj_name="pill")
+        # new_sw.on_changed(self._on_run)
+        # hdr_lay = self._root.itemAt(0).layout()
+        # # Replace old switcher widget
+        # old_sw_item = hdr_lay.itemAt(hdr_lay.count() - 1)
+        # if old_sw_item and old_sw_item.widget():
+        #     old_sw_item.widget().deleteLater()
+        # hdr_lay.addWidget(new_sw)
+        # self._run_sw = new_sw
+
+        # self._active_run = labels[0] if labels else "R1"
+        # self._refresh(self._active_run)
+
+        # # Stacked bar
+        # if state.genus_abundances:
+        #     self._stacked.set_data(state.genus_abundances)
+        #     self._stacked.show()
+        #     self._stacked_placeholder.hide()
+        # else:
+        #     self._stacked.hide()
+        #     self._stacked_placeholder.show()
+
+        # emma load
+        self._genus_cache.clear()       # invalidate cache on new project load
+
         labels = state.run_labels or ["—"]
 
-        # Reconnect switcher
+        # ── Rebuild run switcher ──────────────────────────────────────────
         new_sw = PillSwitcher(labels, obj_name="pill")
         new_sw.on_changed(self._on_run)
         hdr_lay = self._root.itemAt(0).layout()
-        # Replace old switcher widget
-        old_sw_item = hdr_lay.itemAt(hdr_lay.count() - 1)
-        if old_sw_item and old_sw_item.widget():
-            old_sw_item.widget().deleteLater()
+        old_item = hdr_lay.itemAt(hdr_lay.count() - 1)
+        if old_item and old_item.widget():
+            old_item.widget().deleteLater()
         hdr_lay.addWidget(new_sw)
         self._run_sw = new_sw
 
         self._active_run = labels[0] if labels else "R1"
         self._refresh(self._active_run)
 
-        # Stacked bar
-        if state.genus_abundances:
-            self._stacked.set_data(state.genus_abundances)
+        # ── Stacked bar: load all runs at once ────────────────────────────
+        self._refresh_stacked()
+        # emma load
+
+    def _get_genus_data(self, run_label: str) -> list[dict]:
+        """
+        Return genus data for run_label using the in-memory cache.
+        Returns [] on any error or missing mapping.
+        """
+        if not self._state:
+            return []
+        run_id = self._state.lbs.get(run_label)
+        if run_id is None:
+            return []
+        if run_id in self._genus_cache:
+            return self._genus_cache[run_id]
+        try:
+            data = get_genus_data(run_id)
+        except ServiceError:
+            data = []
+        self._genus_cache[run_id] = data
+        return data
+
+    def _refresh(self, run_label: str):
+        # if not self._state or not self._state.genus_abundances:
+        #     self._bar.hide(); self._bar_placeholder.show()
+        #     return
+
+        # genera = self._state.genus_abundances.get(run, [])
+        # if not genera:
+        #     self._bar.hide(); self._bar_placeholder.show()
+        #     return
+
+        # self._bar.set_data(genera[:10])
+        # self._bar.show(); self._bar_placeholder.hide()
+        # self._build_legend(genera)
+
+        # emma refresh
+        genera = self._get_genus_data(run_label)
+
+        if not genera:
+            self._bar.hide()
+            self._bar_placeholder.show()
+            self._genus_table.hide()
+            self._genus_tbl_placeholder.show()
+            return
+
+        # ── Bar chart: top 10 ─────────────────────────────────────────────
+        # BarChartWidget expects list[tuple[str, float]]
+        top10 = [
+            (g["genus"], g["relative_abundance"])
+            for g in sorted(genera, key=lambda x: x["relative_abundance"], reverse=True)[:10]
+        ]
+        self._bar.set_data(top10)
+        self._bar.show()
+        self._bar_placeholder.hide()
+
+        # ── Legend: top 5 + "Other" ───────────────────────────────────────
+        self._build_legend(genera)
+
+        # ── Genus table: all genera ───────────────────────────────────────
+        self._genus_table.set_data(genera)
+        self._genus_table.show()
+        self._genus_tbl_placeholder.hide()
+        # emma refresh
+
+    def _refresh_stacked(self) -> None:
+        """
+        Build the stacked bar from DB data for every run in the project.
+        StackedBarWidget expects dict[run_label, list[tuple[genus, abundance]]].
+        """
+        if not self._state or not self._state.run_labels:
+            self._stacked.hide()
+            self._stacked_placeholder.show()
+            return
+
+        stacked_data: dict[str, list[tuple[str, float]]] = {}
+        for label in self._state.run_labels:
+            genera = self._get_genus_data(label)
+            if genera:
+                stacked_data[label] = [
+                    (g["genus"], g["relative_abundance"]) for g in genera
+                ]
+
+        if stacked_data:
+            self._stacked.set_data(stacked_data)
             self._stacked.show()
             self._stacked_placeholder.hide()
         else:
             self._stacked.hide()
             self._stacked_placeholder.show()
-
-    def _refresh(self, run: str):
-        if not self._state or not self._state.genus_abundances:
-            self._bar.hide(); self._bar_placeholder.show()
-            return
-
-        genera = self._state.genus_abundances.get(run, [])
-        if not genera:
-            self._bar.hide(); self._bar_placeholder.show()
-            return
-
-        self._bar.set_data(genera[:10])
-        self._bar.show(); self._bar_placeholder.hide()
-        self._build_legend(genera)
-
+    
     def _build_legend(self, genera: list[tuple[str, float]]):
-        _clear(self._legend_layout)
-        top5  = genera[:5]
-        other = sum(p for _, p in genera[5:])
-        for i, (g, v) in enumerate(top5):
-            row = QHBoxLayout(); row.setSpacing(6)
-            dot = QLabel("●")
-            dot.setStyleSheet(f"color:{GENUS_COLORS[i % len(GENUS_COLORS)]}; font-size:11px;")
-            txt = label_muted(f"{g}   {v:.1f}%")
-            row.addWidget(dot); row.addWidget(txt); row.addStretch()
-            self._legend_layout.addLayout(row)
-        if other > 0:
-            row = QHBoxLayout(); row.setSpacing(6)
-            dot = QLabel("●"); dot.setStyleSheet("color:#D1D5DB; font-size:11px;")
-            txt = label_muted(f"Other   {other:.1f}%")
-            row.addWidget(dot); row.addWidget(txt); row.addStretch()
-            self._legend_layout.addLayout(row)
+        # _clear(self._legend_layout)
+        # top5  = genera[:5]
+        # other = sum(p for _, p in genera[5:])
+        # for i, (g, v) in enumerate(top5):
+        #     row = QHBoxLayout(); row.setSpacing(6)
+        #     dot = QLabel("●")
+        #     dot.setStyleSheet(f"color:{GENUS_COLORS[i % len(GENUS_COLORS)]}; font-size:11px;")
+        #     txt = label_muted(f"{g}   {v:.1f}%")
+        #     row.addWidget(dot); row.addWidget(txt); row.addStretch()
+        #     self._legend_layout.addLayout(row)
+        # if other > 0:
+        #     row = QHBoxLayout(); row.setSpacing(6)
+        #     dot = QLabel("●"); dot.setStyleSheet("color:#D1D5DB; font-size:11px;")
+        #     txt = label_muted(f"Other   {other:.1f}%")
+        #     row.addWidget(dot); row.addWidget(txt); row.addStretch()
+        #     self._legend_layout.addLayout(row)
 
-    def _on_run(self, run: str):
-        self._active_run = run
-        self._refresh(run)
+        # emma build legend
+        _clear(self._legend_layout)
+        sorted_genera = sorted(
+            genera, key=lambda x: x["relative_abundance"], reverse=True
+        )
+        top10  = sorted_genera[:10]
+
+        for i, g in enumerate(top10):
+            row = QHBoxLayout()
+            row.setSpacing(6)
+            dot = QLabel("●")
+            dot.setStyleSheet(
+                f"color:{GENUS_COLORS[i % len(GENUS_COLORS)]}; font-size:11px;"
+            )
+            txt = label_muted(f"{g['genus']}   {g['relative_abundance']:.1f}%")
+            row.addWidget(dot)
+            row.addWidget(txt)
+            row.addStretch()
+            self._legend_layout.addLayout(row)
+        # emma build legend
+
+    # def _on_run(self, run: str):
+    #     self._active_run = run
+    #     self._refresh(run)
+    def _on_run(self, run_label: str) -> None:
+        self._active_run = run_label
+        self._refresh(run_label)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -769,52 +1617,109 @@ class TaxonomyPage(QWidget):
 # ═════════════════════════════════════════════════════════════════════════════
 
 class AsvTablePage(QWidget):
-    def __init__(self, parent=None):
+    # def __init__(self, parent=None):
+    def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._state: AppState | None = None
         self._active_run = "R1"
         self._build()
 
     def _build(self):
+        # root = QVBoxLayout(self)
+        # root.setContentsMargins(28, 24, 28, 24)
+        # root.setSpacing(14)
+
+        # hdr = QHBoxLayout()
+        # hdr.addWidget(page_title("ASV Table"))
+        # self._run_sw = PillSwitcher(["—"], obj_name="pill")
+        # hdr.addStretch(); hdr.addWidget(self._run_sw)
+        # root.addLayout(hdr)
+
+        # ctrl = QHBoxLayout(); ctrl.setSpacing(10)
+        # ctrl.addWidget(label_muted("Sort:"))
+        # self._sort_id  = btn_outline("Feature ID ↕")
+        # self._sort_cnt = btn_outline("Count ↓")
+        # self._sort_id.clicked.connect(lambda: self._table.sortItems(0))
+        # self._sort_cnt.clicked.connect(lambda: self._table.sortItems(2))
+        # ctrl.addWidget(self._sort_id); ctrl.addWidget(self._sort_cnt)
+
+        # # Summary label
+        # self._summary_lbl = QLabel("")
+        # self._summary_lbl.setStyleSheet(f"font-size:11px; color:{TEXT_M};")
+        # ctrl.addStretch(); ctrl.addWidget(self._summary_lbl)
+        # root.addLayout(ctrl)
+
+        # tbl_card = card()
+        # root.addWidget(tbl_card, 1)
+
+        # self._table = QTableWidget(0, 4)
+        # self._table.setHorizontalHeaderLabels(["Feature ID", "Taxonomy", "Count", "Rel. %"])
+        # self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        # self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        # self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        # self._table.setAlternatingRowColors(True)
+        # tbl_card.layout().addWidget(self._table)
+
+        # self._placeholder = _placeholder(
+        #     "Fetch a project and upload FASTQ files to populate the ASV table.")
+        # tbl_card.layout().addWidget(self._placeholder)
+        # self._table.hide()
+        
+        # emma build
         root = QVBoxLayout(self)
         root.setContentsMargins(28, 24, 28, 24)
         root.setSpacing(14)
 
+        # Header row: title + run pill switcher
         hdr = QHBoxLayout()
         hdr.addWidget(page_title("ASV Table"))
         self._run_sw = PillSwitcher(["—"], obj_name="pill")
-        hdr.addStretch(); hdr.addWidget(self._run_sw)
+        hdr.addStretch()
+        hdr.addWidget(self._run_sw)
         root.addLayout(hdr)
 
-        ctrl = QHBoxLayout(); ctrl.setSpacing(10)
-        ctrl.addWidget(label_muted("Sort:"))
-        self._sort_id  = btn_outline("Feature ID ↕")
-        self._sort_cnt = btn_outline("Count ↓")
-        self._sort_id.clicked.connect(lambda: self._table.sortItems(0))
-        self._sort_cnt.clicked.connect(lambda: self._table.sortItems(2))
-        ctrl.addWidget(self._sort_id); ctrl.addWidget(self._sort_cnt)
+        # Control row: sort buttons + summary label
+        ctrl = QHBoxLayout()
+        ctrl.setSpacing(10)
 
-        # Summary label
-        self._summary_lbl = QLabel("")
-        self._summary_lbl.setStyleSheet(f"font-size:11px; color:{TEXT_M};")
-        ctrl.addStretch(); ctrl.addWidget(self._summary_lbl)
+        self._summary_lbl = label_muted("")
+        ctrl.addStretch()
+        ctrl.addWidget(self._summary_lbl)
         root.addLayout(ctrl)
 
+        # Table inside a card
         tbl_card = card()
         root.addWidget(tbl_card, 1)
 
-        self._table = QTableWidget(0, 4)
-        self._table.setHorizontalHeaderLabels(["Feature ID", "Taxonomy", "Count", "Rel. %"])
-        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._table = QTableWidget(0, 3)
+        self._table.setHorizontalHeaderLabels(
+            ["Feature ID", "Taxonomy", "Count"]
+        )
+        self._table.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        # Count column doesn't need to stretch as wide
+        self._table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self._table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.ResizeToContents
+        )
+        self._table.horizontalHeader().setSortIndicatorShown(True)
+        self._table.setSortingEnabled(True)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setAlternatingRowColors(True)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setShowGrid(False)
         tbl_card.layout().addWidget(self._table)
 
         self._placeholder = _placeholder(
-            "Fetch a project and upload FASTQ files to populate the ASV table.")
+            "Fetch a project and upload FASTQ files to populate the ASV table."
+        )
         tbl_card.layout().addWidget(self._placeholder)
         self._table.hide()
+        # emma build
 
     def load(self, state: AppState):
         self._state = state
@@ -831,36 +1736,89 @@ class AsvTablePage(QWidget):
         self._active_run = labels[0] if labels else "R1"
         self._populate(self._active_run)
 
-    def _populate(self, run: str):
-        if not self._state or not self._state.asv_features:
-            self._table.hide(); self._placeholder.show()
-            self._summary_lbl.setText("")
+    def _populate(self, run_label: str):
+        # emma populate
+        if not self._state:
+            self._show_placeholder()
             return
+        
+        run_id = self._state.lbs.get(run_label)
+        if run_id is None:
+            self._show_placeholder()
 
-        rows = self._state.asv_features.get(run, [])
+        try:
+            rows = get_feature_counts(run_id)
+        except ServiceError:
+            self._show_placeholder()
+            return
+        
         if not rows:
-            self._table.hide(); self._placeholder.show()
-            self._summary_lbl.setText("")
+            self._show_placeholder()
             return
 
+        # disable sort while filling
+        self._table.setSortingEnabled(False)
         self._table.setRowCount(len(rows))
-        for r, feat in enumerate(rows):
-            self._table.setItem(r, 0, QTableWidgetItem(feat["id"]))
-            self._table.setItem(r, 1, QTableWidgetItem(feat["genus"]))
-            count_item = QTableWidgetItem()
-            count_item.setData(Qt.ItemDataRole.DisplayRole, f"{feat['count']:,}")
-            count_item.setData(Qt.ItemDataRole.UserRole, feat["count"])
-            self._table.setItem(r, 2, count_item)
-            self._table.setItem(r, 3, QTableWidgetItem(f"{feat['pct']:.2f}"))
+
+        for i, feat in enumerate(rows):
+            feature_id = feat.get("feature_id", "")
+            taxonomy   = feat.get("taxonomy") or "Unclassified"
+            count      = int(feat.get("abundance", 0))
+
+            from PyQt6.QtWidgets import QTableWidgetItem
+            id_item  = QTableWidgetItem(feature_id)
+            tax_item = QTableWidgetItem(taxonomy)
+
+            cnt_item = NumericSortItem(count, fmt=",")
+
+            self._table.setItem(i, 0, id_item)
+            self._table.setItem(i, 1, tax_item)
+            self._table.setItem(i, 2, cnt_item)
+
+        self._table.setSortingEnabled(True)
+        self._table.sortItems(2, Qt.SortOrder.DescendingOrder) # default sorting
 
         self._summary_lbl.setText(
-            f"{len(rows)} ASVs  ·  {run}  ·  "
-            f"{sum(f['count'] for f in rows):,} total reads")
-        self._table.show(); self._placeholder.hide()
+            f"{len(rows)} ASVs · {run_label}"
+        )
+        self._table.show()
+        self._placeholder.hide()
+        # emma populate
 
-    def _on_run(self, run: str):
-        self._active_run = run
-        self._populate(run)
+        # if not self._state or not self._state.asv_features:
+        #     self._table.hide(); self._placeholder.show()
+        #     self._summary_lbl.setText("")
+        #     return
+
+        # rows = self._state.asv_features.get(run, [])
+        # if not rows:
+        #     self._table.hide(); self._placeholder.show()
+        #     self._summary_lbl.setText("")
+        #     return
+
+        # self._table.setRowCount(len(rows))
+        # for r, feat in enumerate(rows):
+        #     self._table.setItem(r, 0, QTableWidgetItem(feat["id"]))
+        #     self._table.setItem(r, 1, QTableWidgetItem(feat["genus"]))
+        #     count_item = QTableWidgetItem()
+        #     count_item.setData(Qt.ItemDataRole.DisplayRole, f"{feat['count']:,}")
+        #     count_item.setData(Qt.ItemDataRole.UserRole, feat["count"])
+        #     self._table.setItem(r, 2, count_item)
+        #     self._table.setItem(r, 3, QTableWidgetItem(f"{feat['pct']:.2f}"))
+
+        # self._summary_lbl.setText(
+        #     f"{len(rows)} ASVs  ·  {run}  ·  "
+        #     f"{sum(f['count'] for f in rows):,} total reads")
+        # self._table.show(); self._placeholder.hide()
+
+    def _on_run(self, run_label: str):
+        self._active_run = run_label
+        self._populate(run_label)
+
+    def _show_placeholder(self) -> None:
+        self._table.hide()
+        self._placeholder.show()
+        self._summary_lbl.setText("")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
