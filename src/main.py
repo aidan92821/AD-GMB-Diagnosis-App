@@ -11,13 +11,10 @@ import sys
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore    import Qt
 from ui.main_window  import MainWindow
-from db.init_db      import init_db
 from src.pipeline.install_dependencies import ensure_env
 
 
 def main() -> None:
-    init_db()
-    ensure_env(callback=print)
     app = QApplication(sys.argv)
     app.setApplicationName("Axis")
     #app.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps)

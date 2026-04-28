@@ -29,9 +29,6 @@ models/*.pkl
 src/pipeline/qiime_env/
 qiime2-*.yml
 
-# ── Third-party binaries (downloaded at setup) ────────────────────────────────
-src/pipeline/bin/
-
 # ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
@@ -58,6 +55,7 @@ python3
 .env.*
 *.pem
 *.key
+data/key_vault.json
 
 # ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store
