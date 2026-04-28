@@ -629,75 +629,150 @@ class _PhylogenyWorker(QObject):
 
 
 class _UnifracWorker(QObject):
-    
+    """
+    Computes weighted UniFrac distances + PCoA using the project tree.
+    Pure-Python implementation — no skbio dependency.
+    """
     finished = pyqtSignal(object)   # emits updated AppState
     errored  = pyqtSignal(str)
 
-    def __init__(self, runner: QiimeRunner, state: AppState) -> None:
+    def __init__(self, state: AppState) -> None:
         super().__init__()
-        self._runner = runner
-        self._state = state
-        self._bioproject = self._state.bioproject_id
+        self._state    = state
         self._project_id = self._state.db_project_id
 
     def run(self):
         try:
             if self._state.run_count > 1:
-                self._fill_unifrac(state=self._state, project_id=self._project_id, labels=self._state.lbs)
-                _AnalysisWorkerReal._fill_pcoa(state=self._state, labels=self._state.lbs, metric="unifrac")
+                self._fill_unifrac(
+                    state=self._state,
+                    project_id=self._project_id,
+                    labels=self._state.lbs,
+                )
             self.finished.emit(self._state)
         except Exception as exc:
             self.errored.emit(str(exc))
 
     @staticmethod
-    def _fill_unifrac(state: AppState, project_id: int, labels: dict):
-        try:
-            from skbio.diversity.beta import weighted_unifrac
-            from skbio import TreeNode
-        except ImportError:
-            print("skbio not available — skipping weighted UniFrac")
-            return
+    def _fill_unifrac(state: AppState, project_id: int, labels: dict) -> None:
+        """
+        Weighted UniFrac using _TreeNode (no skbio).
 
-        try:
-            first_run_id = list(labels.values())[0]
-            feature_ids = get_run_feature_ids(first_run_id)
-        except (ServiceError, IndexError):
-            return
-        tree_node: TreeNode | None = None
+        Algorithm:
+          1. Load Newick from DB; prune to sample tips.
+          2. Iterative postorder: accumulate per-sample subtree proportions.
+          3. WUniFrac(A,B) = Σ(l·|pA−pB|) / Σ(l·(pA+pB))  over all branches.
+          4. Store pairwise distances and derive PCoA coordinates.
+        """
+        import io as _io
+        from ui.pages import _TreeNode
+
+        # ── Load tree ─────────────────────────────────────────────────────
         try:
             tree_info = get_tree(project_id=project_id)
         except ServiceError:
-            tree_info = None
-        if tree_info and tree_info.get("newick_string"):
-            import io
-            tree_node = TreeNode.read(io.StringIO(tree_info["newick_string"]))
-
-        if tree_node is None:
-            # skip unifrac silently
-            # TODO: make sure that te GUI knows this?? (chung)
+            print("UniFrac: no tree in DB — skipping")
+            return
+        nwk = tree_info.get("newick_string", "")
+        if not nwk:
+            print("UniFrac: empty newick string — skipping")
             return
 
-        # compute one pair at a time
-        run_labels = state.run_labels
+        # ── Feature counts per run ────────────────────────────────────────
+        run_ids = list(labels.values())
+        try:
+            feature_ids = get_run_feature_ids(run_ids[0])
+        except Exception:
+            return
+        if not feature_ids:
+            return
+
+        counts_per_run: dict[int, dict[str, int]] = {}
+        for run_id in run_ids:
+            try:
+                rows = get_feature_counts(run_id)
+                counts_per_run[run_id] = {
+                    r["feature_id"]: int(r["abundance"]) for r in rows
+                }
+            except ServiceError:
+                counts_per_run[run_id] = {}
+
+        # Tips present in any sample with count > 0
+        all_sample_tips: set[str] = set()
+        for cnt in counts_per_run.values():
+            all_sample_tips.update(k for k, v in cnt.items() if v > 0)
+        if not all_sample_tips:
+            return
+
+        # ── Parse & prune tree to sample tips ─────────────────────────────
+        try:
+            tree = _TreeNode.read(_io.StringIO(nwk))
+            tree.shear(all_sample_tips)
+        except Exception as exc:
+            print(f"UniFrac: tree parse/prune error: {exc}")
+            return
+
+        # Build postorder list once; reused for every pair
+        postorder_nodes = list(tree.postorder())
+
+        def _wunifrac(counts_a: dict, counts_b: dict) -> float:
+            total_a = sum(counts_a.values())
+            total_b = sum(counts_b.values())
+            if total_a == 0 and total_b == 0:
+                return 0.0
+            prop_a = ({k: v / total_a for k, v in counts_a.items()}
+                      if total_a else {})
+            prop_b = ({k: v / total_b for k, v in counts_b.items()}
+                      if total_b else {})
+
+            # Iterative postorder: accumulate subtree proportion sums
+            sub_a: dict[int, float] = {}
+            sub_b: dict[int, float] = {}
+            for node in postorder_nodes:
+                nid = id(node)
+                if not node.children:          # leaf
+                    sub_a[nid] = prop_a.get(node.name or "", 0.0)
+                    sub_b[nid] = prop_b.get(node.name or "", 0.0)
+                else:
+                    sub_a[nid] = sum(sub_a[id(c)] for c in node.children)
+                    sub_b[nid] = sum(sub_b[id(c)] for c in node.children)
+
+            numerator = denominator = 0.0
+            for node in postorder_nodes:
+                if node.parent is None:        # root — no branch above
+                    continue
+                bl = node.length or 0.0
+                if bl == 0.0:
+                    continue
+                nid = id(node)
+                sa, sb = sub_a[nid], sub_b[nid]
+                numerator   += bl * abs(sa - sb)
+                denominator += bl * (sa + sb)
+
+            return numerator / denominator if denominator > 0 else 0.0
+
+        # ── Pairwise weighted UniFrac ──────────────────────────────────────
+        run_labels = list(labels.keys())
         for i, label_a in enumerate(run_labels):
             for j, label_b in enumerate(run_labels):
                 if j <= i:
                     continue
-                u_val = float(
-                    weighted_unifrac(
-                        state.count_matrix[i],
-                        state.count_matrix[j],
-                        feature_ids,
-                        tree_node,
-                    )
+                id_a = labels[label_a]
+                id_b = labels[label_b]
+                u_val = _wunifrac(
+                    counts_per_run.get(id_a, {}),
+                    counts_per_run.get(id_b, {}),
                 )
-                id_a  = labels[label_a]
-                id_b  = labels[label_b]
                 id_lo, id_hi = sorted([id_a, id_b])
                 try:
                     store_beta_diversity(id_lo, id_hi, "unifrac", u_val)
                 except ServiceError:
                     continue
+
+        # ── UniFrac PCoA ──────────────────────────────────────────────────
+        _AnalysisWorkerReal._fill_pcoa(
+            state=state, labels=labels, metric="unifrac"
+        )
     
 
 class _RiskPredictionWorker(QObject):
@@ -1190,9 +1265,9 @@ class MainWindow(QMainWindow):
         self._overview_page.load(state)
         self._broadcast_state()
 
-        # TODO: TEMPORARY
-        # self._on_phylogeny_run() 
-        # TODO: TEMPORARY -> have this run when Construct Phylogeny button is pushed
+        # If a phylogenetic tree is stored, compute UniFrac PCoA automatically
+        if state.tree_id is not None and state.run_count > 1:
+            self._on_unifrac_run()
 
     def _on_analysis_error(self, msg: str) -> None:
         self._status_badge.setText(f"Analysis error: {msg[:60]}")
@@ -1234,10 +1309,12 @@ class MainWindow(QMainWindow):
 
 
     def _on_unifrac_run(self) -> None:
-        self._status_badge.setText("Computing Unifrac...")
+        self._status_badge.setText("Computing UniFrac…")
         self._status_badge.setObjectName("badge_yellow")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
         self._unifrac_thread = QThread(self)
-        self._unifrac_worker = _UnifracWorker(runner=self._runner, state=self._state)
+        self._unifrac_worker = _UnifracWorker(state=self._state)
         self._unifrac_worker.moveToThread(self._unifrac_thread)
         self._unifrac_thread.started.connect(self._unifrac_worker.run)
         self._unifrac_worker.finished.connect(self._on_unifrac_complete)
@@ -1246,15 +1323,18 @@ class MainWindow(QMainWindow):
         self._unifrac_worker.errored.connect(self._unifrac_thread.quit)
         self._unifrac_thread.start()
 
-    def _on_unifrac_complete(self) -> None:
-        self._status_badge.setText("Unifrac complete")
+    def _on_unifrac_complete(self, state: AppState) -> None:
+        self._state = state
+        self._status_badge.setText("UniFrac complete")
         self._status_badge.setObjectName("badge_green")
         self._status_badge.style().unpolish(self._status_badge)
         self._status_badge.style().polish(self._status_badge)
+        # Refresh diversity page so UniFrac PCoA appears
+        self._broadcast_state()
 
     def _on_unifrac_error(self, msg: str) -> None:
-        self._status_badge.setText("Error computing Unifrac")
-        self._status_badge.setObjectName("badge_red")
+        self._status_badge.setText(f"UniFrac skipped: {msg[:60]}")
+        self._status_badge.setObjectName("badge_yellow")
         self._status_badge.style().unpolish(self._status_badge)
         self._status_badge.style().polish(self._status_badge)
 

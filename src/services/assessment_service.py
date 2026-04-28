@@ -675,21 +675,21 @@ def save_ncbi_project(
             srr = run.get("accession", "").strip()
             if not srr:
                 continue
-            # Skip runs already registered (unique constraint on srr_accession)
             try:
-                get_run_by_srr(session, srr)
-                continue          # already exists — skip
+                existing = get_run_by_srr(session, srr)
+                # Re-parent to the new project so all project-scoped queries
+                # (beta diversity, PCoA) use the correct project_id.
+                existing.project_id = project.project_id
+                session.flush()
             except NotFoundError:
-                pass              # not found — safe to insert
-
-            repo_create_run(
-                session,
-                project=project,
-                source="ncbi",
-                srr_accession=srr,
-                bio_proj_accession=bio_proj_accession,
-                library_layout=run.get("layout"),
-            )
+                repo_create_run(
+                    session,
+                    project=project,
+                    source="ncbi",
+                    srr_accession=srr,
+                    bio_proj_accession=bio_proj_accession,
+                    library_layout=run.get("layout"),
+                )
 
         session.commit()
         return {
