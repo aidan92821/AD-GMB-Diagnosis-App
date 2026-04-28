@@ -7,7 +7,9 @@ from __future__ import annotations
 
 from typing import Callable
 
-from src.db.database import SessionLocal
+from src.db.key_vault import user_exists, unlock, create_entry
+from src.db.database import init_engine, get_master_key, SessionLocal
+from src.db.init_db import init_db
 from src.db.repository import (
     get_user,
     get_user_by_username,
@@ -72,21 +74,19 @@ def get_or_create_user(username: str) -> dict:
     finally:
         session.close()
 
-def get_user_email(user_id: int) -> str:
-    session = SessionLocal()
-    try:
-        user = get_user(session, user_id)
-        return user.user_email
-    except RepositoryError as e:
-        raise ServiceError(str(e)) from e
-    finally:
-        session.close()
+def register_user(username: str, password: str, email: str = "") -> dict:
+    if user_exists(username):
+        raise ServiceError(f"Username {username!r} is already taken")
 
-def register_user(username: str, password: str, email: str) -> dict:
+    current_key = get_master_key()
+    master_key = create_entry(username, password, master_key=current_key)
+
+    if current_key is None:
+        init_engine(master_key)
+        init_db()
+
     session = SessionLocal()
     try:
-        if username_exists(session, username):
-            raise ServiceError(f"Username {username!r} is already taken")
         hashed = hash_password(password)
         user = repo_create_user(session, username=username, password_hash=hashed, user_email=email)
         session.commit()
@@ -97,7 +97,15 @@ def register_user(username: str, password: str, email: str) -> dict:
     finally:
         session.close()
 
+
 def login_user(username: str, password: str) -> dict:
+    if not user_exists(username):
+        raise ServiceError("Invalid username or password.")
+    try:
+        master_key = unlock(username, password)
+    except ValueError as e:
+        raise ServiceError(str(e))
+    init_engine(master_key)
     session = SessionLocal()
     try:
         user = get_user_by_username(session, username)
