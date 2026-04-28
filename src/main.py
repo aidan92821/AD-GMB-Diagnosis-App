@@ -15,7 +15,6 @@ from db.init_db      import init_db
 
 
 def main() -> None:
-    init_db()
     app = QApplication(sys.argv)
     app.setApplicationName("Axis")
     #app.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps)

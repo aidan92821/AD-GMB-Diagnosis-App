@@ -21,6 +21,10 @@ models/*.pkl
 # ── QIIME2 conda environment file (downloaded, not authored) ─────────────────
 qiime2-*.yml
 
+# ── QIIME2 runtime environment & pipeline binaries (generated, not authored) ──
+src/pipeline/qiime_env/
+src/pipeline/bin/
+
 # ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
