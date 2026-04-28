@@ -33,7 +33,7 @@ from resources.styles import (
 from models.app_state import AppState, RunState
 from ui.pages import (
     OverviewPage, UploadRunsPage, DiversityPage,
-    TaxonomyPage, AsvTablePage, PhylogenyPage, AlzheimerPage,
+    TaxonomyPage, AsvTablePage, PhylogenyPage, AlzheimerPage, SimulationPage,
 )
 from ui.export_page import ExportPage
 from ui.auth_page import AuthPage
@@ -67,6 +67,7 @@ NAV = [
     ]),
     ("INSIGHTS", [
         ("Alzheimer Risk", "♥"),
+        ("Simulation",     "⚗"),
     ]),
     ("EXPORT", [
         ("Export PDF",     "⬇"),
@@ -887,22 +888,23 @@ class MainWindow(QMainWindow):
         self._stack = QStackedWidget()
         self._stack.setStyleSheet(f"background:{BG_PAGE};")
 
-        self._overview_page  = OverviewPage()
-        self._upload_page    = UploadRunsPage()
-        self._diversity_page = DiversityPage()
-        self._taxonomy_page  = TaxonomyPage()
-        self._asv_page       = AsvTablePage()
-        self._phylo_page     = PhylogenyPage()
-        self._alzheimer_page = AlzheimerPage()
-        self._export_page    = ExportPage()
-        self._profile_page   = ProfilePage()
+        self._overview_page    = OverviewPage()
+        self._upload_page      = UploadRunsPage()
+        self._diversity_page   = DiversityPage()
+        self._taxonomy_page    = TaxonomyPage()
+        self._asv_page         = AsvTablePage()
+        self._phylo_page       = PhylogenyPage()
+        self._alzheimer_page   = AlzheimerPage()
+        self._simulation_page  = SimulationPage()
+        self._export_page      = ExportPage()
+        self._profile_page     = ProfilePage()
 
         for page in [
             self._overview_page, self._upload_page,
             self._diversity_page, self._taxonomy_page,
             self._asv_page, self._phylo_page,
-            self._alzheimer_page, self._export_page,
-            self._profile_page,
+            self._alzheimer_page, self._simulation_page,
+            self._export_page, self._profile_page,
         ]:
             self._stack.addWidget(page)
 
@@ -1311,6 +1313,7 @@ class MainWindow(QMainWindow):
             self._asv_page,
             self._phylo_page,
             self._alzheimer_page,
+            self._simulation_page,
         ]:
             if hasattr(page, "load"):
                 try:

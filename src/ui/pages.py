@@ -12,10 +12,10 @@ from PyQt6.QtWidgets import (
     QWidget, QFrame, QLabel, QLineEdit, QComboBox,
     QPushButton, QHBoxLayout, QVBoxLayout, QGridLayout,
     QFileDialog, QTableWidget, QTableWidgetItem, QHeaderView,
-    QSizePolicy, QScrollArea, QPlainTextEdit,
+    QSizePolicy, QScrollArea, QPlainTextEdit, QSlider,
 )
 from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont, QTextCursor
+from PyQt6.QtGui import QFont, QTextCursor, QColor
 
 from models.app_state import AppState
 from resources.styles import (
@@ -2364,3 +2364,327 @@ class AlzheimerPage(QWidget):
         inner_lay.addStretch()
 
         self._scroll.setWidget(inner)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  PAGE 8 – Gut Microbiome Simulation
+# ═════════════════════════════════════════════════════════════════════════════
+
+class SimulationPage(QWidget):
+    """
+    COMETS-inspired gut microbiome simulation.
+    Slider interventions drive a 30-day ODE-like model; results are shown as
+    4 matplotlib plots and a QTableWidget of species changes.
+    """
+
+    _BUTYRATE = {"Faecalibacterium", "Roseburia", "Blautia", "Eubacterium",
+                 "Butyrivibrio", "Anaerostipes", "Subdoligranulum"}
+    _PROBIOTIC = {"Bifidobacterium", "Lactobacillus", "Lactococcus"}
+    _INFLAM    = {"Fusobacterium", "Escherichia", "Klebsiella", "Enterococcus",
+                  "Sutterella"}
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._state: AppState | None = None
+        self._genus_data: list[dict] = []
+        self._build()
+
+    # ── Build UI ──────────────────────────────────────────────────────────────
+
+    def _build(self):
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+        from matplotlib.figure import Figure
+
+        scroll = QScrollArea(self)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll)
+
+        inner_w = QWidget()
+        scroll.setWidget(inner_w)
+        root = QVBoxLayout(inner_w)
+        root.setContentsMargins(28, 24, 28, 24)
+        root.setSpacing(16)
+
+        # Header
+        hdr = QHBoxLayout()
+        hdr.addWidget(page_title("Gut Microbiome Simulation"))
+        hdr.addStretch()
+        hdr.addWidget(label_hint("COMETS-inspired 30-day dynamic model"))
+        root.addLayout(hdr)
+
+        # Main area: left sliders + right content
+        main = QHBoxLayout()
+        main.setSpacing(16)
+        root.addLayout(main, 1)
+
+        # ── Left: slider panel ────────────────────────────────────────────────
+        left = card()
+        left.setFixedWidth(230)
+        left_lay = left.layout()
+        left_lay.addWidget(section_title("Interventions"))
+
+        self._sliders: dict[str, QSlider] = {}
+        slider_cfg = [
+            ("Antibiotic Level",  "antibiotic",  0,  "#EF4444"),
+            ("Probiotic Level",   "probiotic",  30,  "#10B981"),
+            ("Dietary Fiber",     "fiber",       50,  "#6366F1"),
+            ("Processed Food",    "processed",   20,  "#F59E0B"),
+        ]
+        for lbl_text, key, default, color in slider_cfg:
+            self._sliders[key] = self._add_slider(left_lay, lbl_text, key, default, color)
+
+        left_lay.addStretch()
+
+        run_btn = btn_primary("Run Simulation")
+        run_btn.clicked.connect(self._run_sim)
+        left_lay.addWidget(run_btn)
+
+        main.addWidget(left)
+
+        # ── Right: graphs + table ─────────────────────────────────────────────
+        right_lay = QVBoxLayout()
+        right_lay.setSpacing(12)
+        main.addLayout(right_lay, 1)
+
+        graphs_card = card()
+        graphs_lay = QGridLayout()
+        graphs_lay.setSpacing(8)
+        graphs_card.layout().addLayout(graphs_lay)
+
+        self._figs: list = []
+        self._canvases: list = []
+        for i in range(4):
+            fig = Figure(figsize=(5, 3.2), tight_layout=True)
+            canvas = FigureCanvasQTAgg(fig)
+            canvas.setMinimumHeight(230)
+            graphs_lay.addWidget(canvas, i // 2, i % 2)
+            self._figs.append(fig)
+            self._canvases.append(canvas)
+
+        right_lay.addWidget(graphs_card, 1)
+
+        # Table
+        table_card = card()
+        table_card.layout().addWidget(section_title("Species Changes (Initial → Day 30)"))
+        self._table = QTableWidget(0, 4)
+        self._table.setHorizontalHeaderLabels(["Genus", "Initial %", "Final %", "Δ Change"])
+        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._table.setAlternatingRowColors(True)
+        self._table.setMaximumHeight(220)
+        table_card.layout().addWidget(self._table)
+        right_lay.addWidget(table_card)
+
+        self._draw_placeholders()
+
+    def _add_slider(self, parent_lay, label_text: str, key: str, default: int, accent: str) -> QSlider:
+        container = QWidget()
+        lay = QVBoxLayout(container)
+        lay.setContentsMargins(0, 6, 0, 2)
+        lay.setSpacing(2)
+
+        top = QHBoxLayout()
+        lbl = QLabel(label_text)
+        lbl.setObjectName("label_muted")
+        val_lbl = QLabel(f"{default}%")
+        val_lbl.setFixedWidth(36)
+        val_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        val_lbl.setStyleSheet(f"font-weight:600; color:{accent};")
+        top.addWidget(lbl, 1)
+        top.addWidget(val_lbl)
+        lay.addLayout(top)
+
+        slider = QSlider(Qt.Orientation.Horizontal)
+        slider.setRange(0, 100)
+        slider.setValue(default)
+        slider.setStyleSheet(
+            f"QSlider::handle:horizontal {{ background:{accent}; border-radius:6px; width:12px; height:12px; }}"
+            f"QSlider::sub-page:horizontal {{ background:{accent}; border-radius:3px; }}"
+        )
+        slider.valueChanged.connect(lambda v, vl=val_lbl: vl.setText(f"{v}%"))
+        lay.addWidget(slider)
+
+        parent_lay.addWidget(container)
+        return slider
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
+    def load(self, state: AppState):
+        self._state = state
+        self._genus_data = []
+
+        if not state:
+            return
+
+        from src.services.assessment_service import get_genus_data
+        if state.lbs:
+            for run_id in state.lbs.values():
+                try:
+                    data = get_genus_data(run_id)
+                    if data:
+                        self._genus_data = data
+                        break
+                except Exception:
+                    pass
+
+        if self._genus_data:
+            self._run_sim()
+        else:
+            self._draw_placeholders()
+
+    # ── Simulation ────────────────────────────────────────────────────────────
+
+    def _run_sim(self):
+        import numpy as np
+
+        antibiotic = self._sliders["antibiotic"].value() / 100.0
+        probiotic  = self._sliders["probiotic"].value()  / 100.0
+        fiber      = self._sliders["fiber"].value()      / 100.0
+        processed  = self._sliders["processed"].value()  / 100.0
+
+        if not self._genus_data:
+            self._draw_placeholders()
+            return
+
+        genera  = [d["genus"] for d in self._genus_data]
+        init_ab = np.array([d["relative_abundance"] for d in self._genus_data], dtype=float)
+        total   = init_ab.sum()
+        if total > 0:
+            init_ab /= total
+
+        is_butyrate  = np.array([g in self._BUTYRATE for g in genera], dtype=float)
+        is_probiotic = np.array([g in self._PROBIOTIC for g in genera], dtype=float)
+        is_inflam    = np.array([g in self._INFLAM    for g in genera], dtype=float)
+
+        T = 30
+        history = np.zeros((T, len(genera)))
+        history[0] = init_ab.copy()
+
+        for t in range(1, T):
+            prev = history[t - 1].copy()
+
+            # Antibiotic: broad-spectrum kill, exponentially decaying with time
+            antibiotic_kill = antibiotic * np.exp(-0.12 * t) * 0.9
+            delta_ab = -antibiotic_kill * prev
+
+            # Probiotic boosts probiotic genera
+            delta_ab += probiotic * 0.018 * is_probiotic
+
+            # Fiber feeds butyrate producers
+            delta_ab += fiber * 0.014 * is_butyrate
+
+            # Processed food feeds inflammatory genera, starves butyrate producers
+            delta_ab += processed * 0.012 * is_inflam
+            delta_ab -= processed * 0.010 * is_butyrate
+
+            new_ab = np.clip(prev + delta_ab, 1e-7, None)
+            new_ab /= new_ab.sum()
+            history[t] = new_ab
+
+        # ── Derived metrics ────────────────────────────────────────────────────
+        def _shannon(ab):
+            p = ab[ab > 0]
+            return float(-np.sum(p * np.log2(p)))
+
+        times         = np.arange(T)
+        diversity     = np.array([_shannon(history[t]) for t in range(T)])
+        butyrate_lvl  = np.array([(history[t] * is_butyrate).sum() for t in range(T)])
+        inflam_lvl    = np.array([(history[t] * is_inflam).sum()   for t in range(T)])
+        max_sh        = np.log2(len(genera)) if len(genera) > 1 else 1.0
+        ad_risk       = 100.0 * (
+            0.35 * np.clip(inflam_lvl    / max(inflam_lvl.max(),   1e-9), 0, 1) +
+            0.30 * np.clip(1 - diversity / max_sh,                        0, 1) +
+            0.35 * np.clip(1 - butyrate_lvl / max(butyrate_lvl.max(), 1e-9), 0, 1)
+        )
+
+        # ── Plot 1: Top genera over time ───────────────────────────────────────
+        top_n   = min(6, len(genera))
+        top_idx = np.argsort(init_ab)[::-1][:top_n]
+        COLORS  = ['#6366F1', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#06B6D4']
+
+        self._figs[0].clear()
+        ax0 = self._figs[0].add_subplot(111)
+        for k, i in enumerate(top_idx):
+            ax0.plot(times, history[:, i] * 100, label=genera[i],
+                     color=COLORS[k % len(COLORS)], linewidth=1.8)
+        ax0.set_title("Genus Abundance Over Time", fontsize=10, fontweight='bold')
+        ax0.set_xlabel("Day"); ax0.set_ylabel("Relative Abundance (%)")
+        ax0.legend(fontsize=7, loc='upper right', framealpha=0.7)
+        ax0.set_facecolor('#F8FAFC')
+        self._canvases[0].draw()
+
+        # ── Plot 2: Alpha diversity ────────────────────────────────────────────
+        self._figs[1].clear()
+        ax1 = self._figs[1].add_subplot(111)
+        ax1.plot(times, diversity, color='#10B981', linewidth=2)
+        ax1.fill_between(times, diversity, alpha=0.15, color='#10B981')
+        ax1.set_title("Alpha Diversity (Shannon Index)", fontsize=10, fontweight='bold')
+        ax1.set_xlabel("Day"); ax1.set_ylabel("Shannon Index")
+        ax1.set_facecolor('#F8FAFC')
+        self._canvases[1].draw()
+
+        # ── Plot 3: Metabolite proxies ─────────────────────────────────────────
+        self._figs[2].clear()
+        ax2 = self._figs[2].add_subplot(111)
+        ax2.plot(times, butyrate_lvl * 100, label="Butyrate / SCFA",
+                 color='#10B981', linewidth=2)
+        ax2.plot(times, inflam_lvl * 100, label="LPS / Inflammatory",
+                 color='#EF4444', linewidth=2, linestyle='--')
+        ax2.set_title("Metabolite Proxies", fontsize=10, fontweight='bold')
+        ax2.set_xlabel("Day"); ax2.set_ylabel("Relative Level (%)")
+        ax2.legend(fontsize=8, framealpha=0.7)
+        ax2.set_facecolor('#F8FAFC')
+        self._canvases[2].draw()
+
+        # ── Plot 4: AD risk score over time ───────────────────────────────────
+        self._figs[3].clear()
+        ax3 = self._figs[3].add_subplot(111)
+        ax3.plot(times, ad_risk, color='#EF4444', linewidth=2)
+        ax3.fill_between(times, ad_risk, alpha=0.10, color='#EF4444')
+        ax3.axhline(33, color='#F59E0B', linestyle=':', linewidth=1.2, label='Moderate (33)')
+        ax3.axhline(66, color='#EF4444', linestyle=':', linewidth=1.2, label='High (66)')
+        ax3.set_ylim(0, 100)
+        ax3.set_title("Predicted AD Risk Score", fontsize=10, fontweight='bold')
+        ax3.set_xlabel("Day"); ax3.set_ylabel("Risk Score")
+        ax3.legend(fontsize=8, framealpha=0.7)
+        ax3.set_facecolor('#F8FAFC')
+        self._canvases[3].draw()
+
+        # ── Table: species changes ─────────────────────────────────────────────
+        final_ab = history[-1]
+        rows = sorted(
+            [(genera[i], init_ab[i] * 100, final_ab[i] * 100,
+              (final_ab[i] - init_ab[i]) * 100)
+             for i in range(len(genera))],
+            key=lambda x: abs(x[3]), reverse=True,
+        )
+        self._table.setRowCount(len(rows))
+        for r, (genus, ini, fin, delta) in enumerate(rows):
+            self._table.setItem(r, 0, QTableWidgetItem(genus))
+            self._table.setItem(r, 1, QTableWidgetItem(f"{ini:.3f}"))
+            self._table.setItem(r, 2, QTableWidgetItem(f"{fin:.3f}"))
+            delta_item = QTableWidgetItem(f"{'+' if delta >= 0 else ''}{delta:.3f}")
+            delta_item.setForeground(QColor("#10B981" if delta >= 0 else "#EF4444"))
+            self._table.setItem(r, 3, delta_item)
+
+    # ── Placeholder ───────────────────────────────────────────────────────────
+
+    def _draw_placeholders(self):
+        titles = [
+            "Genus Abundance Over Time",
+            "Alpha Diversity (Shannon)",
+            "Metabolite Proxies",
+            "Predicted AD Risk Score",
+        ]
+        for i, (fig, canvas) in enumerate(zip(self._figs, self._canvases)):
+            fig.clear()
+            ax = fig.add_subplot(111)
+            ax.text(0.5, 0.5, "Load a project to run simulation",
+                    ha='center', va='center', transform=ax.transAxes,
+                    color='#94A3B8', fontsize=10)
+            ax.set_title(titles[i], fontsize=10, fontweight='bold')
+            ax.set_facecolor('#F8FAFC')
+            canvas.draw()

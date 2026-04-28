@@ -46,6 +46,8 @@ from src.db.repository import (
     get_pcoa_for_project,
     create_simulation as repo_create_simulation,
     get_simulations_for_run as repo_get_simulations_for_run,
+    delete_features_for_run,
+    delete_genus_for_run,
 )
 
 
@@ -254,25 +256,27 @@ def ingest_run_data(
         # Convert list of tuples to dict for the repository layer
         genus_abundances = dict(genus_rows)
 
-        # Insert genus-level relative abundances
-        if not get_run_exists_genus_table(session, run_id):
-            create_genus_bulk(session, run=run, genus_abundances=genus_abundances)
+        # Replace genus-level relative abundances (delete stale, re-insert fresh)
+        if get_run_exists_genus_table(session, run_id):
+            delete_genus_for_run(session, run_id)
+        create_genus_bulk(session, run=run, genus_abundances=genus_abundances)
 
-        # Insert each ASV feature (sequence + taxonomy)
-        if not get_run_exists_feature_table(session, run_id):
-            for f in features:
-                create_feature(
-                    session,
-                    run=run,
-                    feature_id=f["feature_id"],
-                    sequence=f.get("sequence"),
-                    taxonomy=f.get("taxonomy"),
-                )
+        # Replace ASV features and counts (cascade delete handles FeatureCount FK)
+        if get_run_exists_feature_table(session, run_id):
+            delete_features_for_run(session, run_id)
+            session.flush()
+        for f in features:
+            create_feature(
+                session,
+                run=run,
+                feature_id=f["feature_id"],
+                sequence=f.get("sequence"),
+                taxonomy=f.get("taxonomy"),
+            )
 
-        # Flush features to DB before inserting counts — feature_count has a FK to feature
+        # Flush features before inserting counts — feature_count has a FK to feature
         session.flush()
-        if not get_run_exists_feature_count_table(session, run_id):
-            create_feature_count_bulk(session, run_id=run_id, counts=feature_counts)
+        create_feature_count_bulk(session, run_id=run_id, counts=feature_counts)
 
         session.commit()
         return {
@@ -767,6 +771,23 @@ def get_simulation_genus(simulation_id: int) -> list[dict]:
         stmt = select(Genus).where(Genus.simulation_id == simulation_id)
         rows = list(session.execute(stmt).scalars().all())
         return [{"genus": g.genus, "relative_abundance": g.relative_abundance} for g in rows]
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+def get_project_feature_taxonomy(project_id: int) -> dict[str, str]:
+    """Return {feature_id: taxonomy_string} for every run in a project."""
+    session = SessionLocal()
+    try:
+        runs = list_runs_for_project(session, project_id)
+        result: dict[str, str] = {}
+        for run in runs:
+            for feat in list_features_for_run(session, run.run_id):
+                if feat.taxonomy:
+                    result[feat.feature_id] = feat.taxonomy
+        return result
     except RepositoryError as e:
         raise ServiceError(str(e)) from e
     finally:
