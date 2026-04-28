@@ -398,7 +398,7 @@ class _AnalysisWorkerReal(QObject):
                 self._fill_bray_curtis(self._state, self._state.lbs)
                 
                 self.progress.emit("Computing PCoA…")
-                self._fill_pcoa(self._state, self._state.lbs, "bray-curtis")
+                self._fill_pcoa(self._state, self._state.lbs, "bray_curtis")
             
             self.finished.emit(self._state)
         except Exception as exc:
@@ -464,7 +464,10 @@ class _AnalysisWorkerReal(QObject):
         try:
             first_run_id = list(labels.values())[0]
             feature_ids = get_run_feature_ids(first_run_id)
-        except (ServiceError, IndexError):
+        except (ServiceError, IndexError, Exception):
+            return
+
+        if not feature_ids:
             return
 
         for run_id in run_ids:
