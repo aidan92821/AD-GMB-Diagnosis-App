@@ -1799,6 +1799,123 @@ class AsvTablePage(QWidget):
 #  PAGE 6 – Phylogeny
 # ═════════════════════════════════════════════════════════════════════════════
 
+class _TreeNode:
+    """Minimal Newick tree node — no skbio dependency, iterative parser."""
+
+    __slots__ = ("name", "length", "parent", "children")
+
+    def __init__(self, name: str = "", length=None):
+        self.name     = name
+        self.length   = length
+        self.parent   = None
+        self.children: list = []
+
+    def is_tip(self) -> bool:
+        return not self.children
+
+    def tips(self):
+        for node in self.postorder():
+            if node.is_tip():
+                yield node
+
+    def non_tips(self):
+        for node in self.postorder():
+            if not node.is_tip():
+                yield node
+
+    def preorder(self):
+        stack = [self]
+        while stack:
+            node = stack.pop()
+            yield node
+            for c in reversed(node.children):
+                stack.append(c)
+
+    def postorder(self):
+        stack = [(self, False)]
+        while stack:
+            node, done = stack.pop()
+            if done:
+                yield node
+            else:
+                stack.append((node, True))
+                for c in reversed(node.children):
+                    stack.append((c, False))
+
+    def shear(self, keep: set) -> "_TreeNode":
+        """Prune in-place, keep only tips whose names are in *keep*."""
+        def _prune(node) -> bool:
+            if node.is_tip():
+                return node.name in keep
+            node.children = [c for c in node.children if _prune(c)]
+            return bool(node.children)
+        _prune(self)
+        return self
+
+    @classmethod
+    def read(cls, f) -> "_TreeNode":
+        """Parse Newick from a file-like object (iterative — safe for deep trees)."""
+        s = f.read().strip().rstrip(";")
+        return cls._parse(s)
+
+    @classmethod
+    def _parse(cls, s: str) -> "_TreeNode":
+        root    = cls()
+        current = root
+        i, n    = 0, len(s)
+
+        while i < n:
+            ch = s[i]
+
+            if ch == "(":
+                child        = cls()
+                child.parent = current
+                current.children.append(child)
+                current = child
+                i += 1
+
+            elif ch == ",":
+                current = current.parent
+                child        = cls()
+                child.parent = current
+                current.children.append(child)
+                current = child
+                i += 1
+
+            elif ch == ")":
+                current = current.parent
+                i += 1
+                j = i
+                while j < n and s[j] not in ",)(":
+                    j += 1
+                cls._apply_label(current, s[i:j])
+                i = j
+
+            else:
+                j = i
+                while j < n and s[j] not in ",)(":
+                    j += 1
+                cls._apply_label(current, s[i:j])
+                i = j
+
+        return root
+
+    @staticmethod
+    def _apply_label(node, label: str) -> None:
+        label = label.strip()
+        if not label:
+            return
+        if ":" in label:
+            colon      = label.index(":")
+            node.name  = label[:colon].strip().strip("'\"")
+            try:
+                node.length = float(label[colon + 1:].strip())
+            except ValueError:
+                node.length = None
+        else:
+            node.name = label.strip("'\"")
+
+
 class PhylogenyPage(QWidget):
     """
     Renders the project's rooted phylogenetic tree (Newick) as a rectangular
@@ -1945,10 +2062,9 @@ class PhylogenyPage(QWidget):
 
     def _render(self, newick: str) -> None:
         import io, random
-        from skbio import TreeNode
 
         try:
-            tree = TreeNode.read(io.StringIO(newick))
+            tree = _TreeNode.read(io.StringIO(newick))
         except Exception as exc:
             self._show_placeholder(f"Could not parse tree: {exc}")
             return

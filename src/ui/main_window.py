@@ -404,9 +404,23 @@ class _AnalysisWorkerReal(QObject):
             self.errored.emit(str(exc))
 
     @staticmethod
+    def _shannon(counts: np.ndarray) -> float:
+        total = counts.sum()
+        if total == 0:
+            return 0.0
+        p = counts[counts > 0] / total
+        return float(-np.sum(p * np.log2(p)))
+
+    @staticmethod
+    def _simpson(counts: np.ndarray) -> float:
+        total = counts.sum()
+        if total == 0:
+            return 0.0
+        p = counts / total
+        return float(1.0 - np.sum(p ** 2))
+
+    @staticmethod
     def _fill_alpha(labels: dict) -> None:
-        from skbio.diversity.alpha import shannon, simpson
-        # compute shannon and simpson
         for run_id in labels.values():
             try:
                 rows = get_feature_counts(run_id)
@@ -418,8 +432,8 @@ class _AnalysisWorkerReal(QObject):
 
             counts = np.array([r["abundance"] for r in rows], dtype=int)
 
-            sh = float(shannon(counts, base=2))
-            si = float(simpson(counts))
+            sh = _AnalysisWorkerReal._shannon(counts)
+            si = _AnalysisWorkerReal._simpson(counts)
 
             try:
                 store_alpha_diversities(run_id, {"shannon": sh, "simpson": si})
@@ -428,7 +442,7 @@ class _AnalysisWorkerReal(QObject):
 
     @staticmethod
     def _fill_bray_curtis(state: AppState, labels: dict) -> None:
-        from skbio.diversity import beta_diversity # for bray-curtis
+        from scipy.spatial.distance import cdist
 
         run_ids = list(labels.values())
         run_labels = list(labels.keys())
@@ -456,21 +470,16 @@ class _AnalysisWorkerReal(QObject):
                 [counts_per_run[run_id].get(fid, 0) for fid in feature_ids]
                 for run_id in run_ids
             ],
-            dtype=int,
+            dtype=float,
         )
 
-        # beta_diversity returns an skbio DistanceMatrix
-        bc_dm = beta_diversity(
-            metric="braycurtis",
-            counts=count_matrix,
-            ids=run_labels,
-        )
+        bc_matrix = cdist(count_matrix, count_matrix, metric='braycurtis')
 
         for i, label_a in enumerate(run_labels):
             for j, label_b in enumerate(run_labels):
                 if j <= i:
-                    continue 
-                value = float(bc_dm[label_a, label_b])
+                    continue
+                value = float(bc_matrix[i, j])
                 id_a  = labels[label_a]
                 id_b  = labels[label_b]
                 id_lo, id_hi = sorted([id_a, id_b])
@@ -628,10 +637,13 @@ class _UnifracWorker(QObject):
 
     @staticmethod
     def _fill_unifrac(state: AppState, project_id: int, labels: dict):
-        from skbio.diversity.beta import weighted_unifrac
-        from skbio import TreeNode # for weighted unifrac
-        # with qiime2, all runs share the same reference phylogeny
-        # by using fragment insertion method
+        try:
+            from skbio.diversity.beta import weighted_unifrac
+            from skbio import TreeNode
+        except ImportError:
+            print("skbio not available — skipping weighted UniFrac")
+            return
+
         try:
             first_run_id = list(labels.values())[0]
             feature_ids = get_run_feature_ids(first_run_id)
