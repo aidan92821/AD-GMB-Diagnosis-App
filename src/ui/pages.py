@@ -938,6 +938,7 @@ class DiversityPage(QWidget):
         hm_card.layout().addWidget(label_hint("0.0 = identical  ·  1.0 = maximally different"))
         self._hm_fig = plt.figure(figsize=(4, 4), facecolor="none")
         self._hm_ax  = self._hm_fig.add_subplot(111)
+        self._hm_colorbar = None
         self._hm_canvas = FigureCanvasQTAgg(self._hm_fig)
         self._hm_canvas.setMinimumHeight(280)
         hm_card.layout().addWidget(self._hm_canvas)
@@ -1231,8 +1232,12 @@ class DiversityPage(QWidget):
     def _render_heatmap(self, matrix: list[list[float]]) -> None:
         import numpy as np
         labels = self._state.run_labels
-        ax = self._hm_ax
-        ax.clear()
+        # Clear the entire figure (removes axes + all colorbar axes) then
+        # recreate fresh — colorbar.remove() alone doesn't restore host-axes
+        # size and causes the colorbar strip to stack on every metric switch.
+        self._hm_fig.clear()
+        ax = self._hm_fig.add_subplot(111)
+        self._hm_ax = ax
         mat = np.array(matrix)
         im  = ax.imshow(mat, cmap="YlOrRd", vmin=0, vmax=1, aspect="auto")
         ax.set_xticks(range(len(labels)))
@@ -1244,7 +1249,7 @@ class DiversityPage(QWidget):
                 ax.text(j, i, f"{mat[i, j]:.2f}",
                         ha="center", va="center", fontsize=8,
                         color="white" if mat[i, j] > 0.6 else "black")
-        self._hm_fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+        self._hm_colorbar = self._hm_fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
         ax.set_facecolor("none")
         self._hm_fig.tight_layout(pad=1.0)
         self._hm_canvas.draw()
@@ -1287,7 +1292,20 @@ class TaxonomyPage(QWidget):
         self._root.addLayout(hdr)
 
         # emma taxonomy
-        # ── Row 1: bar chart  +  legend ───────────────────────────────────
+        # ── Row 1: stacked bar (all runs) — shown first so no scrolling needed
+        comp_card = card()
+        comp_card.layout().addWidget(
+            section_title("Genus composition across runs")
+        )
+        self._stacked = StackedBarWidget(data={}, colors=GENUS_COLORS)
+        comp_card.layout().addWidget(self._stacked)
+        self._stacked_placeholder = _placeholder(
+            "Upload FASTQ files to see composition across all runs."
+        )
+        comp_card.layout().addWidget(self._stacked_placeholder)
+        self._root.addWidget(comp_card)
+
+        # ── Row 2: bar chart  +  legend (per-run) ─────────────────────────
         cols = QHBoxLayout()
         cols.setSpacing(12)
 
@@ -1313,7 +1331,7 @@ class TaxonomyPage(QWidget):
 
         self._root.addLayout(cols)
 
-        # ── Row 2: sortable genus table (all genera, current run) ─────────
+        # ── Row 3: sortable genus table (all genera, current run) ─────────
         genus_tbl_card = card()
         genus_tbl_card.layout().addWidget(
             section_title("Genus abundance table")
@@ -1335,18 +1353,6 @@ class TaxonomyPage(QWidget):
         self._genus_table.hide()
         self._root.addWidget(genus_tbl_card, 1)
 
-        # ── Row 3: stacked bar (all runs) ─────────────────────────────────
-        comp_card = card()
-        comp_card.layout().addWidget(
-            section_title("Genus composition across runs")
-        )
-        self._stacked = StackedBarWidget(data={}, colors=GENUS_COLORS)
-        comp_card.layout().addWidget(self._stacked)
-        self._stacked_placeholder = _placeholder(
-            "Upload FASTQ files to see composition across all runs."
-        )
-        comp_card.layout().addWidget(self._stacked_placeholder)
-        self._root.addWidget(comp_card)
         self._root.addStretch()
         # emma taxonomy
 
@@ -2139,8 +2145,6 @@ class PhylogenyPage(QWidget):
 
                 raw: dict[str, str] = {}
 
-                # Primary: lbs maps fresh-run IDs whose feature_ids match the
-                # current tree (correct when the pipeline just ran).
                 if self._state.lbs:
                     for run_id in self._state.lbs.values():
                         try:
@@ -2152,8 +2156,6 @@ class PhylogenyPage(QWidget):
                         except Exception:
                             pass
 
-                # Fallback: query all runs for this project (loading existing
-                # project from DB without a fresh pipeline run).
                 if not raw and self._state.db_project_id:
                     raw = get_project_feature_taxonomy(self._state.db_project_id)
 
@@ -2164,9 +2166,9 @@ class PhylogenyPage(QWidget):
             except Exception:
                 pass
 
-        # ── 3. Prefer ASV tips (MD5 hashes) over reference tips ───────────────
-        _md5 = re.compile(r'^[0-9a-f]{32}$')
-        asv_tips = [t for t in all_tips if _md5.match(t.name or "")]
+        # ── 3. Prefer ASV tips (MD5 / SHA256 hashes) over reference tips ──────
+        _hash = re.compile(r'^[0-9a-fA-F]{32,64}$')
+        asv_tips = [t for t in all_tips if _hash.match(t.name or "")]
         note_txt = ""
 
         if asv_tips:
@@ -2191,7 +2193,23 @@ class PhylogenyPage(QWidget):
 
         fast_tree.shear(keep_names)
 
-        # ── 4. Export pruned subtree → Bio.Phylo ──────────────────────────────
+        # ── 4. Rename tip nodes in-place with genus names ─────────────────────
+        # Baking names into the tree before to_newick() is more reliable than
+        # relying on Bio.Phylo's label_func, which varies across versions.
+        _safe = re.compile(r'[^A-Za-z0-9_.\-]')
+        genus_seen: dict[str, int] = {}
+        for tip in fast_tree.tips():
+            raw_name = tip.name or ""
+            genus = feature_genus.get(raw_name)
+            if genus:
+                safe = _safe.sub("_", genus)
+                idx  = genus_seen.get(safe, 0)
+                genus_seen[safe] = idx + 1
+                tip.name = safe if idx == 0 else f"{safe}.{idx}"
+            elif raw_name:
+                tip.name = raw_name[:10]   # short hash fallback
+
+        # ── 5. Export pruned + relabelled subtree → Bio.Phylo ─────────────────
         pruned_nwk = fast_tree.to_newick()
         try:
             bio_tree = Phylo.read(StringIO(pruned_nwk), "newick")
@@ -2199,17 +2217,13 @@ class PhylogenyPage(QWidget):
             self._show_placeholder(f"Bio.Phylo render error: {exc}")
             return
 
-        # ── 5. Draw with genus labels ──────────────────────────────────────────
-        def _label(clade) -> str:
-            name = clade.name or ""
-            return feature_genus.get(name) or (name[:8] if name else "")
-
+        # ── 6. Draw ───────────────────────────────────────────────────────────
         n_shown = len(bio_tree.get_terminals())
         self._fig.set_size_inches(10, max(n_shown * 0.22, 6))
         self._fig.clear()
         ax = self._fig.add_subplot(111)
 
-        Phylo.draw(bio_tree, axes=ax, do_show=False, label_func=_label)
+        Phylo.draw(bio_tree, axes=ax, do_show=False)
         ax.set_xlabel("Branch length")
         ax.set_ylabel("")
 
@@ -2395,89 +2409,94 @@ class SimulationPage(QWidget):
         from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
         from matplotlib.figure import Figure
 
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
 
         inner_w = QWidget()
         scroll.setWidget(inner_w)
         root = QVBoxLayout(inner_w)
-        root.setContentsMargins(28, 24, 28, 24)
-        root.setSpacing(16)
+        root.setContentsMargins(24, 20, 24, 20)
+        root.setSpacing(12)
 
-        # Header
+        # ── Header ────────────────────────────────────────────────────────────
         hdr = QHBoxLayout()
         hdr.addWidget(page_title("Gut Microbiome Simulation"))
         hdr.addStretch()
         hdr.addWidget(label_hint("COMETS-inspired 30-day dynamic model"))
         root.addLayout(hdr)
 
-        # Main area: left sliders + right content
-        main = QHBoxLayout()
-        main.setSpacing(16)
-        root.addLayout(main, 1)
+        # ── Two-column row: left sliders | right (graphs + table) ─────────────
+        row = QHBoxLayout()
+        row.setSpacing(14)
+        root.addLayout(row)
 
         # ── Left: slider panel ────────────────────────────────────────────────
         left = card()
-        left.setFixedWidth(230)
+        left.setFixedWidth(210)
         left_lay = left.layout()
+        left_lay.setSpacing(6)
         left_lay.addWidget(section_title("Interventions"))
 
         self._sliders: dict[str, QSlider] = {}
         slider_cfg = [
-            ("Antibiotic Level",  "antibiotic",  0,  "#EF4444"),
-            ("Probiotic Level",   "probiotic",  30,  "#10B981"),
-            ("Dietary Fiber",     "fiber",       50,  "#6366F1"),
-            ("Processed Food",    "processed",   20,  "#F59E0B"),
+            ("Antibiotic Level", "antibiotic",  0, "#EF4444"),
+            ("Probiotic Level",  "probiotic",  30, "#10B981"),
+            ("Dietary Fiber",    "fiber",       50, "#6366F1"),
+            ("Processed Food",   "processed",   20, "#F59E0B"),
         ]
         for lbl_text, key, default, color in slider_cfg:
             self._sliders[key] = self._add_slider(left_lay, lbl_text, key, default, color)
 
-        left_lay.addStretch()
-
+        left_lay.addSpacing(4)
         run_btn = btn_primary("Run Simulation")
         run_btn.clicked.connect(self._run_sim)
         left_lay.addWidget(run_btn)
 
-        main.addWidget(left)
+        row.addWidget(left, 0, Qt.AlignmentFlag.AlignTop)
 
-        # ── Right: graphs + table ─────────────────────────────────────────────
-        right_lay = QVBoxLayout()
-        right_lay.setSpacing(12)
-        main.addLayout(right_lay, 1)
+        # ── Right: single card containing graphs grid + table ─────────────────
+        right = card()
+        right_lay = right.layout()
+        right_lay.setSpacing(8)
 
-        graphs_card = card()
+        # 2 × 2 graphs grid
         graphs_lay = QGridLayout()
-        graphs_lay.setSpacing(8)
-        graphs_card.layout().addLayout(graphs_lay)
+        graphs_lay.setSpacing(6)
+        graphs_lay.setContentsMargins(0, 0, 0, 0)
 
         self._figs: list = []
         self._canvases: list = []
         for i in range(4):
-            fig = Figure(figsize=(5, 3.2), tight_layout=True)
+            fig = Figure(figsize=(4, 1.5), tight_layout=True)
             canvas = FigureCanvasQTAgg(fig)
-            canvas.setMinimumHeight(230)
+            canvas.setFixedHeight(140)
+            canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             graphs_lay.addWidget(canvas, i // 2, i % 2)
             self._figs.append(fig)
             self._canvases.append(canvas)
 
-        right_lay.addWidget(graphs_card, 1)
+        right_lay.addLayout(graphs_lay)
+
+        # Divider + table header
+        right_lay.addWidget(section_title("Species Changes (Initial → Day 30)"))
 
         # Table
-        table_card = card()
-        table_card.layout().addWidget(section_title("Species Changes (Initial → Day 30)"))
         self._table = QTableWidget(0, 4)
         self._table.setHorizontalHeaderLabels(["Genus", "Initial %", "Final %", "Δ Change"])
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setAlternatingRowColors(True)
-        self._table.setMaximumHeight(220)
-        table_card.layout().addWidget(self._table)
-        right_lay.addWidget(table_card)
+        self._table.setFixedHeight(175)
+        right_lay.addWidget(self._table)
 
+        row.addWidget(right, 1, Qt.AlignmentFlag.AlignTop)
+
+        root.addStretch()
         self._draw_placeholders()
 
     def _add_slider(self, parent_lay, label_text: str, key: str, default: int, accent: str) -> QSlider:
@@ -2609,20 +2628,22 @@ class SimulationPage(QWidget):
         ax0 = self._figs[0].add_subplot(111)
         for k, i in enumerate(top_idx):
             ax0.plot(times, history[:, i] * 100, label=genera[i],
-                     color=COLORS[k % len(COLORS)], linewidth=1.8)
-        ax0.set_title("Genus Abundance Over Time", fontsize=10, fontweight='bold')
-        ax0.set_xlabel("Day"); ax0.set_ylabel("Relative Abundance (%)")
-        ax0.legend(fontsize=7, loc='upper right', framealpha=0.7)
+                     color=COLORS[k % len(COLORS)], linewidth=1.4)
+        ax0.set_title("Genus Abundance Over Time", fontsize=8, fontweight='bold')
+        ax0.set_xlabel("Day", fontsize=7); ax0.set_ylabel("Rel. Abundance (%)", fontsize=7)
+        ax0.tick_params(labelsize=7)
+        ax0.legend(fontsize=6, loc='upper right', framealpha=0.7)
         ax0.set_facecolor('#F8FAFC')
         self._canvases[0].draw()
 
         # ── Plot 2: Alpha diversity ────────────────────────────────────────────
         self._figs[1].clear()
         ax1 = self._figs[1].add_subplot(111)
-        ax1.plot(times, diversity, color='#10B981', linewidth=2)
+        ax1.plot(times, diversity, color='#10B981', linewidth=1.6)
         ax1.fill_between(times, diversity, alpha=0.15, color='#10B981')
-        ax1.set_title("Alpha Diversity (Shannon Index)", fontsize=10, fontweight='bold')
-        ax1.set_xlabel("Day"); ax1.set_ylabel("Shannon Index")
+        ax1.set_title("Alpha Diversity (Shannon)", fontsize=8, fontweight='bold')
+        ax1.set_xlabel("Day", fontsize=7); ax1.set_ylabel("Shannon Index", fontsize=7)
+        ax1.tick_params(labelsize=7)
         ax1.set_facecolor('#F8FAFC')
         self._canvases[1].draw()
 
@@ -2630,26 +2651,28 @@ class SimulationPage(QWidget):
         self._figs[2].clear()
         ax2 = self._figs[2].add_subplot(111)
         ax2.plot(times, butyrate_lvl * 100, label="Butyrate / SCFA",
-                 color='#10B981', linewidth=2)
+                 color='#10B981', linewidth=1.6)
         ax2.plot(times, inflam_lvl * 100, label="LPS / Inflammatory",
-                 color='#EF4444', linewidth=2, linestyle='--')
-        ax2.set_title("Metabolite Proxies", fontsize=10, fontweight='bold')
-        ax2.set_xlabel("Day"); ax2.set_ylabel("Relative Level (%)")
-        ax2.legend(fontsize=8, framealpha=0.7)
+                 color='#EF4444', linewidth=1.6, linestyle='--')
+        ax2.set_title("Metabolite Proxies", fontsize=8, fontweight='bold')
+        ax2.set_xlabel("Day", fontsize=7); ax2.set_ylabel("Relative Level (%)", fontsize=7)
+        ax2.tick_params(labelsize=7)
+        ax2.legend(fontsize=6, framealpha=0.7)
         ax2.set_facecolor('#F8FAFC')
         self._canvases[2].draw()
 
         # ── Plot 4: AD risk score over time ───────────────────────────────────
         self._figs[3].clear()
         ax3 = self._figs[3].add_subplot(111)
-        ax3.plot(times, ad_risk, color='#EF4444', linewidth=2)
+        ax3.plot(times, ad_risk, color='#EF4444', linewidth=1.6)
         ax3.fill_between(times, ad_risk, alpha=0.10, color='#EF4444')
-        ax3.axhline(33, color='#F59E0B', linestyle=':', linewidth=1.2, label='Moderate (33)')
-        ax3.axhline(66, color='#EF4444', linestyle=':', linewidth=1.2, label='High (66)')
+        ax3.axhline(33, color='#F59E0B', linestyle=':', linewidth=1.0, label='Moderate (33)')
+        ax3.axhline(66, color='#EF4444', linestyle=':', linewidth=1.0, label='High (66)')
         ax3.set_ylim(0, 100)
-        ax3.set_title("Predicted AD Risk Score", fontsize=10, fontweight='bold')
-        ax3.set_xlabel("Day"); ax3.set_ylabel("Risk Score")
-        ax3.legend(fontsize=8, framealpha=0.7)
+        ax3.set_title("Predicted AD Risk Score", fontsize=8, fontweight='bold')
+        ax3.set_xlabel("Day", fontsize=7); ax3.set_ylabel("Risk Score", fontsize=7)
+        ax3.tick_params(labelsize=7)
+        ax3.legend(fontsize=6, framealpha=0.7)
         ax3.set_facecolor('#F8FAFC')
         self._canvases[3].draw()
 

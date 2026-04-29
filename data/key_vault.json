@@ -1,0 +1,7 @@
+{
+  "tranchung163": {
+    "pbkdf2_salt": "09db731540008c0a8da632e24d05d00c",
+    "aes_nonce": "d9c9e9a1915e16b19c0b0f54",
+    "ciphertext": "96271bb55953bbc4f768534fded0edfa411f9e10a4d05de6aee56fbe3f23f60226c42021cf073ec1395e77075c066981"
+  }
+}
