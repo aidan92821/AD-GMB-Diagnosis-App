@@ -2454,6 +2454,12 @@ class SimulationPage(QWidget):
 
         left_lay.addSpacing(4)
         run_btn = btn_primary("Run Simulation")
+        run_btn.setStyleSheet(
+            "QPushButton { background: #10B981; color: white; border: none; "
+            "border-radius: 8px; padding: 9px 20px; font-size: 13px; font-weight: 700; }"
+            "QPushButton:hover { background: #059669; }"
+            "QPushButton:pressed { background: #047857; }"
+        )
         run_btn.clicked.connect(self._run_sim)
         left_lay.addWidget(run_btn)
 
