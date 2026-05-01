@@ -1,29 +1,20 @@
 """
 MRI preprocessing for Alzheimer's disease risk assessment.
 
-Steps applied to every .nii / .nii.gz volume:
-    1. Load with nibabel
-    2. Resample to 1 mm isotropic voxels (if needed)
-    3. Clip intensity to [1st, 99th] percentile of non-zero voxels
-    4. Z-score normalise using brain-mask (non-zero) statistics
-    5. Return float32 array with non-brain voxels zeroed
+Matches the preprocessing applied during model training (Emma Gomez, CPSC 491):
+    1. Load NIfTI volume with nibabel
+    2. Resize to (128, 128, 128) using scipy.ndimage.zoom
+    3. Z-score normalise within brain mask (non-zero voxels)
+    4. Return float32 (128, 128, 128) array — non-brain voxels remain 0
 
-Endpoint for the risk model
----------------------------
-After preprocessing call your model as shown below, then render results:
-
-    from src.services.mri_preprocessing import preprocess_mri
-
-    mri_array = preprocess_mri(nii_path)          # float32 ndarray (X, Y, Z)
-    apoe      = {"e2": 0, "e3": 1, "e4": 1}       # allele copy counts
-
-    risk_result = your_model.predict(mri_array, apoe)
-    # risk_result expected keys: predicted_pct, confidence_pct, risk_level,
-    #   biomarkers (list of dicts with: name, value, unit, status, normal, role)
+The (128, 128, 128) output is passed directly to ImagingModel.predict_proba()
+which internally reshapes it to (1, 1, 128, 128, 128) for the 3D CNN.
 """
 from __future__ import annotations
 
 import numpy as np
+
+TARGET_SHAPE = (128, 128, 128)
 
 
 def preprocess_mri(nii_path: str) -> np.ndarray:
@@ -35,8 +26,38 @@ def preprocess_mri(nii_path: str) -> np.ndarray:
 
     Returns
     -------
-    np.ndarray, shape (X, Y, Z), dtype float32
-        Preprocessed 3-D volume. Non-brain voxels are zeroed.
-    """
+    np.ndarray, shape (128, 128, 128), dtype float32
+        Resized and z-score normalised brain volume.
+        Non-brain voxels (original zeros) are zeroed out post-normalisation.
 
-    return np.zeros((1, 1, 1), dtype=np.float32)  # placeholder
+    Raises
+    ------
+    RuntimeError
+        If nibabel or scipy are not installed.
+    """
+    try:
+        import nibabel as nib
+        from scipy.ndimage import zoom
+    except ImportError as exc:
+        raise RuntimeError(
+            "nibabel and scipy are required for MRI preprocessing.\n"
+            "Install them with:  pip install nibabel scipy"
+        ) from exc
+
+    img  = nib.load(nii_path)
+    data = img.get_fdata(dtype=np.float32)
+
+    # Resize to TARGET_SHAPE regardless of original voxel size
+    factors = [t / s for t, s in zip(TARGET_SHAPE, data.shape[:3])]
+    data    = zoom(data[..., 0] if data.ndim == 4 else data, factors, order=1).astype(np.float32)
+
+    # Z-score normalise within brain mask
+    mask = data > 0
+    if mask.any():
+        mu    = data[mask].mean()
+        sigma = data[mask].std()
+        if sigma > 0:
+            data = (data - mu) / sigma
+        data[~mask] = 0.0
+
+    return data.astype(np.float32)
