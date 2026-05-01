@@ -835,6 +835,15 @@ class MainWindow(QMainWindow):
 
     def _on_login_success(self, user: dict) -> None:
         self._current_user = user
+        self._state = AppState()
+        # Reset all content pages so the previous user's data isn't visible
+        self._overview_page._show_empty_stats()
+        self._upload_page.load(self._state)
+        self._diversity_page.load(self._state)
+        self._taxonomy_page.load(self._state)
+        self._asv_page.load(self._state)
+        self._phylo_page.load(self._state)
+        self._alzheimer_page.load(self._state)
         # Show user name in topbar
         self._user_lbl.setText(f"◉  {user['username']}")
         self._user_lbl.show()

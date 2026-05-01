@@ -7,8 +7,8 @@ from __future__ import annotations
 
 from typing import Callable
 
-from src.db.key_vault import user_exists, unlock, create_entry
-from src.db.database import init_engine, get_master_key, SessionLocal
+import os
+from src.db.database import init_engine, get_db_path, get_salt_path, SessionLocal
 from src.db.init_db import init_db
 from src.db.repository import (
     get_user,
@@ -75,15 +75,11 @@ def get_or_create_user(username: str) -> dict:
         session.close()
 
 def register_user(username: str, password: str, email: str = "") -> dict:
-    if user_exists(username):
+    if os.path.exists(get_salt_path(username)):
         raise ServiceError(f"Username {username!r} is already taken")
 
-    current_key = get_master_key()
-    master_key = create_entry(username, password, master_key=current_key)
-
-    if current_key is None:
-        init_engine(master_key)
-        init_db()
+    init_engine(username, password)
+    init_db()
 
     session = SessionLocal()
     try:
@@ -99,20 +95,23 @@ def register_user(username: str, password: str, email: str = "") -> dict:
 
 
 def login_user(username: str, password: str) -> dict:
-    if not user_exists(username):
+    if not os.path.exists(get_db_path(username)):
         raise ServiceError("Invalid username or password.")
-    try:
-        master_key = unlock(username, password)
-    except ValueError as e:
-        raise ServiceError(str(e))
-    init_engine(master_key)
+
+    init_engine(username, password)
+
     session = SessionLocal()
     try:
         user = get_user_by_username(session, username)
-        if not verify_password(password, user.password_hash):
-            raise ServiceError("Incorrect password")
+        if user is None or not verify_password(password, user.password_hash):
+            raise ServiceError("Invalid username or password.")
         return {"user_id": user.user_id, "username": user.username}
-    except RepositoryError as e:
+    except Exception as e:
+        msg = str(e).lower()
+        if "not a database" in msg or "file is not a database" in msg:
+            raise ServiceError("Invalid username or password.")
+        if isinstance(e, ServiceError):
+            raise
         raise ServiceError(str(e)) from e
     finally:
         session.close()
