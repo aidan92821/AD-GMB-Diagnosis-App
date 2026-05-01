@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QThread, QObject, pyqtSignal
 
 import numpy as np
+import subprocess
 
 from src.services.assessment_service import ServiceError
 
@@ -46,13 +47,17 @@ from src.pipeline.fetch_data import (fetch_runs, download_runs,
 from src.pipeline.db_import import (parse_feat_tax_seqs, parse_feature_counts,
                                     parse_genus_table)
 
-from src.services.assessment_service import (save_ncbi_project, create_project, 
+# from src.simulation.simulate_gmb import *
+from src.risk.run_assess import run_assess
+
+from src.services.assessment_service import (save_ncbi_project, get_genus_dict,
                                              create_run,ingest_run_data, 
                                              get_run_id_by_srr, get_feature_counts,
                                              get_tree, store_alpha_diversities,
                                              store_beta_diversity, ServiceError,
                                              get_beta_diversity_matrix, store_pcoa,
-                                             create_tree_instance, get_run_feature_ids)
+                                             create_tree_instance, get_run_feature_ids,
+                                             )
 
 # ── Sidebar nav ───────────────────────────────────────────────────────────────
 
@@ -290,11 +295,16 @@ class _ParseWorkerReal(QObject):
                 
                 for run, row in abundances.items():
                     try:
-                        _ = get_run_id_by_srr(run)
+                        run_id = get_run_id_by_srr(run)
+                        label = self._state.runs[run]['label'] # R1, R2, R3, or R4
+                        self._state.lbs[label] = run_id
                     except ServiceError:
                         db_run = create_run(project_id=self._state.db_project_id, source='ncbi', srr_accession=run,
                                             bio_proj_accession=self._state.bioproject_id, library_layout='paired')
-                        ingest_run_data(run_id=db_run['run_id'], genus_rows=row, features=feature_seqs, feature_counts=feature_counts[run])
+                        run_id = db_run['run_id']
+                        label = self._state.runs[run]['label'] # R1, R2, R3, or R4
+                        self._state.lbs[label] = run_id
+                    ingest_run_data(run_id=db_run['run_id'], genus_rows=row, features=feature_seqs, feature_counts=feature_counts[run])
             
             # parse the single end tables
             if self._state.single_runs:
@@ -609,7 +619,7 @@ class _UnifracWorker(QObject):
     
 
 class _RiskPredictionWorker(QObject):
-    finished = pyqtSignal(object)
+    finished = pyqtSignal(object) # emits updated AppState
     errored  = pyqtSignal(str)
 
     def __init__(self, state: AppState) -> None:
@@ -617,19 +627,69 @@ class _RiskPredictionWorker(QObject):
         self._state = state
 
     def run(self):
-        pass
+        try:
+            abundance = get_genus_dict(1) # TODO
+            assessment = run_assess(model='gmb', genus_abundance=abundance, apoe=None, nifty_path=None) # TODO
+            if 'stderr' in assessment:
+                self.errored.emit(assessment['stderr'])
+            self._state.risk_result = assessment.pop('risk', None)
+            self._state.contributions = assessment
+            self.finished.emit(self._state)
+        except Exception as exc:
+            self.errored.emit(str(exc))
 
 
-class _SimulationWorker(QObject):
-    finished = pyqtSignal(object)
-    errored  = pyqtSignal(str)
+# class _SimulationWorker(QObject):
+#     finished = pyqtSignal(object) # emits updated AppState
+#     errored  = pyqtSignal(str)
 
-    def __init__(self, state: AppState) -> None:
-        super().__init__()
-        self._state = state
+#     # user_input example -> {'fiber': 0.8, 'junk_food': 0.2}
+#     def __init__(self, state: AppState, run_id: int, user_input: dict[str, float], runner: QiimeRunner) -> None:
+#         super().__init__()
+#         self._state = state
+#         self._run_id = run_id
+#         self._user_input = user_input
+#         self._runner = runner
 
-    def run(self):
-        pass
+#     def run(self):
+#         try:
+#             # get the user input from the UI and apply it to the Western Diet from MMT
+#             user_diet = apply_user_input(self._user_input)
+
+#             # get the run's genus relative abundance from the db
+#             abundance = get_genus_dict(self._run_id)
+
+#             # run the simulation on this microbiome composition
+#             results = simulate(self._run_id, abundance, user_diet, self._runner)
+
+#             # calculate the new abundance from the updated biomass
+#             abundance_new = calc_new_abundance(results["biomass"], results["map"], abundance)
+
+#             # get the stats in abundance shift
+#             # TODO: hand it off to the UI to display on Simulation page
+#             self._state.sim_stats = get_abundance_shift_stats(abundance_old=abundance, abundance_new=abundance_new)
+
+#             # plot the simulation results
+#             # TODO: hand it off to the UI to display on Simulation page
+#             self._state.plots = plot_sim_results(biomass_df=results["biomass"],
+#                                      media_df=results["media"],
+#                                      flux_df=results["flux"],
+#                                      original_abundance=abundance, new_abundance=abundance_new)
+            
+#             # create simulation record
+#             # sim = create_simulation(run_id=self._run_id)
+
+#             # store this simulation composition update in the database
+#             # ingest_simulation_genus(run_id=self._run_id,
+#                                   #   simulation_id=sim["simulation_id"]
+#                                   #   genus_rows=abundance_new
+#             # )
+
+#             # TODO: have the taxonomy page have a drop down menu or something to choose to display available simulation datas
+            
+#             self.finished.emit(self._state)
+#         except Exception as exc:
+#             self.errored.emit(str(exc))
 
 
 # ── Main window ───────────────────────────────────────────────────────────────
@@ -844,6 +904,10 @@ class MainWindow(QMainWindow):
         # Switch to main app
         self._top_stack.setCurrentIndex(1)
 
+        # TODO TEMPORARY
+        self._on_get_risk_assessment()
+        # TODO TEMPORARY
+
     def _on_logout(self) -> None:
         self._current_user = None
         self._state = AppState()
@@ -958,6 +1022,9 @@ class MainWindow(QMainWindow):
         """Start fasterq-dump download."""
         self._show_cancel(True)
         self._status_badge.setText("Downloading FASTQ files…")
+        self._status_badge.setObjectName("badge_yellow")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
         self._upload_page.update_pipeline_status("Downloading FASTQ files from NCBI…", "info")
         self._upload_page.clear_terminal()
 
@@ -1094,11 +1161,18 @@ class MainWindow(QMainWindow):
         )
 
         self._overview_page.load(state)
+        self._taxonomy_page.load(state)
         self._broadcast_state()
 
         # TODO: TEMPORARY
-        # self._on_phylogeny_run() 
-        # TODO: TEMPORARY -> have this run when Construct Phylogeny button is pushed
+        # self._on_phylogeny_run()
+        # user_input = {
+        #     "fiber": 0.9,
+        #     "junk_food": 0.1
+        # }
+        # TODO: TEMPORARY -> have this run when Run Simulation button is pushed
+        # self._on_simulation_run(run_id=1, user_input=user_input)
+        # TODO TEMPORARY
 
     def _on_analysis_error(self, msg: str) -> None:
         self._status_badge.setText(f"Analysis error: {msg[:60]}")
@@ -1546,6 +1620,88 @@ class MainWindow(QMainWindow):
         self._status_badge.setObjectName("badge_red")
         self._status_badge.style().unpolish(self._status_badge)
         self._status_badge.style().polish(self._status_badge)
+
+    # ── Risk ──────────────────────────────────────────────────────────────────
+    def _on_get_risk_assessment(self) -> None:
+        self._status_badge.setText(
+            "Getting risk..."
+        )
+        self._status_badge.setObjectName("badge_yellow")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+        self._status_badge.show()
+
+        self._risk_assess_thread = QThread(self)
+        self._risk_assess_worker = _RiskPredictionWorker(state=self._state)
+        self._risk_assess_worker.moveToThread(self._risk_assess_thread)
+        self._risk_assess_thread.started.connect(self._risk_assess_worker.run)
+        self._risk_assess_worker.finished.connect(self._on_risk_assess_complete)
+        self._risk_assess_worker.errored.connect(self._on_risk_assess_error)
+        self._risk_assess_worker.finished.connect(self._risk_assess_thread.quit)
+        self._risk_assess_worker.errored.connect(self._risk_assess_thread.quit)
+        self._risk_assess_thread.start()
+
+    def _on_risk_assess_complete(self, state: AppState):
+        self._status_badge.setText("Assessment complete")
+        self._status_badge.setObjectName("badge_green")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+        print(f"state.risk_result: {state.risk_result}")
+        print(f"state.contributions: {state.contributions}")
+
+    def _on_risk_assess_error(self, msg: str):
+        self._upload_page.show_pipeline_error(msg)
+        print(msg)
+        self._status_badge.setText("Assessment error")
+        self._status_badge.setObjectName("badge_red")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+
+    # ── Simulation ────────────────────────────────────────────────────────────
+
+    # def _on_simulation_run(self, run_id: int, user_input: dict):
+    # # def _on_simulation_run(self, run_label: str, user_input: dict):
+    #     self._status_badge.setText(
+    #         "Running COMETS simulation"
+    #     )
+    #     self._status_badge.setObjectName("badge_yellow")
+    #     self._status_badge.style().unpolish(self._status_badge)
+    #     self._status_badge.style().polish(self._status_badge)
+    #     self._status_badge.show()
+
+    #     self._simulation_thread = QThread(self)
+    #     self._simulation_worker = _SimulationWorker(state=self._state,
+    #                                                 run_id=run_id,
+    #                                                 # run_id=self._state.lbs[run_label],
+    #                                                 user_input=user_input,
+    #                                                 runner=self._runner)
+    #     self._simulation_worker.moveToThread(self._simulation_thread)
+    #     self._simulation_thread.started.connect(self._simulation_worker.run)
+    #     self._simulation_worker.finished.connect(self._on_simulation_complete)
+    #     self._simulation_worker.errored.connect(self._on_simulation_error)
+    #     self._simulation_worker.finished.connect(self._simulation_thread.quit)
+    #     self._simulation_worker.errored.connect(self._simulation_thread.quit)
+    #     self._simulation_thread.start()
+
+    # def _on_simulation_complete(self, state: AppState):
+    #     self._status_badge.setText("COMETS simulation complete")
+    #     self._status_badge.setObjectName("badge_green")
+    #     self._status_badge.style().unpolish(self._status_badge)
+    #     self._status_badge.style().polish(self._status_badge)
+    #     self._status_badge.show()
+    #     self._broadcast_state()
+
+    #     # load the simulation page
+    #     # self._simulation_page.load(state)
+
+    # def _on_simulation_error(self, msg:str):
+    #     self._upload_page.show_simulation_error(msg)
+    #     print(msg)
+    #     self._status_badge.setText("Simulation error")
+    #     self._status_badge.setObjectName("badge_red")
+    #     self._status_badge.style().unpolish(self._status_badge)
+    #     self._status_badge.style().polish(self._status_badge)
+    #     self._status_badge.show()
 
     # ── Profile page integration ──────────────────────────────────────────────
 

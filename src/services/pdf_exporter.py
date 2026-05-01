@@ -794,7 +794,7 @@ def _section_alzheimer(story: list, st: dict) -> None:
 
     # Disclaimer
     story.append(Paragraph(
-        "⚠  DISCLAIMER: This prediction is a research-grade estimate based on "
+        "⚠  DISCLAIMER: This prediction is an estimate based on "
         "published gut-brain axis literature. It is NOT a clinical diagnosis. "
         "Biomarker thresholds are derived from population studies and may not "
         "apply to individual cases. Consult a qualified physician for any clinical "

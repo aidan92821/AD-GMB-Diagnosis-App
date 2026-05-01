@@ -204,5 +204,5 @@ class Simulation(Base):
     run_id        = Column(Integer, ForeignKey("run.run_id"), nullable=False)
     created_at    = Column(DateTime(timezone=True), default=utcnow)
 
-    run       = relationship("Run", back_populates="simulations")
+    run        = relationship("Run", back_populates="simulations")
     genus_data = relationship("Genus", back_populates="simulation")

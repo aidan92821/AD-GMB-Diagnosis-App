@@ -16,14 +16,14 @@ _YML_FILES = {
     "osx-arm64": APP_DIR / "qiime2.yml",
 }
 
-MICROMAMBA_VERSION = "2.0.8"
+# MICROMAMBA_VERSION = "2.0.8"
 
-# Download URLs per platform — from micromamba's official GitHub releases
-_MICROMAMBA_URLS = {
-    "linux-64":   f"https://github.com/mamba-org/mamba/releases/download/micromamba-{MICROMAMBA_VERSION}/micromamba-linux-64",
-    "osx-64":     f"https://github.com/mamba-org/mamba/releases/download/micromamba-{MICROMAMBA_VERSION}/micromamba-osx-64",
-    "osx-arm64":  f"https://github.com/mamba-org/mamba/releases/download/micromamba-{MICROMAMBA_VERSION}/micromamba-osx-arm64",
-}
+# # Download URLs per platform — from micromamba's official GitHub releases
+# _MICROMAMBA_URLS = {
+#     "linux-64":   f"https://github.com/mamba-org/mamba/releases/download/micromamba-{MICROMAMBA_VERSION}/micromamba-linux-64",
+#     "osx-64":     f"https://github.com/mamba-org/mamba/releases/download/micromamba-{MICROMAMBA_VERSION}/micromamba-osx-64",
+#     "osx-arm64":  f"https://github.com/mamba-org/mamba/releases/download/micromamba-{MICROMAMBA_VERSION}/micromamba-osx-arm64",
+# }
 
 
 def get_platform() -> str:
@@ -40,27 +40,27 @@ def get_platform() -> str:
     )
 
 
-def download_micromamba(callback=None) -> bool:
-    if MAMBA_BIN.exists():
-        return True
+# def download_micromamba(callback=None) -> bool:
+#     if MAMBA_BIN.exists():
+#         return True
 
-    conda_platform = get_platform()
-    url = _MICROMAMBA_URLS[conda_platform]
+#     conda_platform = get_platform()
+#     url = _MICROMAMBA_URLS[conda_platform]
 
-    if callback:
-        callback(f"downloading micromamba for {conda_platform}...\n")
+#     if callback:
+#         callback(f"downloading micromamba for {conda_platform}...\n")
 
-    try:
-        MAMBA_BIN.parent.mkdir(parents=True, exist_ok=True)
-        urllib.request.urlretrieve(url, MAMBA_BIN)
-        MAMBA_BIN.chmod(MAMBA_BIN.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-        if callback:
-            callback("micromamba downloaded successfully\n")
-        return True
-    except Exception as e:
-        if callback:
-            callback(f"failed to download micromamba: {e}\n")
-        return False
+#     try:
+#         MAMBA_BIN.parent.mkdir(parents=True, exist_ok=True)
+#         urllib.request.urlretrieve(url, MAMBA_BIN)
+#         MAMBA_BIN.chmod(MAMBA_BIN.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+#         if callback:
+#             callback("micromamba downloaded successfully\n")
+#         return True
+#     except Exception as e:
+#         if callback:
+#             callback(f"failed to download micromamba: {e}\n")
+#         return False
 
 
 def env_exists():

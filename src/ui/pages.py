@@ -779,6 +779,9 @@ class UploadRunsPage(QWidget):
     def show_pipeline_error(self, message: str) -> None:
         self._log(f"✗  Pipeline error: {message[:200]}", "err")
 
+    def show_simulation_error(self, message: str) -> None:
+        self._log(f"✗  Simulation error: {message[:200]}", "err")
+
     def show_download_status(self, message: str, kind: str = "info") -> None:
         self._log(message, kind)
 
@@ -1426,6 +1429,7 @@ class TaxonomyPage(QWidget):
         # self._root.addStretch()
 
     def load(self, state: AppState):
+        print("LOADING TAXONOMY PAGE")
         self._state = state
 
         # # Rebuild run switcher if run labels changed
@@ -1493,6 +1497,7 @@ class TaxonomyPage(QWidget):
             data = get_genus_data(run_id)
         except ServiceError:
             data = []
+            print('SERVICE ERROR: could not get genus data')
         self._genus_cache[run_id] = data
         return data
 
@@ -2008,7 +2013,7 @@ class AlzheimerPage(QWidget):
 
         # ── Disclaimer ────────────────────────────────────────────────────────
         disc = label_hint(
-            "⚠  Research-grade estimate only — NOT a clinical diagnosis. "
+            "⚠  Estimate only — NOT a clinical diagnosis. "
             "Consult a physician for clinical assessment.")
         disc.setWordWrap(True)
         inner_lay.addWidget(disc)

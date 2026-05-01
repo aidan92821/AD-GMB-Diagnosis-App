@@ -15,6 +15,7 @@ from typing import Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
+    from pandas import DataFrame
 
 
 @dataclass
@@ -72,8 +73,13 @@ class  AppState:
     # pcoa_bray_curtis:  dict[str, tuple[float, float]]     = field(default_factory=dict)
     # pcoa_unifrac:      dict[str, tuple[float, float]]     = field(default_factory=dict)
 
+    # –– Simulation ––––––––––––––––––––––––––––––––––––––––––––––––––––––––––––
+    plots: dict = field(default_factory=dict)
+    sim_stats: Optional[DataFrame] = None
+
     # ── Risk ──────────────────────────────────────────────────────────────────
     risk_result: Optional[dict] = None
+    contributions: dict = field(default_factory=dict)
 
     # ── DB linkage (set when project is saved to database) ────────────────────
     db_project_id: Optional[int] = None

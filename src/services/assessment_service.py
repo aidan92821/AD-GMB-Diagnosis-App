@@ -306,6 +306,21 @@ def get_genus_data(run_id: int) -> list[dict]:
         session.close()
 
 
+def get_genus_dict(run_id: int):
+
+    session = SessionLocal()
+    try:
+        genera = get_genus_for_run(session, run_id)
+        return {
+            g.genus: g.relative_abundance for g in genera
+        }
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+        
+
+
 def get_is_run_in_genus(run_id: int) -> bool:
     """
     check if there is already a run_id in genus table
