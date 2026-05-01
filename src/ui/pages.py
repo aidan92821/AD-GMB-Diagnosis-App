@@ -12,9 +12,9 @@ from PyQt6.QtWidgets import (
     QWidget, QFrame, QLabel, QLineEdit, QComboBox,
     QPushButton, QHBoxLayout, QVBoxLayout, QGridLayout,
     QFileDialog, QTableWidget, QTableWidgetItem, QHeaderView,
-    QSizePolicy, QScrollArea, QPlainTextEdit, QSlider,
+    QSizePolicy, QScrollArea, QPlainTextEdit, QSlider, QSpinBox,
 )
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QObject, pyqtSignal
 from PyQt6.QtGui import QFont, QTextCursor, QColor
 
 from models.app_state import AppState
@@ -2242,6 +2242,24 @@ class PhylogenyPage(QWidget):
 #  PAGE 7 – Alzheimer Risk
 # ═════════════════════════════════════════════════════════════════════════════
 
+class _MriPreprocessWorker(QObject):
+    """Runs MRI preprocessing off the main thread."""
+    finished = pyqtSignal(object)   # emits np.ndarray
+    errored  = pyqtSignal(str)
+
+    def __init__(self, nii_path: str):
+        super().__init__()
+        self._path = nii_path
+
+    def run(self):
+        try:
+            from src.services.mri_preprocessing import preprocess_mri
+            arr = preprocess_mri(self._path)
+            self.finished.emit(arr)
+        except Exception as exc:
+            self.errored.emit(str(exc))
+
+
 class AlzheimerPage(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -2252,12 +2270,84 @@ class AlzheimerPage(QWidget):
         root.setContentsMargins(28, 24, 28, 24)
         root.setSpacing(16)
 
-        # ── Page header (static) ──────────────────────────────────────────────
+        # ── Page header ───────────────────────────────────────────────────────
         hdr = QHBoxLayout()
         hdr.addWidget(page_title("Alzheimer Risk"))
         hdr.addStretch()
         hdr.addWidget(label_hint("Based on gut-brain axis biomarkers"))
         root.addLayout(hdr)
+
+        # ── Input card: MRI upload + APOE genotype ────────────────────────────
+        self._nii_path: str | None = None
+        self._mri_thread: QThread | None = None
+
+        input_card = card()
+        inp_lay = input_card.layout()
+        inp_lay.setSpacing(12)
+
+        # MRI section
+        inp_lay.addWidget(section_title("MRI Scan"))
+
+        mri_row = QHBoxLayout()
+        browse_btn = btn_outline("Browse .nii file")
+        browse_btn.setFixedWidth(150)
+        browse_btn.clicked.connect(self._browse_mri)
+        mri_row.addWidget(browse_btn)
+        self._mri_label = QLabel("No file selected")
+        self._mri_label.setObjectName("label_hint")
+        mri_row.addWidget(self._mri_label, 1)
+        inp_lay.addLayout(mri_row)
+
+        # APOE genotype section
+        inp_lay.addWidget(section_title("APOE Genotype"))
+        inp_lay.addWidget(label_hint(
+            "Enter the number of copies of each allele (0–2). "
+            "The three values must sum to exactly 2 (one from each parent)."
+        ))
+
+        apoe_row = QHBoxLayout()
+        apoe_row.setSpacing(24)
+        self._apoe_spins: dict[str, QSpinBox] = {}
+        for allele in ("ε2", "ε3", "ε4"):
+            col = QVBoxLayout(); col.setSpacing(4)
+            col.addWidget(label_muted(f"{allele} alleles"))
+            spin = QSpinBox()
+            spin.setRange(0, 2)
+            spin.setValue(0 if allele == "ε2" else (1 if allele == "ε3" else 1))
+            spin.setFixedWidth(64)
+            spin.valueChanged.connect(self._validate_apoe)
+            self._apoe_spins[allele] = spin
+            col.addWidget(spin)
+            apoe_row.addLayout(col)
+        apoe_row.addStretch()
+        inp_lay.addLayout(apoe_row)
+
+        self._apoe_status = QLabel("")
+        self._apoe_status.setObjectName("label_hint")
+        inp_lay.addWidget(self._apoe_status)
+        self._validate_apoe()
+
+        # Run button + status
+        run_row = QHBoxLayout()
+        self._run_btn = btn_primary("Run Assessment")
+        self._run_btn.setStyleSheet(
+            "QPushButton { background: #10B981; color: white; border: none; "
+            "border-radius: 8px; padding: 9px 20px; font-size: 13px; font-weight: 700; }"
+            "QPushButton:hover { background: #059669; }"
+            "QPushButton:pressed { background: #047857; }"
+            "QPushButton:disabled { background: #9CA3AF; }"
+        )
+        self._run_btn.clicked.connect(self._run_assessment)
+        run_row.addStretch()
+        run_row.addWidget(self._run_btn)
+        inp_lay.addLayout(run_row)
+
+        self._assess_status = QLabel("")
+        self._assess_status.setObjectName("label_hint")
+        self._assess_status.setWordWrap(True)
+        inp_lay.addWidget(self._assess_status)
+
+        root.addWidget(input_card)
 
         # ── Summary card (mutable labels stored as instance vars) ─────────────
         summary = card()
@@ -2305,6 +2395,91 @@ class AlzheimerPage(QWidget):
 
         # Initial render with example data
         self._render(ALZHEIMER_RISK)
+
+    # ── MRI browse ────────────────────────────────────────────────────────────
+    def _browse_mri(self):
+        import os
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select NIfTI file", "", "NIfTI Files (*.nii *.nii.gz)"
+        )
+        if path:
+            self._nii_path = path
+            self._mri_label.setText(os.path.basename(path))
+            self._assess_status.setText("")
+
+    # ── APOE validation ───────────────────────────────────────────────────────
+    def _validate_apoe(self) -> bool:
+        total = sum(s.value() for s in self._apoe_spins.values())
+        if total == 2:
+            self._apoe_status.setText("✓ Valid genotype")
+            self._apoe_status.setStyleSheet(f"color: #10B981;")
+            return True
+        self._apoe_status.setText(f"Allele counts sum to {total} — must equal 2")
+        self._apoe_status.setStyleSheet(f"color: #EF4444;")
+        return False
+
+    # ── Run assessment ────────────────────────────────────────────────────────
+    def _run_assessment(self):
+        if not self._nii_path:
+            self._assess_status.setText("Please select a .nii file first.")
+            return
+        if not self._validate_apoe():
+            return
+
+        self._run_btn.setEnabled(False)
+        self._assess_status.setText("Preprocessing MRI scan…")
+
+        self._mri_thread = QThread(self)
+        self._mri_worker = _MriPreprocessWorker(self._nii_path)
+        self._mri_worker.moveToThread(self._mri_thread)
+        self._mri_thread.started.connect(self._mri_worker.run)
+        self._mri_worker.finished.connect(self._on_preprocess_done)
+        self._mri_worker.errored.connect(self._on_preprocess_error)
+        self._mri_worker.finished.connect(self._mri_thread.quit)
+        self._mri_worker.errored.connect(self._mri_thread.quit)
+        self._mri_thread.start()
+
+    def _on_preprocess_done(self, mri_array):
+        apoe = {k.replace("ε", "e"): s.value() for k, s in self._apoe_spins.items()}
+        self._run_btn.setEnabled(True)
+        self._assess_status.setText(
+            f"Preprocessing complete — volume shape: {mri_array.shape}. "
+            "Ready for model inference."
+        )
+        self._on_mri_ready(mri_array, apoe)
+
+    def _on_preprocess_error(self, msg: str):
+        self._run_btn.setEnabled(True)
+        self._assess_status.setText(f"Error: {msg}")
+
+    def _on_mri_ready(self, mri_array, apoe: dict):
+        """
+        Hook for the risk model.
+
+        Parameters
+        ----------
+        mri_array : np.ndarray, shape (X, Y, Z), dtype float32
+            Preprocessed MRI volume (1 mm isotropic, z-score normalised).
+        apoe : dict
+            Allele copy counts, e.g. {"e2": 0, "e3": 1, "e4": 1}.
+
+        Plug in the model here, then call self._render(risk_result) with:
+            risk_result = {
+                "predicted_pct": float,        # 0–100
+                "confidence_pct": float,       # 0–100
+                "risk_level": str,             # "low" | "moderate" | "high"
+                "biomarkers": [
+                    {"name": str, "value": float, "unit": str,
+                     "status": str,            # "low" | "high" | "normal"
+                     "normal": str, "role": str},
+                    ...
+                ],
+            }
+        """
+        # TODO: replace with actual model call
+        # risk_result = your_model.predict(mri_array, apoe)
+        # self._render(risk_result)
+        pass
 
     def load(self, state: AppState):
         d = state.risk_result if (state and state.risk_result) else ALZHEIMER_RISK
