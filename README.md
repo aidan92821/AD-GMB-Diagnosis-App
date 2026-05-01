@@ -411,6 +411,6 @@ The UI layers never call the pipeline or database directly — they receive data
 | Mode | Requires | How it works | When to use |
 |---|---|---|---|
 | **In-app analysis** | Nothing extra | Genus profiles interpolated from published AD microbiome literature; real Shannon/Simpson/Bray-Curtis math; classical MDS PCoA | Default — runs automatically after every fetch |
-| **Real QIIME2 pipeline** | QIIME2 env + fasterq-dump | Downloads FASTQ → DADA2 denoising → SILVA classification → real ASV counts | Research-grade results with actual sequencing data |
+| **Real QIIME2 pipeline** | QIIME2 env + fasterq-dump | Downloads FASTQ → DADA2 denoising → SILVA classification → real ASV counts | Results with actual sequencing data |
 
 When real pipeline results are available they automatically replace the in-app results on all pages. If QIIME2 is not installed or the pipeline fails, an error is shown — the pipeline does not silently fall back to in-app analysis.
