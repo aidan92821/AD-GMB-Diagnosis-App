@@ -33,7 +33,7 @@ from resources.styles import (
 from models.app_state import AppState, RunState
 from ui.pages import (
     OverviewPage, UploadRunsPage, DiversityPage,
-    TaxonomyPage, AsvTablePage, PhylogenyPage, AlzheimerPage,
+    TaxonomyPage, AsvTablePage, PhylogenyPage, AlzheimerPage, SimulationPage,
 )
 from ui.export_page import ExportPage
 from ui.auth_page import AuthPage
@@ -67,6 +67,7 @@ NAV = [
     ]),
     ("INSIGHTS", [
         ("Alzheimer Risk", "♥"),
+        ("Simulation",     "⚗"),
     ]),
     ("EXPORT", [
         ("Export PDF",     "⬇"),
@@ -224,6 +225,10 @@ class _PipelineWorkerReal(QObject):
             s = line.strip()
             if not s:
                 return None
+            # Warnings
+            if '** WARNING:' in s:
+                warning_text = s.replace('** WARNING:', '').strip()
+                return f'⚠️  {warning_text}'
             # Phase headers: [single] Importing samples…
             if s.startswith('['):
                 return s
@@ -262,6 +267,17 @@ class _PipelineWorkerReal(QObject):
                 qiime_preprocess(runner=self._runner, bioproject=self._bioproject,
                                     lib_layout='single', callback=cb)
 
+            # Infer phylogenetic tree (one per project — prefer single layout)
+            self.progress.emit("[phylogeny] Building phylogenetic tree…")
+            nwk = ""
+            if self._state.single_runs:
+                nwk = infer_phylogeny(runner=self._runner, bioproject=self._bioproject,
+                                      lib_layout='single', callback=cb)
+            elif self._state.paired_runs:
+                nwk = infer_phylogeny(runner=self._runner, bioproject=self._bioproject,
+                                      lib_layout='paired', callback=cb)
+            self._state._nwk_string = nwk
+
             self.finished.emit(self._state)
         except Exception as exc:
             self.errored.emit(str(exc))
@@ -280,45 +296,83 @@ class _ParseWorkerReal(QObject):
         self._user = user
 
     def run(self):
-        try:            
+        try:
+            all_feature_seqs: list = []
+            all_genera: set = set()
+
             # parse the paired end tables
             if self._state.paired_runs:
                 abundances     = parse_genus_table(genus=f"{self._data_dir}/qiime/paired/genus-table.tsv")
                 feature_seqs   = parse_feat_tax_seqs(tax=f"{self._data_dir}/qiime/paired/taxonomy.tsv",
                                                    seqs=f"{self._data_dir}/reps-tree/paired/dna-sequences.fasta")
                 feature_counts = parse_feature_counts(feat=f"{self._data_dir}/qiime/paired/feature-table.tsv")
-                
+                all_feature_seqs.extend(feature_seqs)
+                for row in abundances.values():
+                    all_genera.update(g for g, _ in row)
+
                 for run, row in abundances.items():
                     try:
-                        _ = get_run_id_by_srr(run)
+                        run_id = get_run_id_by_srr(run)
+                        label = self._state.runs[run]['label']
+                        self._state.lbs[label] = run_id
                     except ServiceError:
                         db_run = create_run(project_id=self._state.db_project_id, source='ncbi', srr_accession=run,
                                             bio_proj_accession=self._state.bioproject_id, library_layout='paired')
-                        ingest_run_data(run_id=db_run['run_id'], genus_rows=row, features=feature_seqs, feature_counts=feature_counts[run])
-            
+                        run_id = db_run['run_id']
+                        label = self._state.runs[run]['label']
+                        self._state.lbs[label] = run_id
+                    ingest_run_data(run_id=run_id, genus_rows=row, features=feature_seqs,
+                                    feature_counts=feature_counts.get(run, {}))
+
             # parse the single end tables
             if self._state.single_runs:
                 abundances     = parse_genus_table(genus=f"{self._data_dir}/qiime/single/genus-table.tsv")
                 feature_seqs   = parse_feat_tax_seqs(tax=f"{self._data_dir}/qiime/single/taxonomy.tsv",
                                                    seqs=f"{self._data_dir}/reps-tree/single/dna-sequences.fasta")
                 feature_counts = parse_feature_counts(feat=f"{self._data_dir}/qiime/single/feature-table.tsv")
+                all_feature_seqs.extend(feature_seqs)
+                for row in abundances.values():
+                    all_genera.update(g for g, _ in row)
 
                 for run, row in abundances.items():
                     try:
                         run_id = get_run_id_by_srr(run)
-                        label = self._state.runs[run]['label'] # R1, R2, R3, or R4
+                        label = self._state.runs[run]['label']
                         self._state.lbs[label] = run_id
                     except ServiceError:
                         db_run = create_run(project_id=self._state.db_project_id, source='ncbi', srr_accession=run,
                                             bio_proj_accession=self._state.bioproject_id, library_layout='single')
                         run_id = db_run['run_id']
-                        label = self._state.runs[run]['label'] # R1, R2, R3, or R4
+                        label = self._state.runs[run]['label']
                         self._state.lbs[label] = run_id
-                    ingest_run_data(run_id=run_id, genus_rows=row, features=feature_seqs, feature_counts=feature_counts[run])
+                    ingest_run_data(run_id=run_id, genus_rows=row, features=feature_seqs,
+                                    feature_counts=feature_counts.get(run, {}))
+
+            self._state.asv_count   = len(all_feature_seqs)
+            self._state.genus_count = len(all_genera)
             
+            # Save Newick string to DB before cleanup removes intermediate files
+            nwk = getattr(self._state, '_nwk_string', '') or ''
+            if not nwk:
+                # fallback: read from disk if pipeline was re-run without phylogeny step
+                for layout in ('single', 'paired'):
+                    nwk_path = Path(self._data_dir) / f"reps-tree/{layout}/tree.nwk"
+                    if nwk_path.exists():
+                        nwk = nwk_path.read_text().strip()
+                        break
+            if nwk and self._state.db_project_id:
+                try:
+                    tree_info = create_tree_instance(
+                        project_id=self._state.db_project_id, newick_string=nwk
+                    )
+                    if tree_info:
+                        self._state.tree_id = tree_info.get('tree_id')
+                except Exception:
+                    pass
+
             # remove all the intermediate files
             cleanup(self._state.bioproject_id)
-            
+
             self.finished.emit(self._state)
         except Exception as exc:
             self.errored.emit(str(exc))
@@ -344,16 +398,30 @@ class _AnalysisWorkerReal(QObject):
                 self._fill_bray_curtis(self._state, self._state.lbs)
                 
                 self.progress.emit("Computing PCoA…")
-                self._fill_pcoa(self._state, self._state.lbs, "bray-curtis")
+                self._fill_pcoa(self._state, self._state.lbs, "bray_curtis")
             
             self.finished.emit(self._state)
         except Exception as exc:
             self.errored.emit(str(exc))
 
     @staticmethod
+    def _shannon(counts: np.ndarray) -> float:
+        total = counts.sum()
+        if total == 0:
+            return 0.0
+        p = counts[counts > 0] / total
+        return float(-np.sum(p * np.log2(p)))
+
+    @staticmethod
+    def _simpson(counts: np.ndarray) -> float:
+        total = counts.sum()
+        if total == 0:
+            return 0.0
+        p = counts / total
+        return float(1.0 - np.sum(p ** 2))
+
+    @staticmethod
     def _fill_alpha(labels: dict) -> None:
-        from skbio.diversity.alpha import shannon, simpson
-        # compute shannon and simpson
         for run_id in labels.values():
             try:
                 rows = get_feature_counts(run_id)
@@ -365,8 +433,8 @@ class _AnalysisWorkerReal(QObject):
 
             counts = np.array([r["abundance"] for r in rows], dtype=int)
 
-            sh = float(shannon(counts, base=2))
-            si = float(simpson(counts))
+            sh = _AnalysisWorkerReal._shannon(counts)
+            si = _AnalysisWorkerReal._simpson(counts)
 
             try:
                 store_alpha_diversities(run_id, {"shannon": sh, "simpson": si})
@@ -375,7 +443,17 @@ class _AnalysisWorkerReal(QObject):
 
     @staticmethod
     def _fill_bray_curtis(state: AppState, labels: dict) -> None:
-        from skbio.diversity import beta_diversity # for bray-curtis
+        # Bray-Curtis: BC(u,v) = sum|u-v| / sum(u+v); 0/0 → 0
+        def _braycurtis(mat: np.ndarray) -> np.ndarray:
+            n = mat.shape[0]
+            bc = np.zeros((n, n))
+            for _i in range(n):
+                for _j in range(_i + 1, n):
+                    num = np.abs(mat[_i] - mat[_j]).sum()
+                    den = (mat[_i] + mat[_j]).sum()
+                    v   = num / den if den > 0 else 0.0
+                    bc[_i, _j] = bc[_j, _i] = v
+            return bc
 
         run_ids = list(labels.values())
         run_labels = list(labels.keys())
@@ -384,9 +462,20 @@ class _AnalysisWorkerReal(QObject):
         counts_per_run: dict[int, dict[str, int]] = {}
 
         try:
-            feature_ids = get_run_feature_ids(state.runs.keys[0]) # get the feature ids from the first run because they all share feat ids
-        except ServiceError:
+            first_run_id = list(labels.values())[0]
+            feature_ids = get_run_feature_ids(first_run_id)
+        except (ServiceError, IndexError, Exception):
             return
+
+        if not feature_ids:
+            return
+
+        for run_id in run_ids:
+            try:
+                rows = get_feature_counts(run_id)
+                counts_per_run[run_id] = {r['feature_id']: int(r['abundance']) for r in rows}
+            except ServiceError:
+                counts_per_run[run_id] = {}
 
         # rows = samples (runs), columns = OTUs (features)
         # missing features for a run get count 0
@@ -395,21 +484,16 @@ class _AnalysisWorkerReal(QObject):
                 [counts_per_run[run_id].get(fid, 0) for fid in feature_ids]
                 for run_id in run_ids
             ],
-            dtype=int,
+            dtype=float,
         )
 
-        # beta_diversity returns an skbio DistanceMatrix
-        bc_dm = beta_diversity(
-            metric="braycurtis",
-            counts=count_matrix,
-            ids=run_labels,
-        )
+        bc_matrix = _braycurtis(count_matrix)
 
         for i, label_a in enumerate(run_labels):
             for j, label_b in enumerate(run_labels):
                 if j <= i:
-                    continue 
-                value = float(bc_dm[label_a, label_b])
+                    continue
+                value = float(bc_matrix[i, j])
                 id_a  = labels[label_a]
                 id_b  = labels[label_b]
                 id_lo, id_hi = sorted([id_a, id_b])
@@ -455,7 +539,7 @@ class _AnalysisWorkerReal(QObject):
         matrix: np.ndarray,
     ) -> dict[str, tuple[float, float]]:
         """
-        Classical MDS via scipy.linalg.eigh on a symmetric dissimilarity matrix.
+        Classical MDS via numpy.linalg.eigh on a symmetric dissimilarity matrix.
         Returns {label: (pc1, pc2)}.
     
         eigh solves the full eigenproblem exactly for symmetric matrices and
@@ -463,7 +547,7 @@ class _AnalysisWorkerReal(QObject):
         Negative eigenvalues (numerical artefacts from non-Euclidean distances)
         are clamped to zero before taking the square root.
         """
-        from scipy.linalg import eigh
+        from numpy.linalg import eigh
 
         n = len(labels)
         if n < 2:
@@ -492,7 +576,7 @@ class _AnalysisWorkerReal(QObject):
         Derive and store PCoA coordinates from the already-computed beta matrix.
         """
         try:
-            flat = get_beta_diversity_matrix(state.project_id, metric)
+            flat = get_beta_diversity_matrix(state.db_project_id, metric)
         except ServiceError:
             return
 
@@ -536,8 +620,8 @@ class _PhylogenyWorker(QObject):
                     nwk = infer_phylogeny(runner=self._runner, bioproject=self._bioproject, lib_layout='single', callback=print)
                 elif self._state.paired_runs:
                     nwk = infer_phylogeny(runner=self._runner, bioproject=self._bioproject, lib_layout='paired', callback=print)
-                # store newick file path in db
-                tree_info = create_tree_instance(project_id=self._state.db_project_id, newick_path=nwk)
+                # store newick string in db
+                tree_info = create_tree_instance(project_id=self._state.db_project_id, newick_string=nwk)
                 self._state.tree_id = tree_info['tree_id']
                 self.finished.emit(self._state)
         except Exception as exc:
@@ -545,67 +629,150 @@ class _PhylogenyWorker(QObject):
 
 
 class _UnifracWorker(QObject):
-    
+    """
+    Computes weighted UniFrac distances + PCoA using the project tree.
+    Pure-Python implementation — no skbio dependency.
+    """
     finished = pyqtSignal(object)   # emits updated AppState
     errored  = pyqtSignal(str)
 
-    def __init__(self, runner: QiimeRunner, state: AppState) -> None:
+    def __init__(self, state: AppState) -> None:
         super().__init__()
-        self._runner = runner
-        self._state = state
-        self._bioproject = self._state.bioproject_id
+        self._state    = state
         self._project_id = self._state.db_project_id
 
     def run(self):
         try:
             if self._state.run_count > 1:
-                self._fill_unifrac(state=self._state, project_id=self._project_id, labels=self._state.lbs)
-                _AnalysisWorkerReal._fill_pcoa(state=self._state, labels=self._state.lbs, metric="unifrac")
+                self._fill_unifrac(
+                    state=self._state,
+                    project_id=self._project_id,
+                    labels=self._state.lbs,
+                )
             self.finished.emit(self._state)
         except Exception as exc:
             self.errored.emit(str(exc))
 
     @staticmethod
-    def _fill_unifrac(state: AppState, project_id: int, labels: dict):
-        from skbio.diversity.beta import weighted_unifrac
-        from skbio import TreeNode # for weighted unifrac
-        # with qiime2, all runs share the same reference phylogeny
-        # by using fragment insertion method
-        feature_ids = get_run_feature_ids(state.runs.keys[0])
-        tree_node: TreeNode | None = None
+    def _fill_unifrac(state: AppState, project_id: int, labels: dict) -> None:
+        """
+        Weighted UniFrac using _TreeNode (no skbio).
+
+        Algorithm:
+          1. Load Newick from DB; prune to sample tips.
+          2. Iterative postorder: accumulate per-sample subtree proportions.
+          3. WUniFrac(A,B) = Σ(l·|pA−pB|) / Σ(l·(pA+pB))  over all branches.
+          4. Store pairwise distances and derive PCoA coordinates.
+        """
+        import io as _io
+        from ui.pages import _TreeNode
+
+        # ── Load tree ─────────────────────────────────────────────────────
         try:
             tree_info = get_tree(project_id=project_id)
         except ServiceError:
-            tree_info = None
-        if tree_info and tree_info.get("newick_path"):
-            tree_node = TreeNode.read(tree_info["newick_path"])
-
-        if tree_node is None:
-            # skip unifrac silently
-            # TODO: make sure that te GUI knows this?? (chung)
+            print("UniFrac: no tree in DB — skipping")
+            return
+        nwk = tree_info.get("newick_string", "")
+        if not nwk:
+            print("UniFrac: empty newick string — skipping")
             return
 
-        # compute one pair at a time
-        run_labels = state.run_labels
+        # ── Feature counts per run ────────────────────────────────────────
+        run_ids = list(labels.values())
+        try:
+            feature_ids = get_run_feature_ids(run_ids[0])
+        except Exception:
+            return
+        if not feature_ids:
+            return
+
+        counts_per_run: dict[int, dict[str, int]] = {}
+        for run_id in run_ids:
+            try:
+                rows = get_feature_counts(run_id)
+                counts_per_run[run_id] = {
+                    r["feature_id"]: int(r["abundance"]) for r in rows
+                }
+            except ServiceError:
+                counts_per_run[run_id] = {}
+
+        # Tips present in any sample with count > 0
+        all_sample_tips: set[str] = set()
+        for cnt in counts_per_run.values():
+            all_sample_tips.update(k for k, v in cnt.items() if v > 0)
+        if not all_sample_tips:
+            return
+
+        # ── Parse & prune tree to sample tips ─────────────────────────────
+        try:
+            tree = _TreeNode.read(_io.StringIO(nwk))
+            tree.shear(all_sample_tips)
+        except Exception as exc:
+            print(f"UniFrac: tree parse/prune error: {exc}")
+            return
+
+        # Build postorder list once; reused for every pair
+        postorder_nodes = list(tree.postorder())
+
+        def _wunifrac(counts_a: dict, counts_b: dict) -> float:
+            total_a = sum(counts_a.values())
+            total_b = sum(counts_b.values())
+            if total_a == 0 and total_b == 0:
+                return 0.0
+            prop_a = ({k: v / total_a for k, v in counts_a.items()}
+                      if total_a else {})
+            prop_b = ({k: v / total_b for k, v in counts_b.items()}
+                      if total_b else {})
+
+            # Iterative postorder: accumulate subtree proportion sums
+            sub_a: dict[int, float] = {}
+            sub_b: dict[int, float] = {}
+            for node in postorder_nodes:
+                nid = id(node)
+                if not node.children:          # leaf
+                    sub_a[nid] = prop_a.get(node.name or "", 0.0)
+                    sub_b[nid] = prop_b.get(node.name or "", 0.0)
+                else:
+                    sub_a[nid] = sum(sub_a[id(c)] for c in node.children)
+                    sub_b[nid] = sum(sub_b[id(c)] for c in node.children)
+
+            numerator = denominator = 0.0
+            for node in postorder_nodes:
+                if node.parent is None:        # root — no branch above
+                    continue
+                bl = node.length or 0.0
+                if bl == 0.0:
+                    continue
+                nid = id(node)
+                sa, sb = sub_a[nid], sub_b[nid]
+                numerator   += bl * abs(sa - sb)
+                denominator += bl * (sa + sb)
+
+            return numerator / denominator if denominator > 0 else 0.0
+
+        # ── Pairwise weighted UniFrac ──────────────────────────────────────
+        run_labels = list(labels.keys())
         for i, label_a in enumerate(run_labels):
             for j, label_b in enumerate(run_labels):
                 if j <= i:
                     continue
-                u_val = float(
-                    weighted_unifrac(
-                        state.count_matrix[i],
-                        state.count_matrix[j],
-                        feature_ids,
-                        tree_node,
-                    )
+                id_a = labels[label_a]
+                id_b = labels[label_b]
+                u_val = _wunifrac(
+                    counts_per_run.get(id_a, {}),
+                    counts_per_run.get(id_b, {}),
                 )
-                id_a  = labels[label_a]
-                id_b  = labels[label_b]
                 id_lo, id_hi = sorted([id_a, id_b])
                 try:
                     store_beta_diversity(id_lo, id_hi, "unifrac", u_val)
                 except ServiceError:
                     continue
+
+        # ── UniFrac PCoA ──────────────────────────────────────────────────
+        _AnalysisWorkerReal._fill_pcoa(
+            state=state, labels=labels, metric="unifrac"
+        )
     
 
 class _RiskPredictionWorker(QObject):
@@ -799,22 +966,23 @@ class MainWindow(QMainWindow):
         self._stack = QStackedWidget()
         self._stack.setStyleSheet(f"background:{BG_PAGE};")
 
-        self._overview_page  = OverviewPage()
-        self._upload_page    = UploadRunsPage()
-        self._diversity_page = DiversityPage()
-        self._taxonomy_page  = TaxonomyPage()
-        self._asv_page       = AsvTablePage()
-        self._phylo_page     = PhylogenyPage()
-        self._alzheimer_page = AlzheimerPage()
-        self._export_page    = ExportPage()
-        self._profile_page   = ProfilePage()
+        self._overview_page    = OverviewPage()
+        self._upload_page      = UploadRunsPage()
+        self._diversity_page   = DiversityPage()
+        self._taxonomy_page    = TaxonomyPage()
+        self._asv_page         = AsvTablePage()
+        self._phylo_page       = PhylogenyPage()
+        self._alzheimer_page   = AlzheimerPage()
+        self._simulation_page  = SimulationPage()
+        self._export_page      = ExportPage()
+        self._profile_page     = ProfilePage()
 
         for page in [
             self._overview_page, self._upload_page,
             self._diversity_page, self._taxonomy_page,
             self._asv_page, self._phylo_page,
-            self._alzheimer_page, self._export_page,
-            self._profile_page,
+            self._alzheimer_page, self._simulation_page,
+            self._export_page, self._profile_page,
         ]:
             self._stack.addWidget(page)
 
@@ -1080,6 +1248,7 @@ class MainWindow(QMainWindow):
 
     def _on_analysis_complete(self, state: AppState) -> None:
         self._state = state
+        self._state.pipeline_complete = True
         self._status_badge.setText("Analysis complete")
         self._status_badge.setObjectName("badge_green")
         self._status_badge.style().unpolish(self._status_badge)
@@ -1096,9 +1265,9 @@ class MainWindow(QMainWindow):
         self._overview_page.load(state)
         self._broadcast_state()
 
-        # TODO: TEMPORARY
-        # self._on_phylogeny_run() 
-        # TODO: TEMPORARY -> have this run when Construct Phylogeny button is pushed
+        # If a phylogenetic tree is stored, compute UniFrac PCoA automatically
+        if state.tree_id is not None and state.run_count > 1:
+            self._on_unifrac_run()
 
     def _on_analysis_error(self, msg: str) -> None:
         self._status_badge.setText(f"Analysis error: {msg[:60]}")
@@ -1140,10 +1309,12 @@ class MainWindow(QMainWindow):
 
 
     def _on_unifrac_run(self) -> None:
-        self._status_badge.setText("Computing Unifrac...")
+        self._status_badge.setText("Computing UniFrac…")
         self._status_badge.setObjectName("badge_yellow")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
         self._unifrac_thread = QThread(self)
-        self._unifrac_worker = _UnifracWorker(runner=self._runner, state=self._state)
+        self._unifrac_worker = _UnifracWorker(state=self._state)
         self._unifrac_worker.moveToThread(self._unifrac_thread)
         self._unifrac_thread.started.connect(self._unifrac_worker.run)
         self._unifrac_worker.finished.connect(self._on_unifrac_complete)
@@ -1152,15 +1323,18 @@ class MainWindow(QMainWindow):
         self._unifrac_worker.errored.connect(self._unifrac_thread.quit)
         self._unifrac_thread.start()
 
-    def _on_unifrac_complete(self) -> None:
-        self._status_badge.setText("Unifrac complete")
+    def _on_unifrac_complete(self, state: AppState) -> None:
+        self._state = state
+        self._status_badge.setText("UniFrac complete")
         self._status_badge.setObjectName("badge_green")
         self._status_badge.style().unpolish(self._status_badge)
         self._status_badge.style().polish(self._status_badge)
+        # Refresh diversity page so UniFrac PCoA appears
+        self._broadcast_state()
 
     def _on_unifrac_error(self, msg: str) -> None:
-        self._status_badge.setText("Error computing Unifrac")
-        self._status_badge.setObjectName("badge_red")
+        self._status_badge.setText(f"UniFrac skipped: {msg[:60]}")
+        self._status_badge.setObjectName("badge_yellow")
         self._status_badge.style().unpolish(self._status_badge)
         self._status_badge.style().polish(self._status_badge)
 
@@ -1222,6 +1396,8 @@ class MainWindow(QMainWindow):
             self._asv_page,
             self._phylo_page,
             self._alzheimer_page,
+            self._simulation_page,
+            self._export_page,
         ]:
             if hasattr(page, "load"):
                 try:

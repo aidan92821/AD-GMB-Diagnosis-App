@@ -13,6 +13,10 @@ REF_PHYLO_DB = "sepp-refs-silva-128.qza"
 REF_PHYLO_DB_DIR = "ref_phylo_db"
 REF_PHYLO_LINK = "https://data.qiime2.org/2023.5/common/sepp-refs-silva-128.qza"
 
+SILVA_CLASSIFIER = "silva-138-99-nb-classifier.qza"
+SILVA_CLASSIFIER_DIR = "taxa_classifier"
+SILVA_CLASSIFIER_LINK = "https://data.qiime2.org/classifiers/sklearn-1.4.2/silva/silva-138-99-nb-classifier.qza"
+
 
 # lib_layout = 'paired' or 'single'
 def import_samples(runner: QiimeRunner, bioproject: str, lib_layout: str, callback=None):
@@ -20,6 +24,10 @@ def import_samples(runner: QiimeRunner, bioproject: str, lib_layout: str, callba
     APP_DIR = Path(__file__).parent
     input_dir = str((APP_DIR / f"data/{bioproject}/fastq/{lib_layout}").resolve())
     output_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
+
+    demux_path = Path(output_dir) / "demux.qza"
+    if demux_path.exists():
+        return
 
     input_type = 'SampleData[PairedEndSequencesWithQuality]' \
                  if lib_layout == 'paired' \
@@ -49,12 +57,14 @@ def qc(runner: QiimeRunner, bioproject: str, lib_layout: str, callback=None):
     APP_DIR = Path(__file__).parent
     io_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
 
-    # calculate summary statistics
-    runner.run([
-        'qiime', 'demux', 'summarize',
-        '--i-data', f"{io_dir}/demux.qza",
-        '--o-visualization', f"{io_dir}/demux.qzv"
-    ], callback=callback)
+    # calculate summary statistics (skip if already done)
+    qzv_path = Path(io_dir) / "demux.qzv"
+    if not qzv_path.exists():
+        runner.run([
+            'qiime', 'demux', 'summarize',
+            '--i-data', f"{io_dir}/demux.qza",
+            '--o-visualization', f"{io_dir}/demux.qzv"
+        ], callback=callback)
 
     # get truncation positions for paired forward, paired reverse, and single
     return get_trunc(bioproject, lib_layout)
@@ -64,39 +74,41 @@ def qc(runner: QiimeRunner, bioproject: str, lib_layout: str, callback=None):
 def dada2_denoise(runner: QiimeRunner, bioproject: str, lib_layout: str, trunc_f: int=None, trunc_r: int=None, trunc_s: int=None, callback=None):
 
     APP_DIR = Path(__file__).parent
-    io_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
+    io_dir = Path(APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve()
 
-    # get the number of cores from user's machine
-    # and calculate how many to use for the process
+    if (io_dir / "table.qza").exists():
+        return
+
+    io_dir = str(io_dir)
+
     cores = os.cpu_count()
     cores = str(max(cores - 4, 1))
 
     # paired
     if trunc_f:
+        # For paired-end, use deblur on forward reads only (as per deblur docs)
         runner.run([
-            'qiime', 'dada2', 'denoise-paired',
+            'qiime', 'deblur', 'denoise-16S',
             '--i-demultiplexed-seqs', f"{io_dir}/demux.qza",
-            '--p-trim-left-f', '17',
-            '--p-trim-left-r', '21',
-            '--p-trunc-len-f', str(trunc_f),
-            '--p-trunc-len-r', str(trunc_r),
-            '--p-n-threads', cores,
+            '--p-left-trim-len', '17',
+            '--p-trim-length', str(trunc_f),
+            '--p-jobs-to-start', cores,
             '--o-table', f"{io_dir}/table.qza",
             '--o-representative-sequences', f"{io_dir}/rep-seqs.qza",
-            '--o-denoising-stats', f"{io_dir}/stats.qza"
+            '--o-stats', f"{io_dir}/stats.qza"
         ], callback=callback)
 
     # single
     elif trunc_s:
         runner.run([
-            'qiime', 'dada2', 'denoise-single',
+            'qiime', 'deblur', 'denoise-16S',
             '--i-demultiplexed-seqs', f"{io_dir}/demux.qza",
-            '--p-trim-left', '17',
-            '--p-trunc-len', str(trunc_s),
-            '--p-n-threads', cores,
+            '--p-left-trim-len', '17',
+            '--p-trim-length', str(trunc_s),
+            '--p-jobs-to-start', cores,
             '--o-table', f"{io_dir}/table.qza",
             '--o-representative-sequences', f"{io_dir}/rep-seqs.qza",
-            '--o-denoising-stats', f"{io_dir}/stats.qza"
+            '--o-stats', f"{io_dir}/stats.qza"
         ], callback=callback)
 
 
@@ -121,46 +133,55 @@ def classify_taxa(runner: QiimeRunner, bioproject: str, lib_layout: str, callbac
     
 
 def infer_phylogeny(runner: QiimeRunner, bioproject: str, lib_layout: str, callback=None) -> str:
-
+    """
+    Build a rooted phylogenetic tree from representative sequences using
+    MAFFT + FastTree2 (no reference DB download required).
+    Returns the Newick string, or '' on failure.
+    Skips inference if tree.nwk already exists.
+    """
     APP_DIR = Path(__file__).parent
-    ref_phylo_db_dir_path = str((APP_DIR / REF_PHYLO_DB_DIR).resolve())
-    reps_tree_dir = str((APP_DIR / f"data/{bioproject}/reps-tree/{lib_layout}").resolve())
+    reps_tree_dir = (APP_DIR / f"data/{bioproject}/reps-tree/{lib_layout}").resolve()
+    nwk_file = reps_tree_dir / "tree.nwk"
 
-    # get the number of cores from user's machine
-    # and calculate how many to use for the process
-    cores = os.cpu_count()
-    cores = str(max(cores - 4, 1))
+    if nwk_file.exists():
+        if callback:
+            callback(f"[{lib_layout}] tree.nwk already exists — skipping phylogeny inference.")
+        return nwk_file.read_text().strip()
+
+    s = str(reps_tree_dir)
+    cores = str(max(os.cpu_count() - 4, 1))
 
     try:
         runner.run([
-            'qiime', 'fragment-insertion', 'sepp',
-            '--i-representative-sequences', f"{reps_tree_dir}/rep-seqs.qza",
-            '--i-reference-database', f"{ref_phylo_db_dir_path}/{REF_PHYLO_DB}",
-            '--o-tree', f"{reps_tree_dir}/insertion-tree.qza",
-            '--o-placements', f"{reps_tree_dir}/insertion-placements.qza",
-            '--p-threads', cores
-        ])
+            'qiime', 'phylogeny', 'align-to-tree-mafft-fasttree',
+            '--i-sequences',        f"{s}/rep-seqs.qza",
+            '--o-alignment',        f"{s}/aligned-rep-seqs.qza",
+            '--o-masked-alignment', f"{s}/masked-aligned-rep-seqs.qza",
+            '--o-tree',             f"{s}/unrooted-tree.qza",
+            '--o-rooted-tree',      f"{s}/rooted-tree.qza",
+            '--p-n-threads',        cores,
+        ], callback=callback)
 
-        # produce the newick string from the inferred tree
         runner.run([
             'qiime', 'tools', 'export',
-            '--input-path', f"{reps_tree_dir}/insertion-tree.qza",
-            "--output-path", reps_tree_dir
-        ])
+            '--input-path',  f"{s}/rooted-tree.qza",
+            '--output-path', s,
+        ], callback=callback)
     except Exception as e:
         if callback:
-            callback(f"** tree error: {e}")
+            callback(f"[{lib_layout}] Phylogeny inference failed: {e}")
+        return ""
 
-    # clean up the intermediate files
-    runner.rm([f"{reps_tree_dir}/insertion-tree.qza",
-               f"{reps_tree_dir}/insertion-placements.qza",
-               f"{reps_tree_dir}/rep-seqs.qza"])
-    
-    return f"{reps_tree_dir}/tree.nwk"
+    # clean up intermediate QZA files
+    for fname in ("aligned-rep-seqs.qza", "masked-aligned-rep-seqs.qza",
+                  "unrooted-tree.qza", "rooted-tree.qza"):
+        (reps_tree_dir / fname).unlink(missing_ok=True)
+
+    return nwk_file.read_text().strip() if nwk_file.exists() else ""
 
 
 # lib_layout: 'paired' or 'single'
-def create_tables(runner: QiimeRunner, bioproject: str, lib_layout: str, callback=None):
+def create_tables(runner: QiimeRunner, bioproject: str, lib_layout: str, has_taxonomy: bool = True, callback=None):
 
     APP_DIR = Path(__file__).parent
     io_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
@@ -181,43 +202,44 @@ def create_tables(runner: QiimeRunner, bioproject: str, lib_layout: str, callbac
     ], callback=callback)
 
     # asv to taxonomy map table (taxonomy.tsv)
-    runner.run([
-        'qiime', 'tools', 'export',
-        '--input-path', f"{io_dir}/taxonomy.qza",
-        '--output-path', f"{io_dir}"
-    ], callback=callback)
+    if has_taxonomy:
+        runner.run([
+            'qiime', 'tools', 'export',
+            '--input-path', f"{io_dir}/taxonomy.qza",
+            '--output-path', f"{io_dir}"
+        ], callback=callback)
 
-    # genus relative abundance table (genus-table.tsv)
-    # collapse ASV table to genus level abundance
-    runner.run([
-        'qiime', 'taxa', 'collapse',
-        '--i-table', f"{io_dir}/table.qza",
-        '--i-taxonomy', f"{io_dir}/taxonomy.qza",
-        '--p-level', str(6), # 6 = genus
-        '--o-collapsed-table', f"{io_dir}/genus-table.qza"
-    ], callback=callback)
+        # genus relative abundance table (genus-table.tsv)
+        # collapse ASV table to genus level abundance
+        runner.run([
+            'qiime', 'taxa', 'collapse',
+            '--i-table', f"{io_dir}/table.qza",
+            '--i-taxonomy', f"{io_dir}/taxonomy.qza",
+            '--p-level', str(6), # 6 = genus
+            '--o-collapsed-table', f"{io_dir}/genus-table.qza"
+        ], callback=callback)
 
-    # normalize to get relative abundance
-    runner.run([
-        'qiime', 'feature-table', 'relative-frequency',
-        '--i-table', f"{io_dir}/genus-table.qza",
-        '--o-relative-frequency-table', f"{io_dir}/genus-relfreq.qza"
-    ], callback=callback)
+        # normalize to get relative abundance
+        runner.run([
+            'qiime', 'feature-table', 'relative-frequency',
+            '--i-table', f"{io_dir}/genus-table.qza",
+            '--o-relative-frequency-table', f"{io_dir}/genus-relfreq.qza"
+        ], callback=callback)
 
-    # export to BIOM
-    runner.run([
-        'qiime', 'tools', 'export',
-        '--input-path', f"{io_dir}/genus-relfreq.qza",
-        '--output-path', f"{io_dir}/genus"
-    ], callback=callback)
+        # export to BIOM
+        runner.run([
+            'qiime', 'tools', 'export',
+            '--input-path', f"{io_dir}/genus-relfreq.qza",
+            '--output-path', f"{io_dir}/genus"
+        ], callback=callback)
 
-    # convert to tsv
-    runner.run([
-        'biom', 'convert',
-        '-i', f"{io_dir}/genus/feature-table.biom",
-        '-o', f"{io_dir}/genus-table.tsv",
-        '--to-tsv'
-    ], callback=callback)
+        # convert to tsv
+        runner.run([
+            'biom', 'convert',
+            '-i', f"{io_dir}/genus/feature-table.biom",
+            '-o', f"{io_dir}/genus-table.tsv",
+            '--to-tsv'
+        ], callback=callback)
 
     # export representative sequences to FASTA (dna-sequences.fasta)
     # must happen before the .qza is moved, while it still lives in io_dir
@@ -239,12 +261,12 @@ def qiime_preprocess(runner: QiimeRunner, bioproject: str, lib_layout: str, call
             callback(msg)
 
     APP_DIR = Path(__file__).parent
-    ref_phylo_db_dir_path = str((APP_DIR / REF_PHYLO_DB_DIR).resolve())
-    os.makedirs(ref_phylo_db_dir_path, exist_ok=True)
 
-    if REF_PHYLO_DB not in os.listdir(ref_phylo_db_dir_path):
-        _log(f"Getting reference phylogeny database...")
-        get_ref_phylo_db()
+    # ensure SILVA classifier is present
+    silva_path = (APP_DIR / SILVA_CLASSIFIER_DIR / SILVA_CLASSIFIER).resolve()
+    if not silva_path.exists():
+        _log("Downloading SILVA classifier (this may take a while)…")
+        get_silva_classifier()
 
     _log(f"[{lib_layout}] Importing samples…")
     import_samples(runner, bioproject=bioproject, lib_layout=lib_layout, callback=callback)
@@ -252,7 +274,7 @@ def qiime_preprocess(runner: QiimeRunner, bioproject: str, lib_layout: str, call
     _log(f"[{lib_layout}] Running QC / demux summary…")
     trunc = qc(runner, bioproject=bioproject, lib_layout=lib_layout, callback=callback)
 
-    _log(f"[{lib_layout}] DADA2 denoising…")
+    _log(f"[{lib_layout}] Denoising…")
     if lib_layout == 'paired':
         dada2_denoise(runner, bioproject=bioproject, lib_layout=lib_layout,
                       trunc_f=trunc['forward'], trunc_r=trunc['reverse'], callback=callback)
@@ -260,10 +282,39 @@ def qiime_preprocess(runner: QiimeRunner, bioproject: str, lib_layout: str, call
         dada2_denoise(runner, bioproject=bioproject, lib_layout=lib_layout,
                       trunc_s=trunc['single'], callback=callback)
 
-    _log(f"[{lib_layout}] Classifying taxa…")
-    classify_taxa(runner, bioproject=bioproject, lib_layout=lib_layout, callback=callback)
+    io_dir = APP_DIR / f"data/{bioproject}/qiime/{lib_layout}"
+    reps_tree_dir = APP_DIR / f"data/{bioproject}/reps-tree/{lib_layout}"
 
+    # If denoising did not produce table.qza, nothing left to do
+    if not (io_dir / "table.qza").exists():
+        _log(f"[{lib_layout}] Denoising did not produce output — skipping remaining steps. "
+             "Check that the run contains 16S amplicon data.")
+        return
+
+    # Taxonomy — skip if already done (rep-seqs.qza may have been moved on a re-run)
+    _log(f"[{lib_layout}] Classifying taxa…")
+    if (io_dir / "taxonomy.qza").exists():
+        _log(f"[{lib_layout}] Taxonomy already classified — skipping.")
+        has_taxonomy = True
+    elif not (io_dir / "rep-seqs.qza").exists() and (reps_tree_dir / "rep-seqs.qza").exists():
+        _log(f"[{lib_layout}] rep-seqs.qza already moved to reps-tree — skipping taxonomy re-run.")
+        has_taxonomy = False
+    else:
+        try:
+            classify_taxa(runner, bioproject=bioproject, lib_layout=lib_layout, callback=callback)
+            has_taxonomy = True
+        except Exception as e:
+            _log(f"[{lib_layout}] Taxonomy classification failed: {e}")
+            _log(f"[{lib_layout}] ** WARNING: Taxonomy assignment skipped. Genus-level analysis will not be available. **")
+            has_taxonomy = False
+
+    # Create output tables — skip if already done
     _log(f"[{lib_layout}] Creating output tables…")
+    if (io_dir / "feature-table.tsv").exists():
+        _log(f"[{lib_layout}] Output tables already exist — skipping.")
+    else:
+        create_tables(runner, bioproject=bioproject, lib_layout=lib_layout,
+                      has_taxonomy=has_taxonomy, callback=callback)
     create_tables(runner, bioproject=bioproject, lib_layout=lib_layout, callback=callback)
 
     _log(f"[{lib_layout}] Preprocessing complete.")
@@ -271,12 +322,23 @@ def qiime_preprocess(runner: QiimeRunner, bioproject: str, lib_layout: str, call
 
 def download_classifier(classifier_url: str):
 
-    output_dir = Path("taxa_classifier").resolve()
+    APP_DIR = Path(__file__).parent
+    output_dir = (APP_DIR / "taxa_classifier").resolve()
     output_dir.mkdir(exist_ok=True)
 
     classifier_file = output_dir / classifier_url.split("/")[-1]
 
     urllib.request.urlretrieve(classifier_url, classifier_file)
+
+
+def get_silva_classifier():
+
+    APP_DIR = Path(__file__).parent
+    classifier_dir = (APP_DIR / SILVA_CLASSIFIER_DIR).resolve()
+    classifier_dir.mkdir(parents=True, exist_ok=True)
+    classifier_path = classifier_dir / SILVA_CLASSIFIER
+
+    urllib.request.urlretrieve(SILVA_CLASSIFIER_LINK, classifier_path)
 
 
 def get_ref_phylo_db():

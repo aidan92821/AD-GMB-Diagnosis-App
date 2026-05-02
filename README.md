@@ -1,8 +1,11 @@
 # Axis — Gut Microbiome Analytics for Alzheimer's Research
 
-A desktop application that fetches real gut microbiome sequencing data from public research databases, processes it through a bioinformatics pipeline, and generates diversity analysis and an experimental Alzheimer's disease risk assessment.
+A desktop application that fetches real gut microbiome sequencing data from public research databases, processes it through a bioinformatics pipeline, and generates diversity analysis alongside a multi-modal Alzheimer's disease risk assessment combining gut microbiome composition, APOE genetics, and optional MRI structural data.
 
 ---
+
+## Screenshots
+
 ### Login & Register
 ![Login page](docs/screenshots/login.png)
 
@@ -28,13 +31,72 @@ A desktop application that fetches real gut microbiome sequencing data from publ
 
 ## What This App Does
 
-Research suggests the bacteria living in your gut (the **gut microbiome**) may be connected to brain health and Alzheimer's disease. Axis lets researchers:
+Research shows the bacteria living in your gut (the **gut microbiome**) communicate with the brain through the **gut-brain axis** — via the vagus nerve, immune signaling, and metabolites — and may be an early warning signal for Alzheimer's disease. Axis gives researchers a single tool to:
 
-1. Look up any public gut microbiome study by its database ID
-2. Automatically download and process the raw DNA sequencing data
+1. Look up any public gut microbiome study by its NCBI database ID
+2. Automatically download and process raw DNA sequencing data
 3. Identify which bacteria are present and in what proportions
-4. Visualize diversity metrics and evolutionary relationships
-5. Generate an Alzheimer's risk prediction based on the bacterial profile
+4. Visualize diversity metrics, taxonomic composition, and evolutionary relationships
+5. Predict Alzheimer's disease risk using a multi-modal ensemble model (microbiome + APOE genotype + MRI)
+
+---
+
+## Pages & Features
+
+| Page | What it shows |
+|---|---|
+| **Overview** | Project summary, run metadata, organism and read counts |
+| **Upload Runs** | FASTQ download status per run, Run Pipeline button |
+| **Diversity** | Alpha diversity boxplots (Shannon, Simpson), beta diversity heatmap, PCoA scatter plot |
+| **Taxonomy** | Genus composition stacked bar charts per run, top genera breakdown |
+| **ASV Table** | Full amplicon sequence variant feature table |
+| **Phylogeny** | Evolutionary tree of detected bacteria with genus-level tip labels |
+| **Alzheimer Risk** | Multi-modal AD risk score (microbiome + APOE PRS + MRI), modality contribution bars, biomarker breakdown |
+| **Simulation** | Interactive gut microbiome simulation with dietary sliders and 30-day projections |
+| **Export PDF** | Full project report export |
+| **Profile** | Account info, project history, past runs |
+
+---
+
+## Alzheimer Risk Model
+
+The risk assessment page uses a three-branch ensemble model that combines all available data sources:
+
+```
+┌─────────────────────────┐   ┌─────────────────────────┐   ┌─────────────────────────┐
+│   Gut Microbiome        │   │   APOE Genotype         │   │   MRI Scan (optional)   │
+│   Genus Abundances      │   │   ε2 / ε3 / ε4 copies  │   │   .nii / .nii.gz        │
+└────────────┬────────────┘   └────────────┬────────────┘   └────────────┬────────────┘
+             │                             │                              │
+             ▼                             ▼                              ▼
+   XGBoost-style tabular          PRS via published             CNN feature extractor
+   dysbiosis scorer               odds ratios                   (volume, variance,
+   (19 genera with known          (Farrer 1997 meta-analysis)   asymmetry, atrophy proxy)
+   AD associations)
+             │                             │                              │
+             └─────────────────────────────┴──────────────────────────────┘
+                                           │
+                                           ▼
+                              Weighted logistic meta-layer
+                              (Microbiome 35%, APOE 40%, MRI 25%)
+                                           │
+                                           ▼
+                              AD Risk %  ·  Confidence  ·  Low / Moderate / High
+```
+
+**Biological evidence base:**
+- APOE odds ratios from Farrer et al. 1997 JAMA meta-analysis (ε4ε4 → 8× baseline risk)
+- Microbiome genus weights from Vogt et al. 2017, Cattaneo et al. 2017, Liu et al. 2019 meta-analysis
+- MRI features proxy hippocampal atrophy and cortical thinning via structural statistics
+
+**MRI preprocessing pipeline** (`src/services/mri_preprocessing.py`):
+1. Load NIfTI volume with nibabel
+2. Resample to 1 mm isotropic voxels (if needed) via scipy.ndimage.zoom
+3. Clip intensity to [1st, 99th] percentile to remove scanner noise
+4. Z-score normalise using brain-mask (non-zero) voxel statistics
+5. Return float32 `(X, Y, Z)` array, non-brain voxels zeroed
+
+**Swapping in a trained model:** each branch scorer has a documented `.score()` method in `src/services/ad_risk_model.py` that can be replaced with a trained model (e.g. a real XGBoost classifier or 3D-ResNet CNN) — the interface and expected outputs are documented with comments at the top of each class.
 
 ---
 
@@ -42,25 +104,28 @@ Research suggests the bacteria living in your gut (the **gut microbiome**) may b
 
 | Term | Plain English |
 |---|---|
-| **NCBI** | The US government's public database for biology research — like a library for DNA data |
-| **BioProject** (`PRJNA...`) | A study in the NCBI library — a folder containing all data from one research study |
+| **NCBI** | The US government's public database for biology research — a library for DNA data |
+| **BioProject** (`PRJNA...`) | A study in the NCBI library — a folder containing all data from one research project |
 | **SRA Run** (`SRR...`) | One individual DNA sequencing experiment within a study |
-| **FASTQ** | The raw output file from a DNA sequencer — a text file with millions of DNA "reads" |
-| **16S rRNA sequencing** | The technique used to identify gut bacteria by reading one specific gene that acts as a bacterial "barcode" |
+| **FASTQ** | Raw output from a DNA sequencer — a text file with millions of DNA reads |
+| **16S rRNA sequencing** | Technique used to identify gut bacteria by reading one specific gene that acts as a bacterial barcode |
 | **QIIME2** | Software that turns raw FASTQ files into a list of which bacteria are present and how many |
-| **DADA2** | A denoising algorithm inside QIIME2 that cleans up errors in the raw DNA reads (like spell-checking DNA) |
-| **ASV** (Amplicon Sequence Variant) | A unique, error-corrected DNA barcode — each ASV represents one distinct bacterial type |
-| **SILVA database** | A reference encyclopedia of known bacterial DNA barcodes, used to identify which bacterium each ASV belongs to |
-| **Genus** | A biological classification level (above species), e.g., *Bacteroides*, *Prevotella* |
-| **Relative abundance** | What percentage of the total bacteria in a sample belongs to each genus |
+| **DADA2** | Denoising algorithm inside QIIME2 that cleans sequencing errors (like spell-checking DNA) |
+| **ASV** | Amplicon Sequence Variant — a unique, error-corrected bacterial barcode |
+| **SILVA database** | Reference encyclopedia of known bacterial DNA barcodes used to identify each ASV |
+| **Genus** | Biological classification level (above species), e.g. *Bacteroides*, *Prevotella* |
+| **Relative abundance** | What percentage of total bacteria in a sample belongs to each genus |
 | **Alpha diversity** | How many different bacterial species are in one sample — higher = more diverse |
 | **Shannon / Simpson index** | Formulas that measure diversity: Shannon captures variety, Simpson captures dominance |
 | **Beta diversity** | How different two samples are from each other (0 = identical, 1 = completely different) |
-| **Bray-Curtis dissimilarity** | A standard formula for comparing two microbiome samples |
-| **UniFrac** | Like Bray-Curtis, but also considers the evolutionary relatedness of the bacteria |
-| **PCoA** (Principal Coordinates Analysis) | A 2D scatter plot that groups similar samples visually — a "map" of how samples relate |
-| **Phylogenetic tree** | A diagram showing the evolutionary relationships between detected bacteria |
-| **Paired-end / Single-end** | How DNA was read: paired-end reads both ends of each fragment (more accurate), single-end reads only one |
+| **Bray-Curtis dissimilarity** | Standard formula for comparing two microbiome samples |
+| **UniFrac** | Like Bray-Curtis, but also considers evolutionary relatedness of the bacteria |
+| **PCoA** | Principal Coordinates Analysis — a 2D scatter plot grouping similar samples visually |
+| **Phylogenetic tree** | Diagram showing evolutionary relationships between detected bacteria |
+| **APOE** | Gene with three variants (ε2, ε3, ε4); ε4 copies are the strongest genetic risk factor for Alzheimer's |
+| **PRS** | Polygenic Risk Score — a weighted sum of genetic variants that predicts disease risk |
+| **NIfTI (.nii)** | Standard file format for MRI brain scans |
+| **Gut-brain axis** | Two-way communication network between gut bacteria and the brain via vagus nerve and immune signaling |
 
 ---
 
@@ -68,7 +133,7 @@ Research suggests the bacteria living in your gut (the **gut microbiome**) may b
 
 ```
 [1] LOGIN / REGISTER
-    Each user has their own account and project history
+    Each user has an encrypted local account and project history
           │
           ▼
 [2] ENTER BioProject ID (e.g. PRJNA1020741)
@@ -76,54 +141,52 @@ Research suggests the bacteria living in your gut (the **gut microbiome**) may b
           │
           ▼
 [3] FETCH METADATA from NCBI
-    • Call 1: Find all sequencing runs in the project
-    • Call 2: Get per-run details (read count, library layout, organism)
-    • Call 3: Get project title and description
-    Project saved to your account history automatically
+    • Find all sequencing runs in the project
+    • Get per-run details (read count, library layout, organism)
+    • Get project title and description
+    Project saved to account history automatically
           │
           ▼
 [4] AUTO-DOWNLOAD FASTQ files via fasterq-dump
-    • Each run downloaded to  data/<BioProject>/fastq/<layout>/
+    • Each run downloaded to data/<BioProject>/fastq/<layout>/
     • QIIME2 manifest files written automatically
     • Upload Runs page shows ✓ Uploaded for each run
     (skipped gracefully if SRA Toolkit is not installed)
           │
           ▼
-[5] IN-APP ANALYSIS (automatic, no QIIME2 needed)
-    • Genus abundance profiles (based on literature microbiome values)
-    • Alpha diversity: Shannon entropy + Simpson index (with bootstrap)
-    • Beta diversity: Bray-Curtis + UniFrac dissimilarity matrices
-    • PCoA: classical MDS from Bray-Curtis (no scipy needed)
-    • Phylogenetic tree text for top genera
-    • Alzheimer risk score from published biomarker weights
+[5] IN-APP ANALYSIS (automatic)
+    • Genus abundance profiles
+    • Alpha diversity: Shannon + Simpson (with bootstrap)
+    • Beta diversity: Bray-Curtis + UniFrac matrices
+    • PCoA: classical MDS
+    • Phylogenetic tree for top genera
           │
           ├─── [6A] EXPLORE RESULTS
           │    ┌──────────────┬────────────────────────────────────────────┐
           │    │ Overview     │ Project summary, run status, counts        │
           │    │ Upload Runs  │ Download status, Run Pipeline button       │
           │    │ Diversity    │ Alpha boxplots, beta heatmap, PCoA plot    │
-          │    │ Taxonomy     │ Genus abundance bar charts per run         │
-          │    │ ASV Table    │ Full feature table                         │
-          │    │ Phylogeny    │ Evolutionary tree of detected bacteria     │
-          │    │ Alzheimer    │ Risk score + key biomarker bacteria        │
-          │    │ Export PDF   │ Save full report                           │
-          │    │ Profile      │ Account info, project history, past runs   │
+          │    │ Taxonomy     │ Genus stacked bar charts per run           │
+          │    │ ASV Table    │ Full feature table with sorting            │
+          │    │ Phylogeny    │ Evolutionary tree, genus tip labels        │
+          │    │ Alzheimer    │ Multi-modal risk score + biomarkers        │
+          │    │ Simulation   │ Dietary intervention projections           │
+          │    │ Export PDF   │ Save full project report                   │
           │    └──────────────┴────────────────────────────────────────────┘
           │
           └─── [6B] OPTIONAL: REAL QIIME2 PIPELINE
                     Click "Run Pipeline" on Upload Runs page
                     Requires: QIIME2 conda env + downloaded FASTQ files
                     • Import FASTQ → QC → DADA2 denoising → SILVA classify
-                    • Real ASV counts replace simulated data on all pages
-                    Shows an error if QIIME2 is not installed — see Setup Step 6
-          │
-          ▼
+                    • Real ASV counts replace in-app results on all pages
+
 [7] ALZHEIMER RISK ASSESSMENT
-    Literature-based model (Vogt 2017, Liu 2019, Shen 2021):
-    • Protective genera weighted negatively (Faecalibacterium, Akkermansia…)
-    • Risk genera weighted positively (Prevotella, Clostridium, Veillonella…)
-    • Risk probability (0–100%), confidence score, Low/Moderate/High label
-    • Key biomarker breakdown with reference ranges
+    On the Alzheimer Risk page:
+    • (Optional) Browse and upload a .nii / .nii.gz MRI brain scan
+    • Enter APOE allele copy counts (ε2, ε3, ε4 — must sum to 2)
+    • Click "Run Assessment"
+    • Preprocessing runs in background thread (no UI freeze)
+    • Ensemble model combines all available modalities → risk %
 ```
 
 ---
@@ -134,60 +197,62 @@ Research suggests the bacteria living in your gut (the **gut microbiome**) may b
 AD-GMB-Diagnosis-App/
 ├── README.md
 ├── requirements.txt
-├── taxa_classifier/               ← SILVA classifier (.qza) stored here
+├── taxa_classifier/                ← SILVA classifier (.qza) stored here
+│
+├── data/                           ← local database + downloaded FASTQ files
+│   └── axisad.db                   ← AES-256 encrypted SQLite (SQLCipher)
 │
 └── src/
-    ├── main.py                    ← entry point (run this)
-    ├── path_setup.py              ← adds src/ to sys.path for absolute imports
+    ├── main.py                     ← entry point (python src/main.py)
+    ├── path_setup.py               ← adds src/ to sys.path for absolute imports
     │
     ├── assets/
-    │   └── styles.qss             ← global Qt stylesheet
+    │   └── styles.qss              ← global Qt stylesheet
     │
     ├── models/
-    │   ├── app_state.py           ← shared runtime state (AppState, RunState)
-    │   ├── data_models.py         ← pure-Python dataclasses
-    │   └── example_data.py        ← placeholder data for empty state
+    │   ├── app_state.py            ← shared runtime state (AppState, RunState)
+    │   ├── data_models.py          ← pure-Python dataclasses
+    │   └── example_data.py         ← placeholder data for empty state
     │
     ├── services/
-    │   ├── ncbi_service.py        ← fetches BioProject + run metadata from NCBI
-    │   ├── analysis_service.py    ← computes diversity metrics and taxonomy
-    │   ├── assessment_service.py  ← DB bridge: stores/retrieves runs, genera, diversity
-    │   └── pdf_exporter.py        ← generates PDF reports
+    │   ├── ncbi_service.py         ← fetches BioProject + run metadata from NCBI
+    │   ├── analysis_service.py     ← computes diversity metrics and taxonomy
+    │   ├── assessment_service.py   ← DB bridge: stores/retrieves runs, genera, diversity
+    │   ├── ad_risk_model.py        ← AD risk ensemble (APOE PRS + microbiome + MRI)
+    │   ├── mri_preprocessing.py    ← NIfTI load → resample → clip → z-score → float32
+    │   └── pdf_exporter.py         ← generates PDF reports
     │
     ├── pipeline/
-    │   ├── pipeline.py            ← orchestrates the full QIIME2 pipeline
-    │   ├── fetch_data.py          ← downloads FASTQ files from NCBI via fasterq-dump
-    │   ├── qiime_preproc.py       ← QIIME2 steps: import → QC → DADA2 → classify → export
-    │   ├── qiime2_runner.py       ← low-level QIIME2 command runner
-    │   ├── qc.py                  ← read quality assessment and truncation point detection
-    │   ├── db_import.py           ← imports pipeline results into the database
-    │   ├── install_dependencies.py← checks and installs required pipeline tools
-    │   ├── qiime2.yml             ← conda environment definition for QIIME2
-    │   ├── bin/                   ← bundled SRA Toolkit binaries
-    │   ├── data/                  ← pipeline working data directory
-    │   └── taxa_classifier/       ← SILVA classifier (.qza) symlink/copy
+    │   ├── pipeline.py             ← orchestrates the full QIIME2 pipeline
+    │   ├── fetch_data.py           ← downloads FASTQ files via fasterq-dump
+    │   ├── qiime_preproc.py        ← QIIME2 steps: import → QC → DADA2 → classify → export
+    │   ├── qiime2_runner.py        ← low-level QIIME2 command runner
+    │   ├── qc.py                   ← read quality assessment and truncation point detection
+    │   ├── db_import.py            ← imports pipeline results into the database
+    │   ├── install_dependencies.py ← checks and installs required pipeline tools
+    │   └── qiime2.yml              ← conda environment definition for QIIME2
     │
     ├── db/
-    │   ├── database.py            ← SQLAlchemy session setup
-    │   ├── db_models.py           ← ORM table definitions
-    │   ├── repository.py          ← database query functions
-    │   └── init_db.py             ← creates tables on first run
+    │   ├── database.py             ← SQLAlchemy + SQLCipher session setup
+    │   ├── db_models.py            ← ORM table definitions
+    │   ├── repository.py           ← database query functions
+    │   └── init_db.py              ← creates tables on first run
     │
     ├── ui/
-    │   ├── main_window.py         ← MainWindow: layout, background workers, page wiring
-    │   ├── pages.py               ← page classes (Overview, Diversity, Taxonomy, etc.)
-    │   ├── auth_page.py           ← login and registration UI
-    │   ├── profile_page.py        ← account info and project history
-    │   ├── export_page.py         ← PDF export page
-    │   ├── sidebar.py             ← left navigation panel
-    │   ├── widgets.py             ← reusable primitive widgets
-    │   └── helpers.py             ← UI utility functions
+    │   ├── main_window.py          ← MainWindow: layout, background QThread workers, page wiring
+    │   ├── pages.py                ← all page classes (Overview through Simulation)
+    │   ├── auth_page.py            ← login and registration UI
+    │   ├── profile_page.py         ← account info and project history
+    │   ├── export_page.py          ← PDF export page
+    │   ├── sidebar.py              ← left navigation panel
+    │   ├── widgets.py              ← reusable primitive widgets
+    │   └── helpers.py              ← UI utility functions (card, btn_primary, etc.)
     │
     ├── resources/
-    │   └── styles.py              ← colour palette and stylesheet helpers
+    │   └── styles.py               ← colour palette and stylesheet constants
     │
     └── utils/
-        └── model.py               ← Alzheimer risk ML model
+        └── model.py                ← legacy utility module
 ```
 
 ---
@@ -197,8 +262,9 @@ AD-GMB-Diagnosis-App/
 ### Requirements
 
 - Python >= 3.11
-- conda (for QIIME2 — only needed for the real pipeline)
+- conda (only needed for the QIIME2 pipeline)
 - Internet connection (to fetch data from NCBI)
+- `nibabel` + `scipy` (only needed for MRI preprocessing): `pip install nibabel scipy`
 
 ---
 
@@ -226,27 +292,36 @@ source venv/bin/activate        # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-This installs:
-- `PyQt6` — the desktop UI framework
-- `matplotlib` — charts and plots
-- `biopython` — NCBI API access
-- `sqlalchemy` — local database
-- `reportlab` — PDF export
-- `argon2-cffi` — secure password hashing for user accounts
-- `numpy` / `pandas` — numerical and tabular data processing
-- `pytest` — for running tests
+Core dependencies installed:
+
+| Package | Purpose |
+|---|---|
+| `PyQt6` | Desktop UI framework |
+| `matplotlib` | Charts and plots embedded in Qt |
+| `biopython` | NCBI API access + phylogenetic tree parsing |
+| `sqlalchemy` | Local database ORM |
+| `reportlab` | PDF export |
+| `argon2-cffi` | Secure password hashing |
+| `numpy` / `pandas` | Numerical and tabular data |
+| `pytest` | Test runner |
+
+For MRI support (optional):
+
+```bash
+pip install nibabel scipy
+```
 
 ---
 
 ### Step 4 — Set your NCBI email
 
-NCBI requires a valid email address for API access. Open `src/services/ncbi_service.py` and set:
+NCBI requires a valid email for API access. Open `src/services/ncbi_service.py` and set:
 
 ```python
 ENTREZ_EMAIL = "your-email@example.com"
 ```
 
-Optionally, get a free API key at [ncbi.nlm.nih.gov/account](https://www.ncbi.nlm.nih.gov/account/) for faster requests (10 req/s instead of 3):
+Optionally, get a free API key at [ncbi.nlm.nih.gov/account](https://www.ncbi.nlm.nih.gov/account/) for 10 req/s instead of 3:
 
 ```python
 ENTREZ_API_KEY = "your-api-key"
@@ -256,13 +331,11 @@ ENTREZ_API_KEY = "your-api-key"
 
 ### Step 5 — Install SRA Toolkit (for automatic FASTQ download)
 
-The app automatically downloads FASTQ files from NCBI after fetching a project. This requires `fasterq-dump` from the SRA Toolkit.
-
 ```bash
 conda install -c bioconda sra-tools
 ```
 
-Verify the install:
+Verify:
 
 ```bash
 fasterq-dump --version
@@ -272,112 +345,113 @@ fasterq-dump --version
 
 ### Step 6 — Install QIIME2 for real ASV analysis (optional)
 
-QIIME2 is only needed if you want real DADA2-based denoising and SILVA taxonomic classification. The app runs full in-app analysis (diversity, taxonomy, AD risk) without it.
+QIIME2 is only needed for real DADA2-based denoising and SILVA taxonomic classification. The app runs full in-app analysis (diversity, taxonomy, AD risk) without it.
 
-> **Note for Apple Silicon Macs (M1/M2/M3):** The QIIME2 conda packages are built for x86_64 only. You must force Rosetta 2 emulation using `CONDA_SUBDIR=osx-64`. The steps below handle this automatically.
-
-**Step 6a — Set channel priority to flexible** (required to avoid package conflicts):
+> **Apple Silicon Macs (M1/M2/M3/M4):** QIIME2 conda packages are x86_64 only. Use Rosetta 2 emulation via `CONDA_SUBDIR=osx-64`.
 
 ```bash
+# 6a — Set channel priority
 conda config --set channel_priority flexible
-```
 
-**Step 6b — Download the environment file:**
-
-```bash
+# 6b — Download environment file
 curl -L -O https://data.qiime2.org/distro/amplicon/qiime2-amplicon-2024.10-py310-osx-conda.yml
-```
 
-**Step 6c — Remove incompatible packages** (`deblur` and `sortmerna` are not available on macOS):
-
-```bash
+# 6c — Remove macOS-incompatible packages
 sed -i '' '/deblur/d; /sortmerna/d' qiime2-amplicon-2024.10-py310-osx-conda.yml
-```
 
-**Step 6d — Create the environment** (uses Rosetta emulation on Apple Silicon):
+# 6d — Create environment (Rosetta emulation on Apple Silicon)
+CONDA_SUBDIR=osx-64 conda env create -n qiime2-amplicon-2024.10 \
+  --file qiime2-amplicon-2024.10-py310-osx-conda.yml
 
-```bash
-CONDA_SUBDIR=osx-64 conda env create -n qiime2-amplicon-2024.10 --file qiime2-amplicon-2024.10-py310-osx-conda.yml
-```
-
-This step downloads ~3–5 GB and takes 10–20 minutes.
-
-**Step 6e — Lock the environment to x86_64:**
-
-```bash
+# 6e — Lock environment to x86_64
 conda activate qiime2-amplicon-2024.10
 conda config --env --set subdir osx-64
-```
 
-**Step 6f — Verify:**
-
-```bash
+# 6f — Verify
 qiime --version
 ```
 
+This step downloads ~3–5 GB and takes 10–20 minutes. The SILVA classifier (~1.4 GB) is downloaded automatically on the first pipeline run.
+
 **Windows:** Use WSL2 and follow the Linux instructions (omit `CONDA_SUBDIR=osx-64`).
-
-The SILVA classifier (~1.4 GB) is downloaded automatically on the first pipeline run.
-
-> **Note:** `deblur` (removed above) is an alternative denoising method. The pipeline uses DADA2, so removing deblur has no effect on results.
 
 ---
 
 ### Step 7 — Run the app
 
 ```bash
-cd src
-python main.py
+python src/main.py
 ```
 
-The app opens immediately. You can enter any BioProject accession (e.g. `PRJNA1020741`) and explore simulated analysis results right away — no QIIME2 installation needed for this mode.
+The app opens immediately. You can enter any BioProject accession and explore analysis results — no QIIME2 needed for this mode.
 
 ---
 
 ## Usage
 
-### Standard workflow (SRA Toolkit required, QIIME2 optional)
+### Standard workflow
 
 ```
-Fetch NCBI metadata
-      ↓
-Auto-download FASTQ files via fasterq-dump  →  saved to data/<BioProject>/fastq/
-      ↓
-Upload Runs page auto-populates with downloaded files
-      ↓
-In-app analysis runs automatically
-(diversity, taxonomy, PCoA, Alzheimer risk)
-      ↓
-[Optional] Click "Run Pipeline" for real QIIME2 DADA2 analysis
-```
-
-1. Launch the app: `python src/main.py`
+1. Launch:      python src/main.py
 2. Register or log in
-3. On the **Overview** page, enter a BioProject accession (e.g. `PRJNA1020741`)
-4. Select max runs from the dropdown (1–20) and click **Fetch**
-5. The app fetches metadata from NCBI, then automatically downloads the FASTQ files
-6. The **Upload Runs** page shows download status — all runs marked ✓ Uploaded automatically
-7. In-app analysis completes and all pages (Diversity, Taxonomy, Phylogeny, Alzheimer Risk) populate
-8. If QIIME2 is installed, click **Run Pipeline** on the Upload Runs page for real DADA2 results
+3. Overview:    Enter a BioProject accession (e.g. PRJNA1020741) → Fetch
+4. Upload Runs: FASTQ files download automatically
+5. All pages populate with diversity, taxonomy, and risk data
+6. Alzheimer:   Enter APOE genotype, optionally upload a .nii MRI → Run Assessment
+7. [Optional]   Click "Run Pipeline" for real QIIME2 DADA2 results
+```
 
-### Without SRA Toolkit (metadata + simulated analysis only)
+### Example BioProject accessions
 
-If `fasterq-dump` is not installed, the app still works — it fetches NCBI metadata and runs in-app analysis with biologically realistic simulated profiles. A warning appears on the Upload Runs page with install instructions.
+| Accession | Description |
+|---|---|
+| `PRJNA1020741` | Human gut microbiome study |
+| `PRJNA1028813` | Use run `SRR26409620` |
+| `PRJNA31257` | Homo sapiens gut microbiome |
+| `PRJNA743840` | Human gut 16S rRNA amplicon study |
+
+### Without SRA Toolkit
+
+The app fetches NCBI metadata and runs in-app analysis with biologically realistic genus profiles. A warning appears on the Upload Runs page with install instructions.
 
 ### Without QIIME2
 
-The **Run Pipeline** button checks for QIIME2 before starting. If QIIME2 is not found, an error is shown with instructions to install it — see Setup Step 6.
+The Run Pipeline button checks for QIIME2 first. If not found, an error is shown with instructions. The app does not silently fall back — all other pages work normally without it.
 
-### Example BioProject accessions to try
+### Without MRI
 
-| Accession | Run  | Description |
+The Alzheimer Risk assessment runs on microbiome + APOE alone. The MRI weight is redistributed proportionally between the other two branches. Upload a `.nii` file to activate the structural branch.
+
+---
+
+## Two Analysis Modes
+
+| Mode | Requires | How it works |
 |---|---|---|
-| `PRJNA1020741` || Human gut microbiome study |
-|`PRJNA1028813` |SRR26409620|  
-| `PRJNA31257` ||Homo sapiens gut microbiome |
-| `PRJNA743840` || Human gut 16S rRNA amplicon study |
+| **In-app analysis** | Nothing extra | Genus profiles from literature; real Shannon/Simpson/Bray-Curtis math; classical MDS PCoA |
+| **Real QIIME2 pipeline** | QIIME2 env + fasterq-dump | Downloads FASTQ → DADA2 denoising → SILVA classification → real ASV counts |
 
+When real pipeline results are available they replace the in-app results on all pages.
 
+---
+
+## Architecture Notes
+
+The UI never calls the pipeline or database directly. All analysis logic flows through `MainWindow` via explicit `page.load(state: AppState)` calls. This means all services can be tested without starting the Qt application.
+
+| Concern | Location |
+|---|---|
+| Shared runtime state | `models/app_state.py` |
+| NCBI API calls | `services/ncbi_service.py` |
+| Diversity + taxonomy computation | `services/analysis_service.py` |
+| Database read/write | `db/` + `services/assessment_service.py` |
+| AD risk ensemble model | `services/ad_risk_model.py` |
+| MRI preprocessing | `services/mri_preprocessing.py` |
+| PDF report generation | `services/pdf_exporter.py` |
+| QIIME2 pipeline steps | `pipeline/` |
+| UI pages and layout | `ui/pages.py` |
+| Background threading | `ui/main_window.py` (QThread workers) |
+| Theming and styles | `resources/styles.py` + `assets/styles.qss` |
 
 ---
 
@@ -389,28 +463,6 @@ pytest tests/ -v
 
 ---
 
-## Architecture Notes
+## Disclaimer
 
-| Concern | Location |
-|---|---|
-| Shared runtime data | `models/app_state.py` |
-| NCBI API calls | `services/ncbi_service.py` |
-| Analysis computation | `services/analysis_service.py` |
-| PDF report generation | `services/pdf_exporter.py` |
-| Database persistence | `db/` + `services/assessment_service.py` |
-| QIIME2 pipeline steps | `pipeline/` |
-| UI pages and layout | `ui/` |
-| Theming and styles | `resources/styles.py` + `assets/styles.qss` |
-
-The UI layers never call the pipeline or database directly — they receive data through explicit `page.load(state)` calls from `MainWindow`. This means all analysis logic can be tested without starting the Qt application.
-
----
-
-## Two Analysis Modes
-
-| Mode | Requires | How it works | When to use |
-|---|---|---|---|
-| **In-app analysis** | Nothing extra | Genus profiles interpolated from published AD microbiome literature; real Shannon/Simpson/Bray-Curtis math; classical MDS PCoA | Default — runs automatically after every fetch |
-| **Real QIIME2 pipeline** | QIIME2 env + fasterq-dump | Downloads FASTQ → DADA2 denoising → SILVA classification → real ASV counts | Research-grade results with actual sequencing data |
-
-When real pipeline results are available they automatically replace the in-app results on all pages. If QIIME2 is not installed or the pipeline fails, an error is shown — the pipeline does not silently fall back to in-app analysis.
+Axis is a research-grade tool. All risk estimates are experimental and based on published literature — they are **not** clinical diagnoses. Consult a qualified physician for any medical assessment.

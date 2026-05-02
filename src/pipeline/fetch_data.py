@@ -1,10 +1,14 @@
 from __future__ import annotations
 import csv
+import gzip
+import json
 import pandas as pd
 from pathlib import Path
 from typing import TYPE_CHECKING
 import os
 import shutil
+import urllib.error
+import urllib.request
 
 if TYPE_CHECKING:
     from models.app_state import AppState
@@ -13,6 +17,85 @@ if TYPE_CHECKING:
 # this function downloads one run at a time if the run is specified
 # it can download up to 4 runs at a time if no run is specified
 # returns two lists of strings: paired end runs and single end runs (SRR Accessions)
+def _fetch_runs_from_ebi(bioproject: str, srr: str = None, n_runs: int = 1) -> tuple[list[str], list[str], dict]:
+    """Fetch run metadata from EBI ENA as a fallback when NCBI is unavailable."""
+    fields = ",".join([
+        "run_accession",
+        "library_layout",
+        "library_strategy",
+        "instrument_platform",
+        "instrument_model",
+        "sample_accession",
+        "scientific_name",
+        "read_count",
+        "base_count",
+        "study_accession",
+    ])
+    api_url = (
+        f"https://www.ebi.ac.uk/ena/portal/api/filereport"
+        f"?accession={bioproject}&result=read_run&fields={fields}&format=json"
+    )
+    try:
+        with urllib.request.urlopen(api_url, timeout=30) as resp:
+            data = json.loads(resp.read())
+    except Exception as e:
+        raise ValueError(f"EBI ENA API lookup failed for '{bioproject}': {e}") from e
+
+    if not data:
+        raise ValueError(f"No run info returned from EBI ENA for bioproject '{bioproject}'.")
+
+    if srr:
+        matched = [r for r in data if r.get("run_accession") == srr]
+        data = matched if matched else data[:1]
+    else:
+        data = data[:n_runs]
+
+    if not data:
+        raise ValueError(
+            f"No matching runs found for bioproject '{bioproject}'"
+            + (f" / SRR '{srr}'" if srr else "") + "."
+        )
+
+    runs = []
+    for i, rec in enumerate(data, start=1):
+        layout = str(rec.get("library_layout", "")).upper()
+        if layout not in {"PAIRED", "SINGLE"}:
+            layout = "PAIRED"
+        runs.append({
+            'run_accession'    : rec.get("run_accession", ""),
+            'label'            : f"R{i}",
+            'read_count'       : int(rec.get("read_count") or 0),
+            'base_count'       : int(rec.get("base_count") or 0),
+            'library_layout'   : layout,
+            'library_strategy' : rec.get("library_strategy", ""),
+            'platform'         : rec.get("instrument_platform", ""),
+            'instrument'       : rec.get("instrument_model", ""),
+            'sample_accession' : rec.get("sample_accession", ""),
+            'organism'         : rec.get("scientific_name", ""),
+            'uploaded'         : False,
+            'qiime_error'      : ""
+        })
+
+    first     = data[0]
+    sra_study = str(first.get("study_accession", "")).strip()
+    organism  = str(first.get("scientific_name", "")).strip()
+
+    project = {
+        'bioproject_id' : bioproject,
+        'project_uid'   : "",
+        'sra_study_id'  : sra_study,
+        'title'         : f"{bioproject}",
+        'description'   : "",
+        'organism'      : organism,
+        'runs'          : runs,
+    }
+
+    paired_runs = [r['run_accession'] for r in runs if r['library_layout'] == 'PAIRED']
+    single_runs = [r['run_accession'] for r in runs if r['library_layout'] == 'SINGLE']
+
+    return single_runs, paired_runs, project
+
+
 def fetch_runs(email, runner, bioproject: str, srr=None, n_runs=1) -> tuple[list[str], list[str], dict]:
 
     env = os.environ.copy()
@@ -22,7 +105,7 @@ def fetch_runs(email, runner, bioproject: str, srr=None, n_runs=1) -> tuple[list
 
     # fetch information about the runs in the bioproject into a csv
     esearch = runner.es_run([
-        "esearch", 
+        "esearch",
         "-db", "sra",
         "-query", bioproject
     ], env=env)
@@ -30,13 +113,16 @@ def fetch_runs(email, runner, bioproject: str, srr=None, n_runs=1) -> tuple[list
         "efetch",
         "-format", "runinfo"
     ], es_process=esearch, env=env)
-    
-    
-    info = pd.read_csv(result)
+
+    try:
+        info = pd.read_csv(result)
+    except Exception as e:
+        print(f"NCBI parse failed for '{bioproject}': {e}. Falling back to EBI ENA…")
+        return _fetch_runs_from_ebi(bioproject, srr=srr, n_runs=n_runs)
 
     if info.empty:
-        raise ValueError(f"No run info returned from NCBI for bioproject '{bioproject}'. "
-                         "Check that the accession is valid and your email is set.")
+        print(f"NCBI returned empty data for '{bioproject}'. Falling back to EBI ENA…")
+        return _fetch_runs_from_ebi(bioproject, srr=srr, n_runs=n_runs)
 
     # only bioproject is specified
     if srr is None or info.loc[info['Run'] == srr].empty:
@@ -99,6 +185,53 @@ def fetch_runs(email, runner, bioproject: str, srr=None, n_runs=1) -> tuple[list
     return single_runs, paired_runs, project
 
 
+def _download_from_ena(run: str, output_dir: Path) -> bool:
+    """Download FASTQ files for a run from ENA FTP. Returns True on success."""
+    api_url = (
+        f"https://www.ebi.ac.uk/ena/portal/api/filereport"
+        f"?accession={run}&result=read_run&fields=fastq_ftp&format=json"
+    )
+    try:
+        with urllib.request.urlopen(api_url, timeout=30) as resp:
+            data = json.loads(resp.read())
+    except Exception as e:
+        print(f"ENA API lookup failed for {run}: {e}")
+        return False
+
+    if not data:
+        print(f"No ENA records for {run}")
+        return False
+
+    ftp_field = data[0].get("fastq_ftp", "")
+    if not ftp_field:
+        print(f"No fastq_ftp URLs for {run}")
+        return False
+
+    urls = [u.strip() for u in ftp_field.split(";") if u.strip()]
+    downloaded_any = False
+    for url in urls:
+        if not url.startswith("ftp://"):
+            url = "ftp://" + url
+        filename = url.split("/")[-1]
+        dest_gz = output_dir / filename
+        dest = output_dir / filename.replace(".fastq.gz", ".fastq")
+        if dest.exists():
+            downloaded_any = True
+            continue
+        try:
+            print(f"Downloading {url} …")
+            urllib.request.urlretrieve(url, dest_gz)
+            with gzip.open(dest_gz, 'rb') as f_in, open(dest, 'wb') as f_out:
+                shutil.copyfileobj(f_in, f_out)
+            dest_gz.unlink(missing_ok=True)
+            downloaded_any = True
+        except Exception as e:
+            print(f"Failed to download {url}: {e}")
+            dest_gz.unlink(missing_ok=True)
+
+    return downloaded_any
+
+
 # lib_layout = 'paired' or 'single'
 # runs = list of SRR Accessions
 def download_runs(runner, bioproject: str, lib_layout: str, runs: list[str], state: AppState) -> AppState:
@@ -111,17 +244,18 @@ def download_runs(runner, bioproject: str, lib_layout: str, runs: list[str], sta
     cores = str(max(os.cpu_count() - 4, 1))
 
     for run in runs:
-        # Skip download if files already present on disk
-        already_paired  = (output_dir / f"{run}_1.fastq").exists()
-        already_single  = (output_dir / f"{run}.fastq").exists()
+        already_paired = (output_dir / f"{run}_1.fastq").exists()
+        already_single = (output_dir / f"{run}.fastq").exists()
         if already_paired or already_single:
             continue
 
-        runner.fq_run([
-            str(SRA_BIN / "fasterq-dump"), run, "--split-files",
-            "--threads", cores,
-            "--outdir", str(output_dir),
-        ])
+        if not _download_from_ena(run, output_dir):
+            print(f"ENA download failed for {run}, falling back to fasterq-dump…")
+            runner.fq_run([
+                str(SRA_BIN / "fasterq-dump"), run, "--split-files",
+                "--threads", cores,
+                "--outdir", str(output_dir),
+            ])
 
     return state
 
@@ -136,8 +270,8 @@ def write_manifest(bioproject: str, lib_layout: str, state: AppState) -> None:
     # # create the temporary qiime directory
     Path(output_dir).mkdir(parents=True, exist_ok=True)
 
-    # organize fastq types
-    files = os.listdir(input_dir)
+    # organize fastq types (only .fastq files, ignore .sra and other artefacts)
+    files = [f for f in os.listdir(input_dir) if f.endswith('.fastq')]
     if files:
         # if single, they will all be contained in files list
         forward, reverse = [], []

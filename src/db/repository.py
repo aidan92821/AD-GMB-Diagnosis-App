@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from sqlalchemy.orm import Session
-from sqlalchemy import select, desc, exists, or_, and_
+from sqlalchemy import select, delete, desc, exists, or_, and_
 
 from src.db.db_models import (
     User, Project, Run, Genus, Feature, FeatureCount,
@@ -225,6 +225,19 @@ def get_feature(session: Session, run_id: int, feature_id: str) -> Feature:
 def list_features_for_run(session: Session, run_id: int) -> list[Feature]:
     stmt = select(Feature).where(Feature.run_id == run_id)
     return list(session.execute(stmt).scalars().all())
+
+
+def delete_features_for_run(session: Session, run_id: int) -> None:
+    """Delete all Feature rows for a run (cascades to FeatureCount via ORM relationship)."""
+    features = session.execute(select(Feature).where(Feature.run_id == run_id)).scalars().all()
+    for feat in features:
+        session.delete(feat)
+
+
+def delete_genus_for_run(session: Session, run_id: int) -> None:
+    """Delete all Genus rows for a run."""
+    from src.db.db_models import Genus
+    session.execute(delete(Genus).where(Genus.run_id == run_id))
 
 
 # ==== FEATURE COUNT ====

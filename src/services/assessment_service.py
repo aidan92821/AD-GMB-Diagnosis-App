@@ -48,6 +48,8 @@ from src.db.repository import (
     get_pcoa_for_project,
     create_simulation as repo_create_simulation,
     get_simulations_for_run as repo_get_simulations_for_run,
+    delete_features_for_run,
+    delete_genus_for_run,
 )
 
 
@@ -262,25 +264,27 @@ def ingest_run_data(
         # Convert list of tuples to dict for the repository layer
         genus_abundances = dict(genus_rows)
 
-        # Insert genus-level relative abundances
-        if not get_run_exists_genus_table(session, run_id):
-            create_genus_bulk(session, run=run, genus_abundances=genus_abundances)
+        # Replace genus-level relative abundances (delete stale, re-insert fresh)
+        if get_run_exists_genus_table(session, run_id):
+            delete_genus_for_run(session, run_id)
+        create_genus_bulk(session, run=run, genus_abundances=genus_abundances)
 
-        # Insert each ASV feature (sequence + taxonomy)
-        if not get_run_exists_feature_table(session, run_id):
-            for f in features:
-                create_feature(
-                    session,
-                    run=run,
-                    feature_id=f["feature_id"],
-                    sequence=f.get("sequence"),
-                    taxonomy=f.get("taxonomy"),
-                )
+        # Replace ASV features and counts (cascade delete handles FeatureCount FK)
+        if get_run_exists_feature_table(session, run_id):
+            delete_features_for_run(session, run_id)
+            session.flush()
+        for f in features:
+            create_feature(
+                session,
+                run=run,
+                feature_id=f["feature_id"],
+                sequence=f.get("sequence"),
+                taxonomy=f.get("taxonomy"),
+            )
 
-        # Flush features to DB before inserting counts — feature_count has a FK to feature
+        # Flush features before inserting counts — feature_count has a FK to feature
         session.flush()
-        if not get_run_exists_feature_count_table(session, run_id):
-            create_feature_count_bulk(session, run_id=run_id, counts=feature_counts)
+        create_feature_count_bulk(session, run_id=run_id, counts=feature_counts)
 
         session.commit()
         return {
@@ -358,8 +362,7 @@ def get_run_feature_ids(run_id: int) -> list:
     session = SessionLocal()
     try:
         feats = list_features_for_run(session=session, run_id=run_id)
-        feat_ids = [feat['feature_id'] for feat in feats]
-        return feat_ids
+        return [feat.feature_id for feat in feats]
     except RepositoryError as e:
         raise ServiceError(str(e)) from e
     finally:
@@ -392,20 +395,22 @@ def get_is_run_in_feature_count(run_id: int) -> bool:
         session.close()
 
 # ==== Tree ====
-def get_tree(project_id: int) -> dict | None:
+def get_tree(project_id: int) -> dict:
     """
-    Return the phylogenetic tree path for a project, or None if not yet uploaded.
+    Return the phylogenetic tree for a project.
+    Raises ServiceError when no tree has been stored yet.
     """
     session = SessionLocal()
     try:
         tree = get_tree_for_project(session, project_id)
         if tree is None:
-            return None
+            raise ServiceError(f"No tree found for project_id={project_id}")
         return {
-            "tree_id": tree.tree_id,
-            "project_id": tree.project_id,
-            "newick_path": tree.newick_path,
-            "created_at": tree.created_at.isoformat(),
+            "tree_id":       tree.tree_id,
+            "project_id":    tree.project_id,
+            "newick_path":   tree.newick_path,
+            "newick_string": tree.newick_path,   # newick_path column stores the Newick string
+            "created_at":    tree.created_at.isoformat(),
         }
     except RepositoryError as e:
         raise ServiceError(str(e)) from e
@@ -416,19 +421,22 @@ def get_tree(project_id: int) -> dict | None:
 # ==== Alpha diversity ====
 def store_alpha_diversities(run_id: int, metrics: dict[str, float]) -> list[dict]:
     """
-    Store one or more alpha diversity metrics for a run.
+    Store (or replace) one or more alpha diversity metrics for a run.
     metrics: {"shannon": 2.45, "simpson": 0.88, ...}
     """
+    from sqlalchemy import delete as _delete
+    from src.db.db_models import AlphaDiversity as _AlphaDiversity
     session = SessionLocal()
     try:
-        if not get_run_exists_alpha_table(session=session, run_id=run_id):
-            run = get_run(session, run_id)
-            rows = []
-            for metric, value in metrics.items():
-                alpha = create_alpha_diversity(session, run=run, metric=metric, value=value)
-                rows.append({"run_id": run_id, "metric": alpha.metric, "value": alpha.value})
-            session.commit()
-            return rows
+        run = get_run(session, run_id)
+        # Delete any stale rows so re-runs produce fresh values
+        session.execute(_delete(_AlphaDiversity).where(_AlphaDiversity.run_id == run_id))
+        rows = []
+        for metric, value in metrics.items():
+            alpha = create_alpha_diversity(session, run=run, metric=metric, value=value)
+            rows.append({"run_id": run_id, "metric": alpha.metric, "value": alpha.value})
+        session.commit()
+        return rows
     except RepositoryError as e:
         session.rollback()
         raise ServiceError(str(e)) from e
@@ -458,23 +466,31 @@ def store_beta_diversity(
         value: float,
 ) -> dict:
     """
-    Store a single pairwise beta diversity result between two runs.
-    Raises ServiceError if either run does not exist or run_id_1 == run_id_2.
+    Store (or replace) a single pairwise beta diversity result between two runs.
     """
+    from sqlalchemy import delete as _delete
+    from src.db.db_models import BetaDiversity as _BetaDiversity
     session = SessionLocal()
     try:
-        if not get_run_exists_beta_table(session=session, run_id_1=run_id_1,
-                                         run_id_2=run_id_2, metric=metric):
-            r1 = get_run(session, run_id_1)
-            r2 = get_run(session, run_id_2)
-            beta = repo_create_beta_diversity(session, run_1=r1, run_2=r2, metric=metric, value=value)
-            session.commit()
-            return {
-                "run_id_1": beta.run_id_1,
-                "run_id_2": beta.run_id_2,
-                "metric": beta.metric,
-                "value": beta.value,
-            }
+        # Delete any existing row for this pair+metric before inserting fresh value
+        id_lo, id_hi = sorted([run_id_1, run_id_2])
+        session.execute(
+            _delete(_BetaDiversity).where(
+                _BetaDiversity.run_id_1 == id_lo,
+                _BetaDiversity.run_id_2 == id_hi,
+                _BetaDiversity.metric   == metric,
+            )
+        )
+        r1 = get_run(session, run_id_1)
+        r2 = get_run(session, run_id_2)
+        beta = repo_create_beta_diversity(session, run_1=r1, run_2=r2, metric=metric, value=value)
+        session.commit()
+        return {
+            "run_id_1": beta.run_id_1,
+            "run_id_2": beta.run_id_2,
+            "metric":   beta.metric,
+            "value":    beta.value,
+        }
     except RepositoryError as e:
         session.rollback()
         raise ServiceError(str(e)) from e
@@ -667,21 +683,21 @@ def save_ncbi_project(
             srr = run.get("accession", "").strip()
             if not srr:
                 continue
-            # Skip runs already registered (unique constraint on srr_accession)
             try:
-                get_run_by_srr(session, srr)
-                continue          # already exists — skip
+                existing = get_run_by_srr(session, srr)
+                # Re-parent to the new project so all project-scoped queries
+                # (beta diversity, PCoA) use the correct project_id.
+                existing.project_id = project.project_id
+                session.flush()
             except NotFoundError:
-                pass              # not found — safe to insert
-
-            repo_create_run(
-                session,
-                project=project,
-                source="ncbi",
-                srr_accession=srr,
-                bio_proj_accession=bio_proj_accession,
-                library_layout=run.get("layout"),
-            )
+                repo_create_run(
+                    session,
+                    project=project,
+                    source="ncbi",
+                    srr_accession=srr,
+                    bio_proj_accession=bio_proj_accession,
+                    library_layout=run.get("layout"),
+                )
 
         session.commit()
         return {
@@ -781,6 +797,23 @@ def get_simulation_genus(simulation_id: int) -> list[dict]:
         session.close()
 
 
+def get_project_feature_taxonomy(project_id: int) -> dict[str, str]:
+    """Return {feature_id: taxonomy_string} for every run in a project."""
+    session = SessionLocal()
+    try:
+        runs = list_runs_for_project(session, project_id)
+        result: dict[str, str] = {}
+        for run in runs:
+            for feat in list_features_for_run(session, run.run_id):
+                if feat.taxonomy:
+                    result[feat.feature_id] = feat.taxonomy
+        return result
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
 # ==== Private helpers ====
 def _risk_label(probability: float) -> str:
     """Translate a risk percentage into a human-readable label."""
@@ -791,20 +824,27 @@ def _risk_label(probability: float) -> str:
     return "High"
 
 
-def create_tree_instance(project_id: int, newick_path: str):
-
+def create_tree_instance(project_id: int, newick_string: str) -> dict | None:
+    """
+    Persist the Newick tree string for a project.
+    The newick_string is stored in the newick_path column (column predates in-DB storage).
+    Returns a tree-info dict on success, or None if storage fails (best-effort).
+    """
+    if not newick_string:
+        return None
     session = SessionLocal()
-
     try:
-        tree = create_tree(session=session, project=project_id, newick_path=newick_path)
+        project = get_project(session, project_id)
+        tree = create_tree(session=session, project=project, newick_path=newick_string)
+        session.commit()
         return {
-            'tree_id': tree['tree_id'],
-            'project_id': tree['project_id'],
-            'newick_path': tree['newick_path'],
-            'created_at': tree['created_at'],
+            "tree_id":       tree.tree_id,
+            "project_id":    tree.project_id,
+            "newick_string": tree.newick_path,
+            "created_at":    tree.created_at.isoformat() if tree.created_at else None,
         }
-    except Exception as e:
-        raise ServiceError(str(e)) from e
+    except Exception:
+        session.rollback()
+        return None
     finally:
         session.close()
-        return None
