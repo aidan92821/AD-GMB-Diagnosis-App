@@ -315,6 +315,7 @@ def qiime_preprocess(runner: QiimeRunner, bioproject: str, lib_layout: str, call
     else:
         create_tables(runner, bioproject=bioproject, lib_layout=lib_layout,
                       has_taxonomy=has_taxonomy, callback=callback)
+    create_tables(runner, bioproject=bioproject, lib_layout=lib_layout, callback=callback)
 
     _log(f"[{lib_layout}] Preprocessing complete.")
     
