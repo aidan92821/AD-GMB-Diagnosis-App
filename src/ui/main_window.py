@@ -1397,6 +1397,7 @@ class MainWindow(QMainWindow):
             self._phylo_page,
             self._alzheimer_page,
             self._simulation_page,
+            self._export_page,
         ]:
             if hasattr(page, "load"):
                 try:

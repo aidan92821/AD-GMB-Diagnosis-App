@@ -345,8 +345,107 @@ def _load_trained_model(use_imaging: bool = False) -> "AlzheimerRiskEnsemble | N
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  Main inference entry point
+#  Genus data fetching
 # ═════════════════════════════════════════════════════════════════════════════
+
+def get_genus_abundances(db_project_id: int) -> dict[str, float]:
+    """
+    Fetch genus relative abundances from the database for a project and
+    average them across all runs.
+
+    Parameters
+    ----------
+    db_project_id : int
+        The integer project primary key stored on AppState.db_project_id.
+
+    Returns
+    -------
+    dict[str, float]
+        Genus name → average relative abundance across all runs in the project.
+        Empty dict if the project has no genus data yet.
+    """
+    from src.services.assessment_service import get_project_overview, get_genus_data
+
+    overview = get_project_overview(db_project_id)
+    run_ids  = overview.get("run_ids", [])
+
+    if not run_ids:
+        return {}
+
+    totals: dict[str, float] = {}
+    for rid in run_ids:
+        for item in get_genus_data(rid):
+            g = item["genus"]
+            v = item["relative_abundance"]
+            totals[g] = totals.get(g, 0.0) + v
+
+    n = len(run_ids)
+    return {g: v / n for g, v in totals.items()}
+
+
+def get_last_run_genus_abundances() -> dict[str, float]:
+    """
+    Fallback: fetch genus abundances from the most recent run in the DB
+    that has genus data, regardless of project.
+
+    Returns
+    -------
+    dict[str, float]
+        Genus name → relative abundance for the latest run.
+        Empty dict if no genus data exists in the DB at all.
+    """
+    from src.db.database import SessionLocal
+    from src.db.db_models import Run, Genus
+    from sqlalchemy import select
+
+    with SessionLocal() as session:
+        # Find the run with the highest run_id that has genus rows
+        stmt = (
+            select(Run)
+            .join(Genus, Genus.run_id == Run.run_id)
+            .order_by(Run.run_id.desc())
+            .limit(1)
+        )
+        run = session.execute(stmt).scalar_one_or_none()
+        if run is None:
+            return {}
+
+        print(f"[Genus] fallback to latest run: run_id={run.run_id}  srr={run.srr_accession}")
+        return {
+            g.genus: g.relative_abundance
+            for g in run.genus_data
+            if g.simulation_id is None   # exclude simulation rows
+        }
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  Main inference entry points
+# ═════════════════════════════════════════════════════════════════════════════
+
+def predict_from_project(
+    db_project_id: int,
+    apoe: dict[str, int],
+    mri_array: Optional[np.ndarray] = None,
+) -> dict:
+    """
+    Fetch genus data from DB then run the full AD risk prediction.
+
+    Parameters
+    ----------
+    db_project_id : int
+        AppState.db_project_id — the project whose runs supply genus data.
+    apoe : dict
+        {"e2": int, "e3": int, "e4": int}  (each 0–2, sum == 2)
+    mri_array : np.ndarray or None
+        Float32 (128, 128, 128) from mri_preprocessing.preprocess_mri().
+
+    Returns
+    -------
+    Same dict as predict_ad_risk().
+    """
+    genus_abundances = get_genus_abundances(db_project_id)
+    return predict_ad_risk(genus_abundances, apoe, mri_array)
+
 
 def predict_ad_risk(
     genus_abundances: dict[str, float],

@@ -30,7 +30,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject
 
-from models.example_data import PROJECT
+from models.app_state import AppState
 from resources.styles import (
     BG_PAGE, BG_CARD, BORDER,
     TEXT_H, TEXT_M, TEXT_HINT,
@@ -55,17 +55,18 @@ class _PdfWorker(QObject):
     finished = pyqtSignal(str)
     errored  = pyqtSignal(str)
 
-    def __init__(self, output_path: str, sections: list[str]) -> None:
+    def __init__(self, output_path: str, sections: list[str], state) -> None:
         super().__init__()
         self._path     = output_path
         self._sections = sections
+        self._state    = state
 
     def run(self) -> None:
         try:
             self.progress.emit(5)
             from services.pdf_exporter import build_report
             self.progress.emit(25)
-            result = build_report(self._path)
+            result = build_report(self._path, sections=self._sections, state=self._state)
             self.progress.emit(100)
             self.finished.emit(str(result))
         except Exception as exc:          # noqa: BLE001
@@ -121,13 +122,14 @@ class _SectionCheck(QWidget):
 class ExportPage(QWidget):
 
     _SECTIONS = [
-        ("cover",     "Cover page",        "Project title, metadata summary"),
-        ("overview",  "Project overview",  "Stat cards: runs, ASVs, genera, library"),
-        ("taxonomy",  "Taxonomy",          "Bar charts, pie charts, stacked bars per run"),
-        ("diversity", "Diversity",         "Alpha boxplots · beta heatmap · PCoA scatter"),
-        ("asv",       "ASV feature table", "Full ASV counts and relative abundance"),
-        ("phylogeny", "Phylogenetic tree", "IQ-TREE topology for all four runs"),
-        ("alzheimer", "Alzheimer risk",    "Biomarker grid and gut-brain axis risk score"),
+        ("cover",      "Cover page",           "Project title, metadata summary"),
+        ("overview",   "Project overview",     "Stat cards: runs, ASVs, genera, library"),
+        ("taxonomy",   "Taxonomy",             "Bar charts, pie charts, stacked bars per run"),
+        ("diversity",  "Diversity",            "Alpha boxplots · beta heatmap · PCoA scatter"),
+        ("asv",        "ASV feature table",    "Full ASV counts and relative abundance"),
+        ("phylogeny",  "Phylogenetic tree",    "IQ-TREE rendered tree with tip/node stats"),
+        ("alzheimer",  "Alzheimer risk",       "Biomarker grid and gut-brain axis risk score"),
+        ("simulation", "Gut simulation",       "30-day ODE model: abundance, diversity, AD risk"),
     ]
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -136,6 +138,7 @@ class ExportPage(QWidget):
         self._worker: _PdfWorker | None = None
         self._checks: list[_SectionCheck] = []
         self._saved_path: str = ""
+        self._state: AppState | None = None
         self._build()
 
     # ── Build ─────────────────────────────────────────────────────────────────
@@ -162,15 +165,12 @@ class ExportPage(QWidget):
         title.setStyleSheet(f"font-size:20px;font-weight:700;color:{TEXT_H};")
         blay.addWidget(title)
 
-        sub = QLabel(
-            f"Generate a complete PDF report for  <b>{PROJECT['project_id']}</b>  "
-            f"·  {PROJECT['bioproject_id']}.  "
-            "Deselect any sections you don't need."
-        )
-        sub.setTextFormat(Qt.TextFormat.RichText)
-        sub.setWordWrap(True)
-        sub.setStyleSheet(f"font-size:13px;color:{TEXT_M};")
-        blay.addWidget(sub)
+        self._sub_lbl = QLabel("Generate a complete PDF report for the current project. "
+                               "Deselect any sections you don't need.")
+        self._sub_lbl.setTextFormat(Qt.TextFormat.RichText)
+        self._sub_lbl.setWordWrap(True)
+        self._sub_lbl.setStyleSheet(f"font-size:13px;color:{TEXT_M};")
+        blay.addWidget(self._sub_lbl)
 
         # Section selector card
         blay.addWidget(self._build_sections_card())
@@ -347,6 +347,18 @@ class ExportPage(QWidget):
 
         return bar
 
+    # ── State ─────────────────────────────────────────────────────────────────
+
+    def load(self, state: "AppState") -> None:
+        self._state = state
+        if state and state.has_project:
+            self._sub_lbl.setText(
+                f"Generate a complete PDF report for  "
+                f"<b>{state.bioproject_id}</b>"
+                f"{'  ·  ' + state.title if state.title else ''}.  "
+                "Deselect any sections you don't need."
+            )
+
     # ── Slots ─────────────────────────────────────────────────────────────────
 
     def _toggle_all(self, state: bool) -> None:
@@ -392,7 +404,7 @@ class ExportPage(QWidget):
 
         # Background thread
         self._thread = QThread(self)
-        self._worker = _PdfWorker(output, selected)
+        self._worker = _PdfWorker(output, selected, self._state)
         self._worker.moveToThread(self._thread)
 
         self._thread.started.connect(self._worker.run)

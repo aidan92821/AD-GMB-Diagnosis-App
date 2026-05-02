@@ -2442,6 +2442,8 @@ class AlzheimerPage(QWidget):
             self._run_model(mri_array=None)
 
     def _on_preprocess_done(self, mri_array):
+        print(f"[MRI] shape={mri_array.shape}  dtype={mri_array.dtype}")
+        print(f"[MRI] min={mri_array.min():.3f}  max={mri_array.max():.3f}  mean={mri_array.mean():.3f}")
         self._assess_status.setText(
             f"MRI preprocessed — shape {mri_array.shape}. Computing risk…"
         )
@@ -2460,33 +2462,28 @@ class AlzheimerPage(QWidget):
     # ── Model call ────────────────────────────────────────────────────────────
     def _run_model(self, mri_array=None):
         try:
-            from src.services.ad_risk_model import predict_ad_risk
+            from src.services.ad_risk_model import (
+                predict_from_project, predict_ad_risk,
+                get_genus_abundances, get_last_run_genus_abundances,
+            )
 
-            # ── Genus abundances ──────────────────────────────────────────────
-            # Prefer fresh DB data (populated by QIIME2 pipeline) when available
-            genus_abundances: dict[str, float] = {}
+            apoe = {
+                "e2": self._apoe_spins["ε2"].value(),
+                "e3": self._apoe_spins["ε3"].value(),
+                "e4": self._apoe_spins["ε4"].value(),
+            }
+            print(f"[APOE] user input: {apoe}")
 
+            # Priority 1: project linked in state → query all runs for that project
             if self._state and self._state.db_project_id:
-                try:
-                    from src.services.assessment_service import (
-                        get_project_overview, get_genus_data,
-                    )
-                    overview = get_project_overview(self._state.db_project_id)
-                    run_ids  = overview.get("run_ids", [])
-                    if run_ids:
-                        for rid in run_ids:
-                            for item in get_genus_data(rid):
-                                g = item["genus"]
-                                v = item["relative_abundance"]
-                                genus_abundances[g] = genus_abundances.get(g, 0.0) + v
-                        # average across runs
-                        n = len(run_ids)
-                        genus_abundances = {g: v / n for g, v in genus_abundances.items()}
-                except Exception:
-                    pass  # fall through to state cache below
+                genus_abundances = get_genus_abundances(self._state.db_project_id)
+                print(f"[Genus] source=DB project  total genera={len(genus_abundances)}")
+                print(f"[Genus] {genus_abundances}")
+                result = predict_from_project(self._state.db_project_id, apoe, mri_array)
 
-            # Fall back to in-app analysis cache stored on state
-            if not genus_abundances and self._state and self._state.genus_abundances:
+            # Priority 2: in-app analysis cache on state
+            elif self._state and self._state.genus_abundances:
+                genus_abundances = {}
                 run_count = len(self._state.genus_abundances)
                 for run_data in self._state.genus_abundances.values():
                     for item in run_data:
@@ -2495,14 +2492,16 @@ class AlzheimerPage(QWidget):
                         else:
                             g, v = item[0], item[1]
                         genus_abundances[g] = genus_abundances.get(g, 0.0) + v / run_count
+                print(f"[Genus] source=state cache  total genera={len(genus_abundances)}")
+                print(f"[Genus] {genus_abundances}")
+                result = predict_ad_risk(genus_abundances, apoe, mri_array)
 
-            apoe = {
-                "e2": self._apoe_spins["ε2"].value(),
-                "e3": self._apoe_spins["ε3"].value(),
-                "e4": self._apoe_spins["ε4"].value(),
-            }
-
-            result = predict_ad_risk(genus_abundances, apoe, mri_array)
+            # Priority 3: most recent run with genus data in DB
+            else:
+                genus_abundances = get_last_run_genus_abundances()
+                print(f"[Genus] source=last DB run  total genera={len(genus_abundances)}")
+                print(f"[Genus] {genus_abundances}")
+                result = predict_ad_risk(genus_abundances, apoe, mri_array)
 
             self._run_btn.setEnabled(True)
             source   = result.get("model_source", "heuristic")
