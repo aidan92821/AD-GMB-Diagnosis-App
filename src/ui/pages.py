@@ -2261,6 +2261,7 @@ class _MriPreprocessWorker(QObject):
 
 
 class AlzheimerPage(QWidget):
+    assessment_requested = pyqtSignal(dict, str)
     def __init__(self, parent=None):
         super().__init__(parent)
         self._build()
@@ -2337,7 +2338,7 @@ class AlzheimerPage(QWidget):
             "QPushButton:pressed { background: #047857; }"
             "QPushButton:disabled { background: #9CA3AF; }"
         )
-        self._run_btn.clicked.connect(self._run_assessment)
+        self._run_btn.clicked.connect(self._on_run_assess_clicked)
         run_row.addStretch()
         run_row.addWidget(self._run_btn)
         inp_lay.addLayout(run_row)
@@ -2395,7 +2396,28 @@ class AlzheimerPage(QWidget):
 
         # Initial render with example data
         self._state: AppState | None = None
-        self._render(ALZHEIMER_RISK)
+        self._render(ALZHEIMER_RISK, self._state)
+
+    # TODO restore run_button
+    def _restore_run_btn(self) -> None:
+        pass
+
+    def _on_run_assess_clicked(self):
+        apoe = {
+            "e2": self._apoe_spins["ε2"].value(),
+            "e3": self._apoe_spins["ε3"].value(),
+            "e4": self._apoe_spins["ε4"].value(),
+        }
+
+        mri = self._nii_path
+
+        # TODO transform button to cancel
+
+        # TODO set the inputs to enabled = False
+
+        # transmit the signal
+        self.assessment_requested.emit(apoe, mri)
+
 
     # ── MRI browse ────────────────────────────────────────────────────────────
     def _browse_mri(self):
@@ -2419,110 +2441,110 @@ class AlzheimerPage(QWidget):
         self._apoe_status.setStyleSheet("color: #EF4444;")
         return False
 
-    # ── Run assessment ────────────────────────────────────────────────────────
-    def _run_assessment(self):
-        if not self._validate_apoe():
-            return
+    # # ── Run assessment ────────────────────────────────────────────────────────
+    # def _run_assessment(self):
+    #     if not self._validate_apoe():
+    #         return
 
-        self._run_btn.setEnabled(False)
+    #     self._run_btn.setEnabled(False)
 
-        if self._nii_path:
-            self._assess_status.setText("Preprocessing MRI scan…")
-            self._mri_thread = QThread(self)
-            self._mri_worker = _MriPreprocessWorker(self._nii_path)
-            self._mri_worker.moveToThread(self._mri_thread)
-            self._mri_thread.started.connect(self._mri_worker.run)
-            self._mri_worker.finished.connect(self._on_preprocess_done)
-            self._mri_worker.errored.connect(self._on_preprocess_error)
-            self._mri_worker.finished.connect(self._mri_thread.quit)
-            self._mri_worker.errored.connect(self._mri_thread.quit)
-            self._mri_thread.start()
-        else:
-            self._assess_status.setText("Running assessment (no MRI)…")
-            self._run_model(mri_array=None)
+    #     if self._nii_path:
+    #         self._assess_status.setText("Preprocessing MRI scan…")
+    #         self._mri_thread = QThread(self)
+    #         self._mri_worker = _MriPreprocessWorker(self._nii_path)
+    #         self._mri_worker.moveToThread(self._mri_thread)
+    #         self._mri_thread.started.connect(self._mri_worker.run)
+    #         self._mri_worker.finished.connect(self._on_preprocess_done)
+    #         self._mri_worker.errored.connect(self._on_preprocess_error)
+    #         self._mri_worker.finished.connect(self._mri_thread.quit)
+    #         self._mri_worker.errored.connect(self._mri_thread.quit)
+    #         self._mri_thread.start()
+    #     else:
+    #         self._assess_status.setText("Running assessment (no MRI)…")
+    #         self._run_model(mri_array=None)
 
-    def _on_preprocess_done(self, mri_array):
-        self._assess_status.setText(
-            f"MRI preprocessed — shape {mri_array.shape}. Computing risk…"
-        )
-        self._run_model(mri_array=mri_array)
+    # def _on_preprocess_done(self, mri_array):
+    #     self._assess_status.setText(
+    #         f"MRI preprocessed — shape {mri_array.shape}. Computing risk…"
+    #     )
+    #     self._run_model(mri_array=mri_array)
 
-    def _on_preprocess_error(self, msg: str):
-        if "nibabel" in msg or "scipy" in msg:
-            self._assess_status.setText(
-                "MRI dependencies missing — run:  pip install nibabel scipy\n"
-                "Running assessment without MRI…"
-            )
-        else:
-            self._assess_status.setText(f"MRI error: {msg}  — running without MRI…")
-        self._run_model(mri_array=None)
+    # def _on_preprocess_error(self, msg: str):
+    #     if "nibabel" in msg or "scipy" in msg:
+    #         self._assess_status.setText(
+    #             "MRI dependencies missing — run:  pip install nibabel scipy\n"
+    #             "Running assessment without MRI…"
+    #         )
+    #     else:
+    #         self._assess_status.setText(f"MRI error: {msg}  — running without MRI…")
+    #     self._run_model(mri_array=None)
 
-    # ── Model call ────────────────────────────────────────────────────────────
-    def _run_model(self, mri_array=None):
-        try:
-            from src.services.ad_risk_model import predict_ad_risk
+    # # ── Model call ────────────────────────────────────────────────────────────
+    # def _run_model(self, mri_array=None):
+    #     try:
+    #         from src.services.ad_risk_model import predict_ad_risk
 
-            # ── Genus abundances ──────────────────────────────────────────────
-            # Prefer fresh DB data (populated by QIIME2 pipeline) when available
-            genus_abundances: dict[str, float] = {}
+    #         # ── Genus abundances ──────────────────────────────────────────────
+    #         # Prefer fresh DB data (populated by QIIME2 pipeline) when available
+    #         genus_abundances: dict[str, float] = {}
 
-            if self._state and self._state.db_project_id:
-                try:
-                    from src.services.assessment_service import (
-                        get_project_overview, get_genus_data,
-                    )
-                    overview = get_project_overview(self._state.db_project_id)
-                    run_ids  = overview.get("run_ids", [])
-                    if run_ids:
-                        for rid in run_ids:
-                            for item in get_genus_data(rid):
-                                g = item["genus"]
-                                v = item["relative_abundance"]
-                                genus_abundances[g] = genus_abundances.get(g, 0.0) + v
-                        # average across runs
-                        n = len(run_ids)
-                        genus_abundances = {g: v / n for g, v in genus_abundances.items()}
-                except Exception:
-                    pass  # fall through to state cache below
+    #         if self._state and self._state.db_project_id:
+    #             try:
+    #                 from src.services.assessment_service import (
+    #                     get_project_overview, get_genus_data,
+    #                 )
+    #                 overview = get_project_overview(self._state.db_project_id)
+    #                 run_ids  = overview.get("run_ids", [])
+    #                 if run_ids:
+    #                     for rid in run_ids:
+    #                         for item in get_genus_data(rid):
+    #                             g = item["genus"]
+    #                             v = item["relative_abundance"]
+    #                             genus_abundances[g] = genus_abundances.get(g, 0.0) + v
+    #                     # average across runs
+    #                     n = len(run_ids)
+    #                     genus_abundances = {g: v / n for g, v in genus_abundances.items()}
+    #             except Exception:
+    #                 pass  # fall through to state cache below
 
-            # Fall back to in-app analysis cache stored on state
-            if not genus_abundances and self._state and self._state.genus_abundances:
-                run_count = len(self._state.genus_abundances)
-                for run_data in self._state.genus_abundances.values():
-                    for item in run_data:
-                        if isinstance(item, dict):
-                            g, v = item["genus"], item["relative_abundance"]
-                        else:
-                            g, v = item[0], item[1]
-                        genus_abundances[g] = genus_abundances.get(g, 0.0) + v / run_count
+    #         # Fall back to in-app analysis cache stored on state
+    #         if not genus_abundances and self._state and self._state.genus_abundances:
+    #             run_count = len(self._state.genus_abundances)
+    #             for run_data in self._state.genus_abundances.values():
+    #                 for item in run_data:
+    #                     if isinstance(item, dict):
+    #                         g, v = item["genus"], item["relative_abundance"]
+    #                     else:
+    #                         g, v = item[0], item[1]
+    #                     genus_abundances[g] = genus_abundances.get(g, 0.0) + v / run_count
 
-            apoe = {
-                "e2": self._apoe_spins["ε2"].value(),
-                "e3": self._apoe_spins["ε3"].value(),
-                "e4": self._apoe_spins["ε4"].value(),
-            }
+    #         apoe = {
+    #             "e2": self._apoe_spins["ε2"].value(),
+    #             "e3": self._apoe_spins["ε3"].value(),
+    #             "e4": self._apoe_spins["ε4"].value(),
+    #         }
 
-            result = predict_ad_risk(genus_abundances, apoe, mri_array)
+    #         result = predict_ad_risk(genus_abundances, apoe, mri_array)
 
-            self._run_btn.setEnabled(True)
-            source   = result.get("model_source", "heuristic")
-            mri_note = "· MRI included" if mri_array is not None else "· no MRI"
-            src_note = "trained model" if source == "trained" else "heuristic (place model files in data/models/)"
-            self._assess_status.setText(
-                f"Risk: {result['predicted_pct']:.0f}%  "
-                f"Confidence: {result['confidence_pct']:.0f}%  "
-                f"{mri_note}  ·  {src_note}"
-            )
-            self._render(result)
+    #         self._run_btn.setEnabled(True)
+    #         source   = result.get("model_source", "heuristic")
+    #         mri_note = "· MRI included" if mri_array is not None else "· no MRI"
+    #         src_note = "trained model" if source == "trained" else "heuristic (place model files in data/models/)"
+    #         self._assess_status.setText(
+    #             f"Risk: {result['predicted_pct']:.0f}%  "
+    #             f"Confidence: {result['confidence_pct']:.0f}%  "
+    #             f"{mri_note}  ·  {src_note}"
+    #         )
+    #         self._render(result)
 
-        except Exception as exc:
-            self._run_btn.setEnabled(True)
-            self._assess_status.setText(f"Model error: {exc}")
+    #     except Exception as exc:
+    #         self._run_btn.setEnabled(True)
+    #         self._assess_status.setText(f"Model error: {exc}")
 
     def load(self, state: AppState):
         self._state = state
         d = state.risk_result if (state and state.risk_result) else ALZHEIMER_RISK
-        self._render(d)
+        self._render(d, state)
 
     # ── Render results ────────────────────────────────────────────────────────
     def _modality_bar(self, label: str, pct: float, color: str) -> QWidget:
@@ -2554,10 +2576,12 @@ class AlzheimerPage(QWidget):
         lay.addWidget(bar)
         return w
 
-    def _render(self, d: dict):
-        pct   = d.get("predicted_pct", 0)
-        conf  = d.get("confidence_pct", 0)
-        level = d.get("risk_level", "unknown").capitalize()
+    def _render(self, d: dict, state: AppState):
+        pct   = state.risk_result * 100 if state and state.risk_result else 0
+        # conf  = d.get("confidence_pct", 0)
+        # level = d.get("risk_level", "unknown").capitalize()
+        conf = 79 # TODO
+        level = "high" if pct > 50 else "low" # TODO
 
         self._pct_lbl.setText(f"{pct:.0f}%")
         self._lvl_lbl.setText(level)
@@ -2570,70 +2594,81 @@ class AlzheimerPage(QWidget):
         inner_lay.setSpacing(12)
 
         # ── Modality contributions ─────────────────────────────────────────────
-        apoe_pct  = d.get("apoe_score",  0.5) * 100
-        micro_pct = d.get("micro_score", 0.5) * 100
-        mri_score = d.get("mri_score")
-        mri_pct   = (mri_score * 100) if mri_score is not None else None
+        # apoe_pct  = d.get("apoe_score",  0.5) * 100
+        # micro_pct = d.get("micro_score", 0.5) * 100
+        # mri_score = d.get("mri_score")
+        # mri_pct   = (mri_score * 100) if mri_score is not None else None
 
-        mod_card = card()
-        mod_lay  = mod_card.layout()
-        mod_lay.addWidget(section_title("Modality Contributions"))
-        mod_lay.addWidget(label_hint(
-            "Individual risk contribution from each data source "
-            "(higher = more AD-like signal in that modality)"
-        ))
-        mod_lay.addSpacing(4)
-        mod_lay.addWidget(self._modality_bar("APOE Genotype (PRS)",       apoe_pct,  "#6366F1"))
-        mod_lay.addWidget(self._modality_bar("Gut Microbiome Dysbiosis",  micro_pct, "#10B981"))
-        if mri_pct is not None:
-            mod_lay.addWidget(self._modality_bar("MRI Structural Score",  mri_pct,   "#F59E0B"))
-        else:
-            no_mri = label_hint("MRI: not provided — upload a .nii scan to include structural data")
-            no_mri.setWordWrap(True)
-            mod_lay.addWidget(no_mri)
-        inner_lay.addWidget(mod_card)
+        # mod_card = card()
+        # mod_lay  = mod_card.layout()
+        # mod_lay.addWidget(section_title("Modality Contributions"))
+        # mod_lay.addWidget(label_hint(
+        #     "Individual risk contribution from each data source "
+        #     "(higher = more AD-like signal in that modality)"
+        # ))
+        # mod_lay.addSpacing(4)
+        # mod_lay.addWidget(self._modality_bar("APOE Genotype (PRS)",       apoe_pct,  "#6366F1"))
+        # mod_lay.addWidget(self._modality_bar("Gut Microbiome Dysbiosis",  micro_pct, "#10B981"))
+        # if mri_pct is not None:
+        #     mod_lay.addWidget(self._modality_bar("MRI Structural Score",  mri_pct,   "#F59E0B"))
+        # else:
+        #     no_mri = label_hint("MRI: not provided — upload a .nii scan to include structural data")
+        #     no_mri.setWordWrap(True)
+        #     mod_lay.addWidget(no_mri)
+        # inner_lay.addWidget(mod_card)
 
         # ── Biomarker grid ────────────────────────────────────────────────────
         bm_section = card()
         bm_section.layout().addWidget(section_title("Key biomarkers"))
 
-        biomarkers = d.get("biomarkers", [])
-        cols = 3
-        grid = QGridLayout()
-        grid.setSpacing(10)
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(2, 1)
+        # biomarkers = d.get("biomarkers", [])
+        if state:
+            biomarkers = state.contributions
+            cols = 3
+            grid = QGridLayout()
+            grid.setSpacing(10)
+            grid.setColumnStretch(0, 1)
+            grid.setColumnStretch(1, 1)
+            grid.setColumnStretch(2, 1)
 
-        for idx, bm in enumerate(biomarkers):
-            row, col = divmod(idx, cols)
-            f = QFrame()
-            f.setObjectName("bm_card")
-            f.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-            lay = QVBoxLayout(f)
-            lay.setContentsMargins(12, 10, 12, 10)
-            lay.setSpacing(4)
+            # for idx, bm in enumerate(biomarkers):
+            for idx, (genus, contribution) in enumerate(biomarkers.items()):
+                row, col = divmod(idx, cols)
+                f = QFrame()
+                f.setObjectName("bm_card")
+                f.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+                lay = QVBoxLayout(f)
+                lay.setContentsMargins(12, 10, 12, 10)
+                lay.setSpacing(4)
 
-            nm = QLabel(bm["name"])
-            nm.setObjectName("bm_name")
-            nm.setWordWrap(True)
-            lay.addWidget(nm)
+                nm = QLabel(genus)
+                nm.setObjectName("bm_name")
+                nm.setWordWrap(True)
+                lay.addWidget(nm)
 
-            arrow     = {"low": "↓", "high": "↑", "normal": "✓"}.get(bm["status"], "")
-            style_key = "ok" if bm["status"] == "normal" else bm["status"]
-            vl = QLabel(f"{arrow} {bm['value']:.1f}{bm['unit']}")
-            vl.setObjectName(f"bm_val_{style_key}")
-            lay.addWidget(vl)
+                arrow     = "↓" if contribution < 0 else "↑"
+                # arrow     = {"low": "↓", "high": "↑", "normal": "✓"}.get(bm["status"], "")
+                # style_key = "ok" if bm["status"] == "normal" else bm["status"]
+                # vl = QLabel(f"{arrow} {bm['value']:.1f}{bm['unit']}")
+                # vl.setObjectName(f"bm_val_{style_key}")
+                # lay.addWidget(vl)
 
-            rf = QLabel(f"Ref: {bm['normal']}  ·  {bm['role']}")
-            rf.setObjectName("bm_ref")
-            rf.setWordWrap(True)
-            lay.addWidget(rf)
+                # rf = QLabel(f"Ref: {bm['normal']}  ·  {bm['role']}")
+                # rf.setObjectName("bm_ref")
+                # rf.setWordWrap(True)
+                # lay.addWidget(rf)
 
-            grid.addWidget(f, row, col)
+                # grid.addWidget(f, row, col)
+                style_key = "low" if contribution < 0 else "high"
+                vl = QLabel(f"{arrow} {contribution:.3f}")
+                vl.setObjectName(f"bm_val_{style_key}")
+                lay.addWidget(vl)
 
-        bm_section.layout().addLayout(grid)
-        inner_lay.addWidget(bm_section)
+                grid.addWidget(f, row, col)
+
+
+            bm_section.layout().addLayout(grid)
+            inner_lay.addWidget(bm_section)
 
         # ── Disclaimer ────────────────────────────────────────────────────────
         disc = label_hint(
@@ -2710,8 +2745,8 @@ class SimulationPage(QWidget):
 
         self._sliders: dict[str, QSlider] = {}
         slider_cfg = [
-            ("Antibiotic Level", "antibiotic",  0, "#EF4444"),
-            ("Probiotic Level",  "probiotic",  30, "#10B981"),
+            # ("Antibiotic Level", "antibiotic",  0, "#EF4444"),
+            # ("Probiotic Level",  "probiotic",  30, "#10B981"),
             ("Dietary Fiber",    "fiber",       50, "#6366F1"),
             ("Processed Food",   "processed",   20, "#F59E0B"),
         ]

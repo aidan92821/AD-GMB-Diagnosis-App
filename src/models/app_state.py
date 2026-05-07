@@ -49,7 +49,7 @@ class  AppState:
 
     # ── Runs ──────────────────────────────────────────────────────────────────
     runs: dict = field(default_factory=dict)
-    lbs:  dict = field(default_factory=dict) # R1, R2, R3, R4 (label: run_id)
+    lbs:  dict = field(default_factory=dict) # R1, R2, R3, R4 {label: run_id}
 
     # ── Analysis results (filled after QIIME2 runs) ───────────────────────────
     asv_count:      int  = 0
@@ -74,6 +74,11 @@ class  AppState:
 
     # ── Risk ──────────────────────────────────────────────────────────────────
     risk_result: Optional[dict] = None
+    contributions: dict = field(default_factory=dict)
+
+    # ── Simulation ────────────────────────────────────────────────────────────
+    simu_plots: Optional[dict] = None # run_label: plots dict {plot_name: plt}
+    simu_stats: Optional[dict] = None # run_label: stats dataframe
 
     # ── Pipeline gate ─────────────────────────────────────────────────────────
     pipeline_complete: bool = False

@@ -95,19 +95,31 @@ def get_trunc(bioproject: str, lib_layout: str):
         if forward:
             with z.open(f"{uuid}/data/forward-seven-number-summaries.tsv") as f:
                 f_sns = pd.read_csv(f, sep='\t')
-                trunc_forward = min(int(find_median_drop(f_sns, QUALITY_THRESHOLD)) - 17,
-                                    int(min_trunc_forward) - 17)
+                med_drop_f = int(find_median_drop(f_sns, QUALITY_THRESHOLD))
+                if (med_drop_f <= 17) or (min_trunc_forward / med_drop_f >= 2):
+                    trunc_forward = int(min_trunc_forward) - 17
+                else:
+                    trunc_forward = min(med_drop_f - 17,
+                                        int(min_trunc_forward) - 17)
             with z.open(f"{uuid}/data/reverse-seven-number-summaries.tsv") as r:
                 r_sns = pd.read_csv(r, sep='\t')
-                trunc_reverse = min(int(find_median_drop(r_sns, QUALITY_THRESHOLD)) - 21,
-                                    int(min_trunc_reverse) - 21)
+                med_drop_r = int(find_median_drop(r_sns, QUALITY_THRESHOLD))
+                if (med_drop_r <= 21) or (min_trunc_reverse / med_drop_r >= 2):
+                    trunc_reverse = int(min_trunc_reverse) - 21
+                else:
+                    trunc_reverse = min(med_drop_r - 21,
+                                        int(min_trunc_reverse) - 21)
             return {'forward': trunc_forward,
                     'reverse': trunc_reverse}
         else:
             with z.open(f"{uuid}/data/forward-seven-number-summaries.tsv") as s:
                 s_sns = pd.read_csv(s, sep='\t')
-                trunc_single = min(int(find_median_drop(s_sns, QUALITY_THRESHOLD)) - 17,
-                                   int(min_trunc_single) - 17)
+                med_drop_s = int(find_median_drop(s_sns, QUALITY_THRESHOLD))
+                if (med_drop_s <= 17) or (min_trunc_single / med_drop_s >= 2):
+                    trunc_single = int(min_trunc_single) - 17
+                else:
+                    trunc_single = min(med_drop_s - 17,
+                                        int(min_trunc_single) - 17)
             return {'single': trunc_single}
     
     return []

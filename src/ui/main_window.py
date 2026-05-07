@@ -46,13 +46,18 @@ from src.pipeline.fetch_data import (fetch_runs, download_runs,
 from src.pipeline.db_import import (parse_feat_tax_seqs, parse_feature_counts,
                                     parse_genus_table)
 
-from src.services.assessment_service import (save_ncbi_project, create_project, 
+from src.risk.run_assess import run_assess
+
+from src.simulation.simulate_gmb import simulate, plot_sim_results, get_abundance_shift_stats
+
+from src.services.assessment_service import (save_ncbi_project, get_genus_dict, 
                                              create_run,ingest_run_data, 
                                              get_run_id_by_srr, get_feature_counts,
                                              get_tree, store_alpha_diversities,
                                              store_beta_diversity, ServiceError,
                                              get_beta_diversity_matrix, store_pcoa,
-                                             create_tree_instance, get_run_feature_ids)
+                                             create_tree_instance, get_run_feature_ids,
+                                             create_simulation, ingest_simulation_genus)
 
 # ── Sidebar nav ───────────────────────────────────────────────────────────────
 
@@ -779,24 +784,56 @@ class _RiskPredictionWorker(QObject):
     finished = pyqtSignal(object)
     errored  = pyqtSignal(str)
 
-    def __init__(self, state: AppState) -> None:
+    def __init__(self, state: AppState, apoe: dict=None, mri: str=None) -> None:
         super().__init__()
         self._state = state
+        self._apoe = apoe
+        self._mri = mri
 
     def run(self):
-        pass
+        try:
+            abundance = get_genus_dict(self._state.lbs['R1']) # TODO
+            assessment = run_assess(model='gmb', genus_abundance=abundance, apoe=self._apoe, nifty_path=self._mri) # TODO
+            if 'stderr' in assessment:
+                self.errored.emit(assessment['stderr'])
+            self._state.risk_result = assessment.pop('risk', None)
+            self._state.contributions = assessment
+            self.finished.emit(self._state)
+        except Exception as exc:
+            self.errored.emit(str(exc))
 
 
 class _SimulationWorker(QObject):
     finished = pyqtSignal(object)
     errored  = pyqtSignal(str)
 
-    def __init__(self, state: AppState) -> None:
+    def __init__(self, state: AppState, run_label: str, user_diet: dict, runner: QiimeRunner) -> None:
         super().__init__()
         self._state = state
+        self._run_id = state.lbs[run_label]
+        self._user_diet = user_diet
+        self._runner = runner
+        self._run_label = run_label
 
     def run(self):
-        pass
+        try:
+            abundance = get_genus_dict(self._run_id)
+            results = simulate(run_id=self._run_id,
+                               abundance=abundance,
+                               user_diet=self._user_diet,
+                               runner=self._runner)
+            # save results to the AppState for pages to get
+            plots = plot_sim_results(results, abundance)
+            stats = get_abundance_shift_stats(abundance_old=abundance, abundance_new=results["new_abundance"])
+            self._state.simu_plots[self._run_label] = plots
+            self._state.simu_stats[self._run_label] = stats
+            # save results to the database
+            sim_id = create_simulation(self._run_id)
+            ingest_simulation_genus(run_id=self._run_id, simulation_id=sim_id, genus_rows=results["new_abundance"])
+            self.finished.emit(self._state)
+        except Exception as exc:
+            self.errored.emit(str(exc))
+
 
 
 # ── Main window ───────────────────────────────────────────────────────────────
@@ -994,6 +1031,7 @@ class MainWindow(QMainWindow):
         self._profile_page.logout_requested.connect(self._on_logout)
         self._profile_page.load_project.connect(self._on_load_project)
         self._profile_page.delete_project.connect(self._on_delete_project)
+        self._alzheimer_page.assessment_requested.connect(self._on_get_risk_assessment)
 
         host_lay.addWidget(self._stack)
         scroll.setWidget(host)
@@ -1010,7 +1048,7 @@ class MainWindow(QMainWindow):
         # Populate profile page
         self._profile_page.load(user)
         # Switch to main app
-        self._top_stack.setCurrentIndex(1)
+        self._top_stack.setCurrentIndex(1) 
 
     def _on_logout(self) -> None:
         self._current_user = None
@@ -1126,6 +1164,9 @@ class MainWindow(QMainWindow):
         """Start fasterq-dump download."""
         self._show_cancel(True)
         self._status_badge.setText("Downloading FASTQ files…")
+        self._status_badge.setObjectName("badge_yellow")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
         self._upload_page.update_pipeline_status("Downloading FASTQ files from NCBI…", "info")
         self._upload_page.clear_terminal()
 
@@ -1721,6 +1762,79 @@ class MainWindow(QMainWindow):
         self._status_badge.setObjectName("badge_red")
         self._status_badge.style().unpolish(self._status_badge)
         self._status_badge.style().polish(self._status_badge)
+
+    # ── Risk ──────────────────────────────────────────────────────────────────
+    def _on_get_risk_assessment(self, apoe: dict=None, mri: str=None) -> None:
+        self._status_badge.setText(
+            "Getting risk..."
+        )
+        self._status_badge.setObjectName("badge_yellow")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+        self._status_badge.show()
+        self._risk_assess_thread = QThread(self)
+        self._risk_assess_worker = _RiskPredictionWorker(state=self._state, apoe=apoe, mri=mri)
+        self._risk_assess_worker.moveToThread(self._risk_assess_thread)
+        self._risk_assess_thread.started.connect(self._risk_assess_worker.run)
+        self._risk_assess_worker.finished.connect(self._on_risk_assess_complete)
+        self._risk_assess_worker.errored.connect(self._on_risk_assess_error)
+        self._risk_assess_worker.finished.connect(self._risk_assess_thread.quit)
+        self._risk_assess_worker.errored.connect(self._risk_assess_thread.quit)
+        self._risk_assess_thread.start()
+    
+    def _on_risk_assess_complete(self, state: AppState):
+        self._status_badge.setText("Assessment complete")
+        self._status_badge.setObjectName("badge_green")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+        print(f"state.risk_result: {state.risk_result}")
+        print(f"state.contributions: {state.contributions}")
+        self._alzheimer_page.load(state=state)
+    
+    def _on_risk_assess_error(self, msg: str):
+        self._upload_page.show_pipeline_error(msg)
+        print(msg)
+        self._status_badge.setText("Assessment error")
+        self._status_badge.setObjectName("badge_red")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+
+
+    # ── Simulation ────────────────────────────────────────────────────────────
+
+    def _on_run_simulation(self, user_diet: dict, run_label: str):
+        self._status_badge.setText("Running simulation...")
+        self._status_badge.setObjectName("badge_yellow")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+        self._status_badge.show()
+
+        self._simulation_thread = QThread(self)
+        self._simulation_worker = _SimulationWorker(state=self._state, run_label=run_label, 
+                                                    user_diet=user_diet, runner=self._runner)
+        self._simulation_worker.moveToThread(self._simulation_thread)
+        self._simulation_thread.started.connect(self._simulation_worker.run)
+        self._simulation_worker.finished.connect(self._on_simulation_complete)
+        self._simulation_worker.errored.connect(self._on_simulation_error)
+        self._simulation_worker.finished.connect(self._simulation_thread.quit)
+        self._simulation_worker.errored.connect(self._simulation_thread.quit)
+        self._simulation_thread.start()
+    
+    def _on_simulation_complete(self, state: AppState):
+        self._status_badge.setText("Simulation complete")
+        self._status_badge.setObjectName("badge_green")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+        self._alzheimer_page.load(state=state)
+    
+    def _on_simulation_error(self, msg: str):
+        self._upload_page.show_pipeline_error(msg)
+        print(msg)
+        self._status_badge.setText("Simulation error")
+        self._status_badge.setObjectName("badge_red")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+
 
     # ── Profile page integration ──────────────────────────────────────────────
 
