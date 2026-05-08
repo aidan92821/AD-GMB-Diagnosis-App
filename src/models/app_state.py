@@ -77,8 +77,8 @@ class  AppState:
     contributions: dict = field(default_factory=dict)
 
     # ── Simulation ────────────────────────────────────────────────────────────
-    simu_plots: Optional[dict] = None # run_label: plots dict {plot_name: plt}
-    simu_stats: Optional[dict] = None # run_label: stats dataframe
+    simu_plots: dict = field(default_factory=dict) # run_label: plots dict {plot_name: plt}
+    simu_stats: dict = field(default_factory=dict) # run_label: stats dataframe
 
     # ── Pipeline gate ─────────────────────────────────────────────────────────
     pipeline_complete: bool = False

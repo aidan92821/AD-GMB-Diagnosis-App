@@ -808,9 +808,11 @@ class _SimulationWorker(QObject):
     errored  = pyqtSignal(str)
 
     def __init__(self, state: AppState, run_label: str, user_diet: dict, runner: QiimeRunner) -> None:
+    # def __init__(self, state: AppState, run_id: int, user_diet: dict, runner: QiimeRunner) -> None: # TODO TEMP
         super().__init__()
         self._state = state
         self._run_id = state.lbs[run_label]
+        # self._run_id = run_id # TODO TEMP
         self._user_diet = user_diet
         self._runner = runner
         self._run_label = run_label
@@ -826,10 +828,13 @@ class _SimulationWorker(QObject):
             plots = plot_sim_results(results, abundance)
             stats = get_abundance_shift_stats(abundance_old=abundance, abundance_new=results["new_abundance"])
             self._state.simu_plots[self._run_label] = plots
+            # self._state.simu_plots["R1"] = plots # TODO TEMP
             self._state.simu_stats[self._run_label] = stats
+            # self._state.simu_stats["R1"] = stats # TODO TEMP
+
             # save results to the database
             sim_id = create_simulation(self._run_id)
-            ingest_simulation_genus(run_id=self._run_id, simulation_id=sim_id, genus_rows=results["new_abundance"])
+            ingest_simulation_genus(run_id=self._run_id, simulation_id=sim_id, genus_rows=results["new_abundance"]) # TODO AIDEN FIX
             self.finished.emit(self._state)
         except Exception as exc:
             self.errored.emit(str(exc))
@@ -1048,7 +1053,15 @@ class MainWindow(QMainWindow):
         # Populate profile page
         self._profile_page.load(user)
         # Switch to main app
-        self._top_stack.setCurrentIndex(1) 
+        self._top_stack.setCurrentIndex(1)
+
+        # TODO TEMP
+        # user_diet = {
+        #     'fiber': 0.8,
+        #     'junk_food': 0.1
+        # }
+        # self._on_run_simulation(user_diet, run_id=1)
+        # TODO TEMP
 
     def _on_logout(self) -> None:
         self._current_user = None
@@ -1803,6 +1816,7 @@ class MainWindow(QMainWindow):
     # ── Simulation ────────────────────────────────────────────────────────────
 
     def _on_run_simulation(self, user_diet: dict, run_label: str):
+    # def _on_run_simulation(self, user_diet: dict, run_id: int): # TODO TEMP
         self._status_badge.setText("Running simulation...")
         self._status_badge.setObjectName("badge_yellow")
         self._status_badge.style().unpolish(self._status_badge)
@@ -1811,6 +1825,7 @@ class MainWindow(QMainWindow):
 
         self._simulation_thread = QThread(self)
         self._simulation_worker = _SimulationWorker(state=self._state, run_label=run_label, 
+        # self._simulation_worker = _SimulationWorker(state=self._state, run_id=run_id, # TODO TEMP
                                                     user_diet=user_diet, runner=self._runner)
         self._simulation_worker.moveToThread(self._simulation_thread)
         self._simulation_thread.started.connect(self._simulation_worker.run)
