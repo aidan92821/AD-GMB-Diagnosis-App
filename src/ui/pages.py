@@ -2867,8 +2867,8 @@ class SimulationPage(QWidget):
     def _run_sim(self):
         import numpy as np
 
-        # antibiotic = self._sliders["antibiotic"].value() / 100.0
-        # probiotic  = self._sliders["probiotic"].value()  / 100.0
+        antibiotic = self._sliders["antibiotic"].value() / 100.0 if "antibiotic" in self._sliders else 0.0
+        probiotic  = self._sliders["probiotic"].value()  / 100.0 if "probiotic"  in self._sliders else 0.0
         fiber      = self._sliders["fiber"].value()      / 100.0
         processed  = self._sliders["processed"].value()  / 100.0
 

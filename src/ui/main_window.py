@@ -848,8 +848,8 @@ class _SimulationWorker(QObject):
             # self._state.simu_stats["R1"] = stats # TODO TEMP
 
             # save results to the database
-            sim_id = create_simulation(self._run_id)
-            ingest_simulation_genus(run_id=self._run_id, simulation_id=sim_id, genus_rows=results["new_abundance"]) # TODO AIDEN FIX
+            sim_id = create_simulation(self._run_id)["simulation_id"]
+            ingest_simulation_genus(run_id=self._run_id, simulation_id=sim_id, genus_rows=results["new_abundance"])
             self.finished.emit(self._state)
         except Exception as exc:
             self.errored.emit(str(exc))

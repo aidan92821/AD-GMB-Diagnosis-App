@@ -15,3 +15,5 @@ six==1.17.0
 tzdata==2025.3
 nibabel>=5.0
 scipy>=1.10
+sqlcipher3
+cobra
