@@ -90,7 +90,7 @@ def dada2_denoise(runner: QiimeRunner, bioproject: str, lib_layout: str, trunc_f
         runner.run([
             'qiime', 'deblur', 'denoise-16S',
             '--i-demultiplexed-seqs', f"{io_dir}/demux.qza",
-            '--p-left-trim-len', '17',
+            '--p-left-trim-len', '0',
             '--p-trim-length', str(trunc_f),
             '--p-jobs-to-start', cores,
             '--o-table', f"{io_dir}/table.qza",
@@ -103,7 +103,7 @@ def dada2_denoise(runner: QiimeRunner, bioproject: str, lib_layout: str, trunc_f
         runner.run([
             'qiime', 'deblur', 'denoise-16S',
             '--i-demultiplexed-seqs', f"{io_dir}/demux.qza",
-            '--p-left-trim-len', '17',
+            '--p-left-trim-len', '0',
             '--p-trim-length', str(trunc_s),
             '--p-jobs-to-start', cores,
             '--o-table', f"{io_dir}/table.qza",

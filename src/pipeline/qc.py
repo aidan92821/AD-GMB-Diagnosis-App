@@ -17,8 +17,8 @@ def get_min_run_len(bioproject: str, lib_layout: str, fastqs: list[str]) -> int:
     try:
         for fastq in fastqs:
             with open(f"{input_dir}/{fastq}", 'r', encoding='utf-8') as f:
-                f.readline()           # skip header (@...)
-                seq = f.readline().strip()  # actual sequence
+                f.readline() # skip header (@...)
+                seq = f.readline().strip() # sequence
                 if seq:
                     lengths.append(len(seq))
     except Exception as e:
@@ -96,30 +96,30 @@ def get_trunc(bioproject: str, lib_layout: str):
             with z.open(f"{uuid}/data/forward-seven-number-summaries.tsv") as f:
                 f_sns = pd.read_csv(f, sep='\t')
                 med_drop_f = int(find_median_drop(f_sns, QUALITY_THRESHOLD))
-                if (med_drop_f <= 17) or (min_trunc_forward / med_drop_f >= 2):
-                    trunc_forward = int(min_trunc_forward) - 17
+                if min_trunc_forward / med_drop_f >= 2:
+                    trunc_forward = int(min_trunc_forward)
                 else:
-                    trunc_forward = min(med_drop_f - 17,
-                                        int(min_trunc_forward) - 17)
+                    trunc_forward = min(med_drop_f,
+                                        int(min_trunc_forward))
             with z.open(f"{uuid}/data/reverse-seven-number-summaries.tsv") as r:
                 r_sns = pd.read_csv(r, sep='\t')
                 med_drop_r = int(find_median_drop(r_sns, QUALITY_THRESHOLD))
-                if (med_drop_r <= 21) or (min_trunc_reverse / med_drop_r >= 2):
-                    trunc_reverse = int(min_trunc_reverse) - 21
+                if min_trunc_reverse / med_drop_r >= 2:
+                    trunc_reverse = int(min_trunc_reverse)
                 else:
-                    trunc_reverse = min(med_drop_r - 21,
-                                        int(min_trunc_reverse) - 21)
+                    trunc_reverse = min(med_drop_r,
+                                        int(min_trunc_reverse))
             return {'forward': trunc_forward,
                     'reverse': trunc_reverse}
         else:
             with z.open(f"{uuid}/data/forward-seven-number-summaries.tsv") as s:
                 s_sns = pd.read_csv(s, sep='\t')
                 med_drop_s = int(find_median_drop(s_sns, QUALITY_THRESHOLD))
-                if (med_drop_s <= 17) or (min_trunc_single / med_drop_s >= 2):
-                    trunc_single = int(min_trunc_single) - 17
+                if min_trunc_single / med_drop_s >= 2:
+                    trunc_single = int(min_trunc_single)
                 else:
-                    trunc_single = min(med_drop_s - 17,
-                                        int(min_trunc_single) - 17)
+                    trunc_single = min(med_drop_s,
+                                        int(min_trunc_single))
             return {'single': trunc_single}
     
     return []

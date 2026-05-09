@@ -86,6 +86,8 @@ NAV = [
 class _FetchWorkerReal(QObject):
     finished = pyqtSignal(object, object, object)   # emits list of single runs, list of paired runs, and project dictionary
     errored  = pyqtSignal(str)
+    progress = pyqtSignal(str)
+    canceled = pyqtSignal()
 
     def __init__(self, bioproject: str, email: str, runner: QiimeRunner, srr: str=None, n_runs=1) -> None:
         super().__init__()
@@ -96,9 +98,22 @@ class _FetchWorkerReal(QObject):
         self._runner = runner
     
     def run(self):
+
+        def cb(line: str):
+            if line:
+                self.progress.emit(line)
+
         try:
-            single_runs, paired_runs, project = fetch_runs(email=self._email, runner=self._runner, bioproject=self._bioproject, srr=self._srr, n_runs=self._n_runs)
-            self.finished.emit(single_runs, paired_runs, project)
+            self.progress.emit("[fetch] Fetching runs...")
+            single_runs, paired_runs, project = fetch_runs(email=self._email, runner=self._runner, 
+                                                           bioproject=self._bioproject, srr=self._srr, 
+                                                           n_runs=self._n_runs, callback=cb)
+            # unsupported sequencing platform
+            if not (single_runs or paired_runs) or not project:
+                # cancel the fetch + download sequence
+                self.canceled.emit()
+            else:
+                self.finished.emit(single_runs, paired_runs, project)
         except Exception as exc:
             self.errored.emit(str(exc))
 
@@ -1085,6 +1100,8 @@ class MainWindow(QMainWindow):
         self._status_badge.setText("Fetching from NCBI…")
         self._status_badge.show()
 
+        self._show_cancel(True)
+
         # emma changes
         self._fetch_real_thread = QThread(self)
         self._fetch_real_worker = _FetchWorkerReal(bioproject=bioproject,
@@ -1094,6 +1111,8 @@ class MainWindow(QMainWindow):
                                                    n_runs=max_runs)
         self._fetch_real_worker.moveToThread(self._fetch_real_thread)
         self._fetch_real_thread.started.connect(self._fetch_real_worker.run)
+        self._fetch_real_worker.canceled.connect(self._on_cancel)
+        self._fetch_real_worker.progress.connect(self._upload_page.append_terminal_output)
         self._fetch_real_worker.finished.connect(self._on_fetch_complete)
         self._fetch_real_worker.errored.connect(self._on_fetch_error)
         self._fetch_real_worker.finished.connect(self._fetch_real_thread.quit)
@@ -1405,6 +1424,7 @@ class MainWindow(QMainWindow):
             self._runner.cancel()
 
         # Terminate all active worker threads
+        threads_to_kill = []
         for attr in (
             '_fetch_real_thread',
             '_dl_thread_real',
@@ -1415,27 +1435,55 @@ class MainWindow(QMainWindow):
             thread = getattr(self, attr, None)
             if thread and thread.isRunning():
                 thread.quit()
-                thread.terminate()
-                thread.wait(2000)
+                # thread.terminate()
+                # thread.wait(2000)
+                threads_to_kill.append(thread)
 
-        # Delete intermediate files
-        if self._state and self._state.bioproject_id:
+        # # Delete intermediate files
+        # if self._state and self._state.bioproject_id:
+        #     try:
+        #         from src.pipeline.fetch_data import cleanup
+        #         cleanup(self._state.bioproject_id)
+        #     except Exception as exc:
+        #         print(f"Cleanup error on cancel: {exc}")
+
+        # give threads a short time to quit gracefully
+        # process UI events while waiting so the app doesn't freeze
+        from PyQt6.QtCore import QCoreApplication
+        import time
+        deadline = time.time() + 2.0
+        while any(t.isRunning() for t in threads_to_kill) and time.time() < deadline:
+            QCoreApplication.processEvents()
+            time.sleep(0.05)
+
+        # force kill anything still running
+        for thread in threads_to_kill:
+            if thread.isRunning():
+                thread.terminate()
+
+        # run cleanup in background so it doesn't block UI
+        def _do_cleanup():
             try:
                 from src.pipeline.fetch_data import cleanup
                 cleanup(self._state.bioproject_id)
             except Exception as exc:
                 print(f"Cleanup error on cancel: {exc}")
 
+        if self._state and self._state.bioproject_id:
+            import threading
+            threading.Thread(target=_do_cleanup, daemon=True).start()
+
         # Reset UI
         self._cancel_btn.hide()
         self._cancel_btn.setEnabled(True)
         self._overview_page._restore_fetch_btn()
-        self._status_badge.setText("Cancelled")
+        self._status_badge.setText("Canceled")
         self._status_badge.setObjectName("badge_yellow")
         self._status_badge.style().unpolish(self._status_badge)
         self._status_badge.style().polish(self._status_badge)
-        self._upload_page.update_pipeline_status("Cancelled by user", "warn")
-        self._upload_page.append_terminal_output("\n[CANCELLED] Operation cancelled.\n")
+        self._upload_page.update_pipeline_status("Canceled", "warn")
+        self._upload_page.append_terminal_output("\n[CANCELED] Operation canceled.\n")
+        self._overview_page._status_lbl.hide()
         # Restore Run Pipeline button so the user can retry
         if self._state and any(r.get('uploaded') for r in self._state.runs.values()):
             self._upload_page.reset_pipeline_btn(
@@ -1800,8 +1848,6 @@ class MainWindow(QMainWindow):
         self._status_badge.setObjectName("badge_green")
         self._status_badge.style().unpolish(self._status_badge)
         self._status_badge.style().polish(self._status_badge)
-        print(f"state.risk_result: {state.risk_result}")
-        print(f"state.contributions: {state.contributions}")
         self._alzheimer_page.load(state=state)
     
     def _on_risk_assess_error(self, msg: str):

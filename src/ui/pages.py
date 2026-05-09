@@ -102,7 +102,8 @@ class OverviewPage(QWidget):
         lay.addWidget(section_title("Fetch data from NCBI"))
         lay.addWidget(label_hint(
             "Enter a BioProject accession to load all runs for that study.  "
-            "Optionally filter to a single run by entering its Run accession."
+            "Optionally filter to a single run by entering its Run accession.  "
+            "Must be Illumina-sequenced 16S Amplicon data."
         ))
 
         input_row = QHBoxLayout(); input_row.setSpacing(12)
@@ -123,7 +124,7 @@ class OverviewPage(QWidget):
         run_lbl.setTextFormat(Qt.TextFormat.RichText)
         run_lbl.setObjectName("label_muted")
         self._run_input = QLineEdit()
-        self._run_input.setPlaceholderText("e.g. SRR001001  —  leave blank for all runs")
+        self._run_input.setPlaceholderText("e.g. SRR001001  —  leave blank for random run from project")
         self._run_input.textChanged.connect(self._validate_inputs)
         self._run_input.textChanged.connect(self._on_run_input_changed)
         col_run.addWidget(run_lbl); col_run.addWidget(self._run_input)
@@ -2866,8 +2867,8 @@ class SimulationPage(QWidget):
     def _run_sim(self):
         import numpy as np
 
-        antibiotic = self._sliders["antibiotic"].value() / 100.0
-        probiotic  = self._sliders["probiotic"].value()  / 100.0
+        # antibiotic = self._sliders["antibiotic"].value() / 100.0
+        # probiotic  = self._sliders["probiotic"].value()  / 100.0
         fiber      = self._sliders["fiber"].value()      / 100.0
         processed  = self._sliders["processed"].value()  / 100.0
 
@@ -2892,12 +2893,12 @@ class SimulationPage(QWidget):
         for t in range(1, T):
             prev = history[t - 1].copy()
 
-            # Antibiotic: broad-spectrum kill, exponentially decaying with time
-            antibiotic_kill = antibiotic * np.exp(-0.12 * t) * 0.9
-            delta_ab = -antibiotic_kill * prev
+            # # Antibiotic: broad-spectrum kill, exponentially decaying with time
+            # antibiotic_kill = antibiotic * np.exp(-0.12 * t) * 0.9
+            # delta_ab = -antibiotic_kill * prev
 
-            # Probiotic boosts probiotic genera
-            delta_ab += probiotic * 0.018 * is_probiotic
+            # # Probiotic boosts probiotic genera
+            # delta_ab += probiotic * 0.018 * is_probiotic
 
             # Fiber feeds butyrate producers
             delta_ab += fiber * 0.014 * is_butyrate
