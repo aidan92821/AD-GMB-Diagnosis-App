@@ -279,6 +279,8 @@ cd AD-GMB-Diagnosis-App
 
 ### Step 2 — Create a Python virtual environment
 
+Inside AD-GMB-Diagnosis-App/
+
 ```bash
 python -m venv venv
 source venv/bin/activate        # Windows: venv\Scripts\activate
@@ -354,6 +356,7 @@ QIIME2 is only needed for real DADA2-based denoising and SILVA taxonomic classif
 conda config --set channel_priority flexible
 
 # 6b — Download environment file
+# Make sure you are inside AD-GMB-Diagnosis-App/src/pipeline
 curl -L -O https://data.qiime2.org/distro/amplicon/qiime2-amplicon-2024.10-py310-osx-conda.yml
 
 # 6c — Remove macOS-incompatible packages
@@ -377,7 +380,15 @@ This step downloads ~3–5 GB and takes 10–20 minutes. The SILVA classifier (~
 
 ---
 
-### Step 7 — Run the app
+### Step 7 – Install AGORA2 GEM Models for Simulation Running
+
+This zip file contains the genome reconstructions for bacteria species and is used by Axis to simulate changes to the composition given hypothetical changes to a Western Diet.
+Make sure you are inside AD-GMB-Diagnosis-App/src/simulation
+```bash
+curl -L "https://www.vmh.life/files/reconstructions/AGORA2/version2.01/sbml_files_fixed/zipped/AGORA2_models/AGORA2_SBML.zip"
+```
+
+### Step 8 — Run the app
 
 ```bash
 python src/main.py
