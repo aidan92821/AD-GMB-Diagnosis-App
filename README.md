@@ -197,7 +197,6 @@ The risk assessment page uses a three-branch ensemble model that combines all av
 AD-GMB-Diagnosis-App/
 ├── README.md
 ├── requirements.txt
-├── taxa_classifier/                ← SILVA classifier (.qza) stored here
 │
 ├── data/                           ← local database + downloaded FASTQ files
 │   └── axisad.db                   ← AES-256 encrypted SQLite (SQLCipher)
@@ -230,7 +229,13 @@ AD-GMB-Diagnosis-App/
     │   ├── qc.py                   ← read quality assessment and truncation point detection
     │   ├── db_import.py            ← imports pipeline results into the database
     │   ├── install_dependencies.py ← checks and installs required pipeline tools
-    │   └── qiime2.yml              ← conda environment definition for QIIME2
+    │   ├── qiime2.yml              ← conda environment definition for QIIME2
+    │   ├── ref_phylo_db/           ← storage for reference phylogeny, .qza file gets downloaded automatically
+    │   └── taxa_classifier/        ← SILVA classifier (.qza) stored here
+    │
+    ├── simulation/
+    │   ├── simulate_gmb.py         ← simulates changes to the gmb composition
+    │   └── WesternDietAGORA2.tsv   ← baseline Western diet
     │
     ├── db/
     │   ├── database.py             ← SQLAlchemy + SQLCipher session setup
