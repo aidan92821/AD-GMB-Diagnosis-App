@@ -1,5 +1,5 @@
 """
-Axis – page panels.
+Axis - page panels.
 
 Every page has a  load(state: AppState)  method called by MainWindow
 whenever the shared state changes.  No page imports from example_data.
@@ -2303,8 +2303,9 @@ class AlzheimerPage(QWidget):
         # APOE genotype section
         inp_lay.addWidget(section_title("APOE Genotype"))
         inp_lay.addWidget(label_hint(
-            "Enter the number of copies of each allele (0–2). "
-            "The three values must sum to exactly 2 (one from each parent)."
+            "Enter the number of copies of each allele (0-2). "
+            "The three values must sum to exactly 2 (one from each parent). "
+            "Or set all to zero to use gut microbiome data only."
         ))
 
         apoe_row = QHBoxLayout()
@@ -2380,7 +2381,7 @@ class AlzheimerPage(QWidget):
         sum_row.addWidget(vdivider())
 
         conf_col = QVBoxLayout(); conf_col.setSpacing(2)
-        conf_col.addWidget(label_muted("Confidence"))
+        conf_col.addWidget(label_muted("Certainty"))
         self._conf_lbl = QLabel("—")
         self._conf_lbl.setObjectName("conf_number")
         conf_col.addWidget(self._conf_lbl)
@@ -2405,9 +2406,9 @@ class AlzheimerPage(QWidget):
 
     def _on_run_assess_clicked(self):
         apoe = {
-            "e2": self._apoe_spins["ε2"].value(),
-            "e3": self._apoe_spins["ε3"].value(),
-            "e4": self._apoe_spins["ε4"].value(),
+            "e2_count": self._apoe_spins["ε2"].value(),
+            "e3_count": self._apoe_spins["ε3"].value(),
+            "e4_count": self._apoe_spins["ε4"].value(),
         }
 
         mri = self._nii_path
@@ -2436,6 +2437,10 @@ class AlzheimerPage(QWidget):
         total = sum(s.value() for s in self._apoe_spins.values())
         if total == 2:
             self._apoe_status.setText("✓ Valid genotype")
+            self._apoe_status.setStyleSheet("color: #10B981;")
+            return True
+        elif total == 0:
+            self._apoe_status.setText("✓ Not using genotype data")
             self._apoe_status.setStyleSheet("color: #10B981;")
             return True
         self._apoe_status.setText(f"Allele counts sum to {total} — must equal 2")
@@ -2578,11 +2583,14 @@ class AlzheimerPage(QWidget):
         return w
 
     def _render(self, d: dict, state: AppState):
-        pct   = state.risk_result * 100 if state and state.risk_result else 0
-        # conf  = d.get("confidence_pct", 0)
-        # level = d.get("risk_level", "unknown").capitalize()
-        conf = 79 # TODO
-        level = "high" if pct > 50 else "low" # TODO
+        pct = state.risk_result * 100 if state and state.risk_result else 0
+        conf = state.risk_certainty if state and state.risk_certainty else 0
+        if pct > 75:
+            level = "high"
+        elif pct > 45:
+            level = "moderate"
+        else:
+            level = "low"
 
         self._pct_lbl.setText(f"{pct:.0f}%")
         self._lvl_lbl.setText(level)
@@ -2634,6 +2642,12 @@ class AlzheimerPage(QWidget):
 
             # for idx, bm in enumerate(biomarkers):
             for idx, (genus, contribution) in enumerate(biomarkers.items()):
+                try:
+                    contribution = float(contribution)
+                except (TypeError, ValueError):
+                    print(f"Bad contribution for {genus}: {repr(contribution)}")
+                    continue
+        
                 row, col = divmod(idx, cols)
                 f = QFrame()
                 f.setObjectName("bm_card")
@@ -2699,10 +2713,12 @@ class SimulationPage(QWidget):
     _INFLAM    = {"Fusobacterium", "Escherichia", "Klebsiella", "Enterococcus",
                   "Sutterella"}
 
+    simulation_requested = pyqtSignal(str)
     def __init__(self, parent=None):
         super().__init__(parent)
         self._state: AppState | None = None
         self._genus_data: list[dict] = []
+        self._current_run: str | None = None # run lbl
         self._build()
 
     # ── Build UI ──────────────────────────────────────────────────────────────
@@ -2762,7 +2778,7 @@ class SimulationPage(QWidget):
             "QPushButton:hover { background: #059669; }"
             "QPushButton:pressed { background: #047857; }"
         )
-        run_btn.clicked.connect(self._run_sim)
+        run_btn.clicked.connect(self._on_sim_requested)
         left_lay.addWidget(run_btn)
 
         row.addWidget(left, 0, Qt.AlignmentFlag.AlignTop)
@@ -2845,161 +2861,170 @@ class SimulationPage(QWidget):
 
         if not state:
             return
+        
+        # CHUNG TODO: get the simulation info from the state and display it on the page
 
-        from src.services.assessment_service import get_genus_data
-        if state.lbs:
-            for run_id in state.lbs.values():
-                try:
-                    data = get_genus_data(run_id)
-                    if data:
-                        self._genus_data = data
-                        break
-                except Exception:
-                    pass
+        # from src.services.assessment_service import get_genus_data
+        # if state.lbs:
+        #     for run_id in state.lbs.values():
+        #         try:
+        #             data = get_genus_data(run_id)
+        #             if data:
+        #                 self._genus_data = data
+        #                 break
+        #         except Exception:
+        #             pass
 
-        if self._genus_data:
-            self._run_sim()
-        else:
-            self._draw_placeholders()
+        # if self._genus_data:
+        #     self._on_sim_requested() # does this happen after button?
+        # else:
+        #     self._draw_placeholders()
 
     # ── Simulation ────────────────────────────────────────────────────────────
 
-    def _run_sim(self):
-        import numpy as np
+    def _on_sim_requested(self):
+        # transmit the signal
+        # CHUNG TODO: MUST EMIT A RUN LABEL TO USE (LET USER CHOOSE THE RUN)
+        self.simulation_requested.emit(self._current_run)
 
-        antibiotic = self._sliders["antibiotic"].value() / 100.0 if "antibiotic" in self._sliders else 0.0
-        probiotic  = self._sliders["probiotic"].value()  / 100.0 if "probiotic"  in self._sliders else 0.0
+        # antibiotic = self._sliders["antibiotic"].value() / 100.0 if "antibiotic" in self._sliders else 0.0
+        # probiotic  = self._sliders["probiotic"].value()  / 100.0 if "probiotic"  in self._sliders else 0.0
         fiber      = self._sliders["fiber"].value()      / 100.0
         processed  = self._sliders["processed"].value()  / 100.0
 
-        if not self._genus_data:
-            self._draw_placeholders()
-            return
+    #     # antibiotic = self._sliders["antibiotic"].value() / 100.0
+    #     # probiotic  = self._sliders["probiotic"].value()  / 100.0
+    #     fiber      = self._sliders["fiber"].value()      / 100.0
+    #     processed  = self._sliders["processed"].value()  / 100.0
 
-        genera  = [d["genus"] for d in self._genus_data]
-        init_ab = np.array([d["relative_abundance"] for d in self._genus_data], dtype=float)
-        total   = init_ab.sum()
-        if total > 0:
-            init_ab /= total
+    #     if not self._genus_data:
+    #         self._draw_placeholders()
+    #         return
 
-        is_butyrate  = np.array([g in self._BUTYRATE for g in genera], dtype=float)
-        is_probiotic = np.array([g in self._PROBIOTIC for g in genera], dtype=float)
-        is_inflam    = np.array([g in self._INFLAM    for g in genera], dtype=float)
+    #     genera  = [d["genus"] for d in self._genus_data]
+    #     init_ab = np.array([d["relative_abundance"] for d in self._genus_data], dtype=float)
+    #     total   = init_ab.sum()
+    #     if total > 0:
+    #         init_ab /= total
 
-        T = 30
-        history = np.zeros((T, len(genera)))
-        history[0] = init_ab.copy()
+    #     is_butyrate  = np.array([g in self._BUTYRATE for g in genera], dtype=float)
+    #     is_probiotic = np.array([g in self._PROBIOTIC for g in genera], dtype=float)
+    #     is_inflam    = np.array([g in self._INFLAM    for g in genera], dtype=float)
 
-        for t in range(1, T):
-            prev = history[t - 1].copy()
+    #     T = 30
+    #     history = np.zeros((T, len(genera)))
+    #     history[0] = init_ab.copy()
 
-            # # Antibiotic: broad-spectrum kill, exponentially decaying with time
-            # antibiotic_kill = antibiotic * np.exp(-0.12 * t) * 0.9
-            # delta_ab = -antibiotic_kill * prev
+    #     for t in range(1, T):
+    #         prev = history[t - 1].copy()
 
-            # # Probiotic boosts probiotic genera
-            # delta_ab += probiotic * 0.018 * is_probiotic
+    #         # # Antibiotic: broad-spectrum kill, exponentially decaying with time
+    #         # antibiotic_kill = antibiotic * np.exp(-0.12 * t) * 0.9
+    #         # delta_ab = -antibiotic_kill * prev
 
-            # Fiber feeds butyrate producers
-            delta_ab += fiber * 0.014 * is_butyrate
+    #         # # Probiotic boosts probiotic genera
+    #         # delta_ab += probiotic * 0.018 * is_probiotic
 
-            # Processed food feeds inflammatory genera, starves butyrate producers
-            delta_ab += processed * 0.012 * is_inflam
-            delta_ab -= processed * 0.010 * is_butyrate
+    #         # Fiber feeds butyrate producers
+    #         delta_ab += fiber * 0.014 * is_butyrate
 
-            new_ab = np.clip(prev + delta_ab, 1e-7, None)
-            new_ab /= new_ab.sum()
-            history[t] = new_ab
+    #         # Processed food feeds inflammatory genera, starves butyrate producers
+    #         delta_ab += processed * 0.012 * is_inflam
+    #         delta_ab -= processed * 0.010 * is_butyrate
 
-        # ── Derived metrics ────────────────────────────────────────────────────
-        def _shannon(ab):
-            p = ab[ab > 0]
-            return float(-np.sum(p * np.log2(p)))
+    #         new_ab = np.clip(prev + delta_ab, 1e-7, None)
+    #         new_ab /= new_ab.sum()
+    #         history[t] = new_ab
 
-        times         = np.arange(T)
-        diversity     = np.array([_shannon(history[t]) for t in range(T)])
-        butyrate_lvl  = np.array([(history[t] * is_butyrate).sum() for t in range(T)])
-        inflam_lvl    = np.array([(history[t] * is_inflam).sum()   for t in range(T)])
-        max_sh        = np.log2(len(genera)) if len(genera) > 1 else 1.0
-        ad_risk       = 100.0 * (
-            0.35 * np.clip(inflam_lvl    / max(inflam_lvl.max(),   1e-9), 0, 1) +
-            0.30 * np.clip(1 - diversity / max_sh,                        0, 1) +
-            0.35 * np.clip(1 - butyrate_lvl / max(butyrate_lvl.max(), 1e-9), 0, 1)
-        )
+    #     # ── Derived metrics ────────────────────────────────────────────────────
+    #     def _shannon(ab):
+    #         p = ab[ab > 0]
+    #         return float(-np.sum(p * np.log2(p)))
 
-        # ── Plot 1: Top genera over time ───────────────────────────────────────
-        top_n   = min(6, len(genera))
-        top_idx = np.argsort(init_ab)[::-1][:top_n]
-        COLORS  = ['#6366F1', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#06B6D4']
+    #     times         = np.arange(T)
+    #     diversity     = np.array([_shannon(history[t]) for t in range(T)])
+    #     butyrate_lvl  = np.array([(history[t] * is_butyrate).sum() for t in range(T)])
+    #     inflam_lvl    = np.array([(history[t] * is_inflam).sum()   for t in range(T)])
+    #     max_sh        = np.log2(len(genera)) if len(genera) > 1 else 1.0
+    #     ad_risk       = 100.0 * (
+    #         0.35 * np.clip(inflam_lvl    / max(inflam_lvl.max(),   1e-9), 0, 1) +
+    #         0.30 * np.clip(1 - diversity / max_sh,                        0, 1) +
+    #         0.35 * np.clip(1 - butyrate_lvl / max(butyrate_lvl.max(), 1e-9), 0, 1)
+    #     )
 
-        self._figs[0].clear()
-        ax0 = self._figs[0].add_subplot(111)
-        for k, i in enumerate(top_idx):
-            ax0.plot(times, history[:, i] * 100, label=genera[i],
-                     color=COLORS[k % len(COLORS)], linewidth=1.4)
-        ax0.set_title("Genus Abundance Over Time", fontsize=8, fontweight='bold')
-        ax0.set_xlabel("Day", fontsize=7); ax0.set_ylabel("Rel. Abundance (%)", fontsize=7)
-        ax0.tick_params(labelsize=7)
-        ax0.legend(fontsize=6, loc='upper right', framealpha=0.7)
-        ax0.set_facecolor('#F8FAFC')
-        self._canvases[0].draw()
+    #     # ── Plot 1: Top genera over time ───────────────────────────────────────
+    #     top_n   = min(6, len(genera))
+    #     top_idx = np.argsort(init_ab)[::-1][:top_n]
+    #     COLORS  = ['#6366F1', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#06B6D4']
 
-        # ── Plot 2: Alpha diversity ────────────────────────────────────────────
-        self._figs[1].clear()
-        ax1 = self._figs[1].add_subplot(111)
-        ax1.plot(times, diversity, color='#10B981', linewidth=1.6)
-        ax1.fill_between(times, diversity, alpha=0.15, color='#10B981')
-        ax1.set_title("Alpha Diversity (Shannon)", fontsize=8, fontweight='bold')
-        ax1.set_xlabel("Day", fontsize=7); ax1.set_ylabel("Shannon Index", fontsize=7)
-        ax1.tick_params(labelsize=7)
-        ax1.set_facecolor('#F8FAFC')
-        self._canvases[1].draw()
+    #     self._figs[0].clear()
+    #     ax0 = self._figs[0].add_subplot(111)
+    #     for k, i in enumerate(top_idx):
+    #         ax0.plot(times, history[:, i] * 100, label=genera[i],
+    #                  color=COLORS[k % len(COLORS)], linewidth=1.4)
+    #     ax0.set_title("Genus Abundance Over Time", fontsize=8, fontweight='bold')
+    #     ax0.set_xlabel("Day", fontsize=7); ax0.set_ylabel("Rel. Abundance (%)", fontsize=7)
+    #     ax0.tick_params(labelsize=7)
+    #     ax0.legend(fontsize=6, loc='upper right', framealpha=0.7)
+    #     ax0.set_facecolor('#F8FAFC')
+    #     self._canvases[0].draw()
 
-        # ── Plot 3: Metabolite proxies ─────────────────────────────────────────
-        self._figs[2].clear()
-        ax2 = self._figs[2].add_subplot(111)
-        ax2.plot(times, butyrate_lvl * 100, label="Butyrate / SCFA",
-                 color='#10B981', linewidth=1.6)
-        ax2.plot(times, inflam_lvl * 100, label="LPS / Inflammatory",
-                 color='#EF4444', linewidth=1.6, linestyle='--')
-        ax2.set_title("Metabolite Proxies", fontsize=8, fontweight='bold')
-        ax2.set_xlabel("Day", fontsize=7); ax2.set_ylabel("Relative Level (%)", fontsize=7)
-        ax2.tick_params(labelsize=7)
-        ax2.legend(fontsize=6, framealpha=0.7)
-        ax2.set_facecolor('#F8FAFC')
-        self._canvases[2].draw()
+    #     # ── Plot 2: Alpha diversity ────────────────────────────────────────────
+    #     self._figs[1].clear()
+    #     ax1 = self._figs[1].add_subplot(111)
+    #     ax1.plot(times, diversity, color='#10B981', linewidth=1.6)
+    #     ax1.fill_between(times, diversity, alpha=0.15, color='#10B981')
+    #     ax1.set_title("Alpha Diversity (Shannon)", fontsize=8, fontweight='bold')
+    #     ax1.set_xlabel("Day", fontsize=7); ax1.set_ylabel("Shannon Index", fontsize=7)
+    #     ax1.tick_params(labelsize=7)
+    #     ax1.set_facecolor('#F8FAFC')
+    #     self._canvases[1].draw()
 
-        # ── Plot 4: AD risk score over time ───────────────────────────────────
-        self._figs[3].clear()
-        ax3 = self._figs[3].add_subplot(111)
-        ax3.plot(times, ad_risk, color='#EF4444', linewidth=1.6)
-        ax3.fill_between(times, ad_risk, alpha=0.10, color='#EF4444')
-        ax3.axhline(33, color='#F59E0B', linestyle=':', linewidth=1.0, label='Moderate (33)')
-        ax3.axhline(66, color='#EF4444', linestyle=':', linewidth=1.0, label='High (66)')
-        ax3.set_ylim(0, 100)
-        ax3.set_title("Predicted AD Risk Score", fontsize=8, fontweight='bold')
-        ax3.set_xlabel("Day", fontsize=7); ax3.set_ylabel("Risk Score", fontsize=7)
-        ax3.tick_params(labelsize=7)
-        ax3.legend(fontsize=6, framealpha=0.7)
-        ax3.set_facecolor('#F8FAFC')
-        self._canvases[3].draw()
+    #     # ── Plot 3: Metabolite proxies ─────────────────────────────────────────
+    #     self._figs[2].clear()
+    #     ax2 = self._figs[2].add_subplot(111)
+    #     ax2.plot(times, butyrate_lvl * 100, label="Butyrate / SCFA",
+    #              color='#10B981', linewidth=1.6)
+    #     ax2.plot(times, inflam_lvl * 100, label="LPS / Inflammatory",
+    #              color='#EF4444', linewidth=1.6, linestyle='--')
+    #     ax2.set_title("Metabolite Proxies", fontsize=8, fontweight='bold')
+    #     ax2.set_xlabel("Day", fontsize=7); ax2.set_ylabel("Relative Level (%)", fontsize=7)
+    #     ax2.tick_params(labelsize=7)
+    #     ax2.legend(fontsize=6, framealpha=0.7)
+    #     ax2.set_facecolor('#F8FAFC')
+    #     self._canvases[2].draw()
 
-        # ── Table: species changes ─────────────────────────────────────────────
-        final_ab = history[-1]
-        rows = sorted(
-            [(genera[i], init_ab[i] * 100, final_ab[i] * 100,
-              (final_ab[i] - init_ab[i]) * 100)
-             for i in range(len(genera))],
-            key=lambda x: abs(x[3]), reverse=True,
-        )
-        self._table.setRowCount(len(rows))
-        for r, (genus, ini, fin, delta) in enumerate(rows):
-            self._table.setItem(r, 0, QTableWidgetItem(genus))
-            self._table.setItem(r, 1, QTableWidgetItem(f"{ini:.3f}"))
-            self._table.setItem(r, 2, QTableWidgetItem(f"{fin:.3f}"))
-            delta_item = QTableWidgetItem(f"{'+' if delta >= 0 else ''}{delta:.3f}")
-            delta_item.setForeground(QColor("#10B981" if delta >= 0 else "#EF4444"))
-            self._table.setItem(r, 3, delta_item)
+    #     # ── Plot 4: AD risk score over time ───────────────────────────────────
+    #     self._figs[3].clear()
+    #     ax3 = self._figs[3].add_subplot(111)
+    #     ax3.plot(times, ad_risk, color='#EF4444', linewidth=1.6)
+    #     ax3.fill_between(times, ad_risk, alpha=0.10, color='#EF4444')
+    #     ax3.axhline(33, color='#F59E0B', linestyle=':', linewidth=1.0, label='Moderate (33)')
+    #     ax3.axhline(66, color='#EF4444', linestyle=':', linewidth=1.0, label='High (66)')
+    #     ax3.set_ylim(0, 100)
+    #     ax3.set_title("Predicted AD Risk Score", fontsize=8, fontweight='bold')
+    #     ax3.set_xlabel("Day", fontsize=7); ax3.set_ylabel("Risk Score", fontsize=7)
+    #     ax3.tick_params(labelsize=7)
+    #     ax3.legend(fontsize=6, framealpha=0.7)
+    #     ax3.set_facecolor('#F8FAFC')
+    #     self._canvases[3].draw()
+
+    #     # ── Table: species changes ─────────────────────────────────────────────
+    #     final_ab = history[-1]
+    #     rows = sorted(
+    #         [(genera[i], init_ab[i] * 100, final_ab[i] * 100,
+    #           (final_ab[i] - init_ab[i]) * 100)
+    #          for i in range(len(genera))],
+    #         key=lambda x: abs(x[3]), reverse=True,
+    #     )
+    #     self._table.setRowCount(len(rows))
+    #     for r, (genus, ini, fin, delta) in enumerate(rows):
+    #         self._table.setItem(r, 0, QTableWidgetItem(genus))
+    #         self._table.setItem(r, 1, QTableWidgetItem(f"{ini:.3f}"))
+    #         self._table.setItem(r, 2, QTableWidgetItem(f"{fin:.3f}"))
+    #         delta_item = QTableWidgetItem(f"{'+' if delta >= 0 else ''}{delta:.3f}")
+    #         delta_item.setForeground(QColor("#10B981" if delta >= 0 else "#EF4444"))
+    #         self._table.setItem(r, 3, delta_item)
 
     # ── Placeholder ───────────────────────────────────────────────────────────
 

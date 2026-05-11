@@ -799,21 +799,35 @@ class _RiskPredictionWorker(QObject):
     finished = pyqtSignal(object)
     errored  = pyqtSignal(str)
 
-    def __init__(self, state: AppState, apoe: dict=None, mri: str=None) -> None:
+    def __init__(self, state: AppState, apoe: dict=None, mri: str=None, run_lbl: str='R1') -> None:
         super().__init__()
         self._state = state
         self._apoe = apoe
         self._mri = mri
+        self._run_lbl = run_lbl
 
     def run(self):
         try:
-            abundance = get_genus_dict(self._state.lbs['R1']) # TODO
-            assessment = run_assess(model='gmb', genus_abundance=abundance, apoe=self._apoe, nifty_path=self._mri) # TODO
+            abundance = get_genus_dict(self._state.lbs[self._run_lbl])
+            if self._apoe and self._mri:
+                if all(v == 0 for v in self._apoe.values()):
+                    assessment = run_assess(model='gmb', genus_abundance=abundance, apoe=self._apoe, nifty_path=self._mri)
+                else:
+                    assessment = run_assess(model='full', genus_abundance=abundance, apoe=self._apoe, nifty_path=self._mri)
+            elif self._apoe:
+                if all(v == 0 for v in self._apoe.values()):
+                    assessment = run_assess(model='gmb', genus_abundance=abundance, apoe=self._apoe, nifty_path=self._mri)
+                else:
+                    assessment = run_assess(model='tab', genus_abundance=abundance, apoe=self._apoe, nifty_path=self._mri)
+            else:
+                assessment = run_assess(model='gmb', genus_abundance=abundance, apoe=self._apoe, nifty_path=self._mri)
             if 'stderr' in assessment:
                 self.errored.emit(assessment['stderr'])
-            self._state.risk_result = assessment.pop('risk', None)
-            self._state.contributions = assessment
-            self.finished.emit(self._state)
+            else:
+                self._state.risk_result = assessment.pop('risk', None)
+                self._state.risk_certainty = assessment.pop('certainty', None)
+                self._state.contributions = assessment
+                self.finished.emit(self._state)
         except Exception as exc:
             self.errored.emit(str(exc))
 
@@ -822,12 +836,10 @@ class _SimulationWorker(QObject):
     finished = pyqtSignal(object)
     errored  = pyqtSignal(str)
 
-    def __init__(self, state: AppState, run_label: str, user_diet: dict, runner: QiimeRunner) -> None:
-    # def __init__(self, state: AppState, run_id: int, user_diet: dict, runner: QiimeRunner) -> None: # TODO TEMP
+    def __init__(self, state: AppState, user_diet: dict, runner: QiimeRunner, run_label: str='R1') -> None:
         super().__init__()
         self._state = state
         self._run_id = state.lbs[run_label]
-        # self._run_id = run_id # TODO TEMP
         self._user_diet = user_diet
         self._runner = runner
         self._run_label = run_label
@@ -843,12 +855,10 @@ class _SimulationWorker(QObject):
             plots = plot_sim_results(results, abundance)
             stats = get_abundance_shift_stats(abundance_old=abundance, abundance_new=results["new_abundance"])
             self._state.simu_plots[self._run_label] = plots
-            # self._state.simu_plots["R1"] = plots # TODO TEMP
             self._state.simu_stats[self._run_label] = stats
-            # self._state.simu_stats["R1"] = stats # TODO TEMP
 
             # save results to the database
-            sim_id = create_simulation(self._run_id)["simulation_id"]
+            sim_id = create_simulation(self._run_id)['simulation_id']
             ingest_simulation_genus(run_id=self._run_id, simulation_id=sim_id, genus_rows=results["new_abundance"])
             self.finished.emit(self._state)
         except Exception as exc:
@@ -1052,6 +1062,7 @@ class MainWindow(QMainWindow):
         self._profile_page.load_project.connect(self._on_load_project)
         self._profile_page.delete_project.connect(self._on_delete_project)
         self._alzheimer_page.assessment_requested.connect(self._on_get_risk_assessment)
+        self._simulation_page.simulation_requested.connect(self._on_run_simulation)
 
         host_lay.addWidget(self._stack)
         scroll.setWidget(host)
@@ -1069,14 +1080,6 @@ class MainWindow(QMainWindow):
         self._profile_page.load(user)
         # Switch to main app
         self._top_stack.setCurrentIndex(1)
-
-        # TODO TEMP
-        # user_diet = {
-        #     'fiber': 0.8,
-        #     'junk_food': 0.1
-        # }
-        # self._on_run_simulation(user_diet, run_id=1)
-        # TODO TEMP
 
     def _on_logout(self) -> None:
         self._current_user = None
@@ -1825,7 +1828,7 @@ class MainWindow(QMainWindow):
         self._status_badge.style().polish(self._status_badge)
 
     # ── Risk ──────────────────────────────────────────────────────────────────
-    def _on_get_risk_assessment(self, apoe: dict=None, mri: str=None) -> None:
+    def _on_get_risk_assessment(self, apoe: dict=None, mri: str=None, run_lbl: str='R1') -> None:
         self._status_badge.setText(
             "Getting risk..."
         )
@@ -1834,7 +1837,7 @@ class MainWindow(QMainWindow):
         self._status_badge.style().polish(self._status_badge)
         self._status_badge.show()
         self._risk_assess_thread = QThread(self)
-        self._risk_assess_worker = _RiskPredictionWorker(state=self._state, apoe=apoe, mri=mri)
+        self._risk_assess_worker = _RiskPredictionWorker(state=self._state, apoe=apoe, mri=mri, run_lbl=run_lbl)
         self._risk_assess_worker.moveToThread(self._risk_assess_thread)
         self._risk_assess_thread.started.connect(self._risk_assess_worker.run)
         self._risk_assess_worker.finished.connect(self._on_risk_assess_complete)
@@ -1861,8 +1864,7 @@ class MainWindow(QMainWindow):
 
     # ── Simulation ────────────────────────────────────────────────────────────
 
-    def _on_run_simulation(self, user_diet: dict, run_label: str):
-    # def _on_run_simulation(self, user_diet: dict, run_id: int): # TODO TEMP
+    def _on_run_simulation(self, user_diet: dict, run_label: str='R1'):
         self._status_badge.setText("Running simulation...")
         self._status_badge.setObjectName("badge_yellow")
         self._status_badge.style().unpolish(self._status_badge)
@@ -1871,7 +1873,6 @@ class MainWindow(QMainWindow):
 
         self._simulation_thread = QThread(self)
         self._simulation_worker = _SimulationWorker(state=self._state, run_label=run_label, 
-        # self._simulation_worker = _SimulationWorker(state=self._state, run_id=run_id, # TODO TEMP
                                                     user_diet=user_diet, runner=self._runner)
         self._simulation_worker.moveToThread(self._simulation_thread)
         self._simulation_thread.started.connect(self._simulation_worker.run)
@@ -1886,11 +1887,10 @@ class MainWindow(QMainWindow):
         self._status_badge.setObjectName("badge_green")
         self._status_badge.style().unpolish(self._status_badge)
         self._status_badge.style().polish(self._status_badge)
-        self._alzheimer_page.load(state=state)
+        self._simulation_page.load(state=state)
     
     def _on_simulation_error(self, msg: str):
         self._upload_page.show_pipeline_error(msg)
-        print(msg)
         self._status_badge.setText("Simulation error")
         self._status_badge.setObjectName("badge_red")
         self._status_badge.style().unpolish(self._status_badge)

@@ -75,6 +75,7 @@ class  AppState:
     # ── Risk ──────────────────────────────────────────────────────────────────
     risk_result: Optional[dict] = None
     contributions: dict = field(default_factory=dict)
+    risk_certainty: Optional[dict] = None
 
     # ── Simulation ────────────────────────────────────────────────────────────
     simu_plots: dict = field(default_factory=dict) # run_label: plots dict {plot_name: plt}

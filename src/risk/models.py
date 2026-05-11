@@ -4,7 +4,7 @@ import torch
 import xgboost as xgb
 from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold
 from sklearn.model_selection import GridSearchCV
 
 
@@ -52,6 +52,10 @@ class TabularModel:
     def predict_proba(self, X) -> np.ndarray:
         # return prob of AD
         return self.model.predict_proba(X)[:, 1]
+    
+    def prediction_certainty(self, X) -> dict:
+        prob = float(self.model.predict_proba(X)[:, 1])
+        return round(abs(prob - 0.5) * 200, 1)
 
 
 class ImagingCNN(nn.Module):
@@ -148,6 +152,7 @@ class AlzheimerRiskEnsemble:
         self.microbiome_model = TabularModel("microbiome")
         self.genetic_model    = TabularModel("genetic")
         self.imaging_model    = ImagingModel(epochs=10, device=device) if use_imaging else None
+        self.device           = device
 
         # use base model probabilities as features for meta learn
         self.meta_learner  = LogisticRegression(C=1.0, max_iter=1000)
@@ -164,61 +169,63 @@ class AlzheimerRiskEnsemble:
         ]
         if self.use_imaging and imaging is not None:
             cols.append(self.imaging_model.predict_proba(imaging))
-        return np.column_stack(cols)   # with shape (N, n_modalities)
+        return np.column_stack(cols)
 
     def fit(self, microbiome, genetic, y, imaging=None):
-        # train each base model separately
-        self.microbiome_model.fit(microbiome, y)
-        self.genetic_model.fit(genetic, y)
-        if self.use_imaging and imaging is not None:
-            self.imaging_model.fit(imaging, y)
+      kf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
-        img_val = None
+      n = len(y)
+      n_modalities = 2 + (1 if self.use_imaging else 0)
 
-        # create the meta features and then train the meta learner
-        if self.use_imaging and imaging is not None:
-            (mb_tr, mb_val, ge_tr, ge_val, img_tr, img_val,
-             y_tr, y_val) = train_test_split(
-                microbiome, genetic, imaging, y,
-                test_size=0.2, stratify=y, random_state=42,
-            )
-            # refit the base models on training split only
-            self.microbiome_model.fit(mb_tr, y_tr)
-            self.genetic_model.fit(ge_tr, y_tr)
-            self.imaging_model.fit(img_tr, y_tr)
-        else:
-            (mb_tr, mb_val, ge_tr, ge_val,
-             y_tr, y_val) = train_test_split(
-                microbiome, genetic, y,
-                test_size=0.2, stratify=y, random_state=42,
-            )
-            # refit the base models on training split only
-            self.microbiome_model.fit(mb_tr, y_tr)
-            self.genetic_model.fit(ge_tr, y_tr)
+      meta_X = np.zeros((n, n_modalities))
 
-        meta_X = self._base_predict(mb_val, ge_val, img_val)
-        meta_X = self.meta_scaler.fit_transform(meta_X)
-        self.meta_learner.fit(meta_X, y_val)
-        self._fitted = True
+      for train_idx, val_idx in kf.split(microbiome, y):
+          mb_tr, mb_val = microbiome.iloc[train_idx], microbiome.iloc[val_idx]
+          ge_tr, ge_val = genetic.iloc[train_idx], genetic.iloc[val_idx]
+          y_tr, y_val   = y.iloc[train_idx], y.iloc[val_idx]
+
+          # fresh models each fold
+          mb_model = TabularModel("microbiome")
+          ge_model = TabularModel("genetic")
+
+          mb_model.fit(mb_tr, y_tr)
+          ge_model.fit(ge_tr, y_tr)
+
+          cols = [
+              mb_model.predict_proba(mb_val),
+              ge_model.predict_proba(ge_val),
+          ]
+
+          if self.use_imaging and imaging is not None:
+              img_tr, img_val = imaging[train_idx], imaging[val_idx]
+              img_model = ImagingModel(device=self.device)
+              img_model.fit(img_tr, y_tr)
+              cols.append(img_model.predict_proba(img_val))
+
+          meta_X[val_idx] = np.column_stack(cols)
+
+      # train meta learner on full OOF predictions
+      self.meta_scaler.fit(meta_X)
+      meta_X_scaled = self.meta_scaler.transform(meta_X)
+      self.meta_learner.fit(meta_X_scaled, y)
+
+      # finally train base models on FULL data (for inference)
+      self.microbiome_model.fit(microbiome, y)
+      self.genetic_model.fit(genetic, y)
+
+      if self.use_imaging and imaging is not None:
+          self.imaging_model.fit(imaging, y)
+
+      self._fitted = True
 
     def predict_proba(self, microbiome, genetic,
                       imaging=None) -> np.ndarray:
-        # get (N,) array of AD risk probabilities in [0, 1]
         assert self._fitted, "Call fit() before predict_proba()"
         meta_X = self._base_predict(microbiome, genetic, imaging)
         meta_X = self.meta_scaler.transform(meta_X)
         return self.meta_learner.predict_proba(meta_X)[:, 1]
 
-    def predict_risk(self, microbiome, genetic,
+    def prediction_certainty(self, microbiome, genetic,
                      imaging=None) -> dict:
-        # single sample wrapper for convenience. pass it arrays with shape (1, n_feats)
         prob = float(self.predict_proba(microbiome, genetic, imaging)[0])
-        return {
-            "risk_probability": round(prob * 100, 1),
-            "risk_level":       "high" if prob > 0.66 else "moderate" if prob > 0.33 else "low",
-            "confidence":       round(abs(prob - 0.5) * 200, 1),   # 0–100
-            "modality_scores": {
-                "microbiome": round(float(self.microbiome_model.predict_proba(microbiome)[0]) * 100, 1),
-                "genetic":    round(float(self.genetic_model.predict_proba(genetic)[0])     * 100, 1),
-            }
-        }
+        return round(abs(prob - 0.5) * 200, 1)

@@ -79,6 +79,7 @@ def run_risk_assessment_gmb(genus_abundance_subset: pd.DataFrame) -> dict[str, f
     # get the feature contributions from each genus
     assessment = get_shap(model.model, genus_abundance_subset)
     assessment['risk'] = float(prob[0])
+    assessment['certainty'] = model.prediction_certainty(genus_abundance_subset)
     
     return assessment
 
@@ -95,6 +96,8 @@ def run_risk_assessment_tab(genus_abundance_subset: pd.DataFrame, apoe: dict) ->
     # get the feature contributions from each genus
     assessment = get_shap(model.microbiome_model.model, genus_abundance_subset)
     assessment['risk'] = float(prob[0])
+    assessment['certainty'] = model.prediction_certainty(microbiome=genus_abundance_subset,
+                                                         genetic=pd.DataFrame([apoe]))
     
     return assessment
 
@@ -122,6 +125,9 @@ def run_risk_assessment_full(genus_abundance_subset: pd.DataFrame, apoe: dict, m
     # get the feature contributions from each genus
     assessment = get_shap(model.microbiome_model.model, genus_abundance_subset)
     assessment['risk'] = float(prob[0])
+    assessment['certainty'] = model.prediction_certainty(microbiome=genus_abundance_subset,
+                                                         genetic=pd.DataFrame([apoe]),
+                                                         imaging=mri)
     
     return assessment
 
@@ -173,7 +179,7 @@ def mri_preprocess(mri: str) -> np.ndarray:
         return x
 
     data = normalize(data)
-    X_img = data[np.newaxis, :]  # (1, 128, 128, 128)
+    X_img = data[np.newaxis, :]
 
     return X_img
 
