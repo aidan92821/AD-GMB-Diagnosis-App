@@ -82,6 +82,7 @@ def create_env(callback=None):
         "CONDA_SOLVER": "classic",
     })
 
+    # creates the qiime conda environment
     cmd = [
         str(MAMBA_BIN),
         "create",
