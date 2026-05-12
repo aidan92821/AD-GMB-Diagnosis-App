@@ -276,7 +276,10 @@ def ingest_run_data(
 
         # Flush features before inserting counts — feature_count has a FK to feature
         session.flush()
-        create_feature_count_bulk(session, run_id=run_id, counts=feature_counts)
+        # Only insert counts whose feature_id was actually inserted (guards against stale FASTA)
+        inserted_ids = {f["feature_id"] for f in features}
+        safe_counts = {fid: cnt for fid, cnt in feature_counts.items() if fid in inserted_ids}
+        create_feature_count_bulk(session, run_id=run_id, counts=safe_counts)
 
         session.commit()
         return {

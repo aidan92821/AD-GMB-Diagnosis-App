@@ -259,13 +259,13 @@ def simulate(run_id: int, abundance: dict, user_diet: dict[str, float], runner: 
                 })
 
     # in case any model stopped at a certain step, lob off the excess from
-    # the rest of the models' history. but if the step any failed at is 
+    # the rest of the models' history. but if the step any failed at is
     # very small, just remove it
-    if any(infeasible_steps.values()) < 5:
-        broken_models = [genus for genus, steps in infeasible_steps.items() if steps < 5]
+    if any(steps < 5 for steps in infeasible_steps.values()):
+        broken_models = [g for g, steps in infeasible_steps.items() if steps < 5]
         for model in broken_models:
-            if model in history.keys():
-                del history[genus]
+            if model in history:
+                del history[model]
     else:
         for genus in history:
             history[genus] = history[genus][:n_steps]
@@ -315,16 +315,12 @@ def calc_new_abundance(original_abundance: dict, final_biomass: dict) -> dict:
     return new_abundance
 
 
-# either use these graphs or better pyqt ones on the simulation page
 def plot_sim_results(results: dict, original_abundance: dict) -> dict:
 
-    import matplotlib.cm as cm # for colors
+    import matplotlib.cm as cm
 
-    # return plots
     plots = {}
-    tmp_dir = '/Users/emmagomez/code/capstone/AD-GMB-Diagnosis-App/src/simulation'
 
-    # STATIC PLOTS
     # composition change (top 10)
     top10_old = {
         genus: abun
@@ -339,86 +335,99 @@ def plot_sim_results(results: dict, original_abundance: dict) -> dict:
     colors = [cm.tab20(i / max(n, 1)) for i in range(n)]
     genus_color_map = {genus: colors[i] for i, genus in enumerate(top_genera)}
 
-    fig2, axes = plt.subplots(1, 2, figsize=(14, 6))
-    axes[0].pie(top10_old.values(), labels=top10_old.keys(), autopct="%1.1f%%",
-                                              colors=[genus_color_map[g] for g in top10_old.keys()],
-                                              pctdistance=0.85, labeldistance=None)
+    fig2, axes = plt.subplots(1, 2, figsize=(9, 4.5))
+    _pie_kw = dict(autopct="%1.1f%%", pctdistance=0.78, startangle=90,
+                   textprops={'fontsize': 7})
+    if top10_old:
+        axes[0].pie(top10_old.values(),
+                    colors=[genus_color_map[g] for g in top10_old.keys()],
+                    **_pie_kw)
+    axes[0].set_title("Before Diet Change", fontsize=10, fontweight='bold', pad=8)
+    if top10_new:
+        axes[1].pie(top10_new.values(),
+                    colors=[genus_color_map[g] for g in top10_new.keys()],
+                    **_pie_kw)
+    axes[1].set_title("After Diet Change (Predicted)", fontsize=10, fontweight='bold', pad=8)
 
-    axes[0].set_title("Before Diet Change")
-    axes[1].pie(top10_new.values(), labels=top10_new.keys(), autopct="%1.1f%%",
-                                              colors=[genus_color_map[g] for g in top10_new.keys()],
-                                              pctdistance=0.85, labeldistance=None)
-    axes[1].set_title("After Diet Change (Predicted)")
-
+    ncol = min(len(top_genera), 4)
     legend_handles = [
         plt.matplotlib.patches.Patch(color=genus_color_map[g], label=g)
         for g in top_genera
     ]
-    fig2.legend(
-        handles=legend_handles,
-        loc="lower center",
-        ncol=3,
-        fontsize=8,
-        bbox_to_anchor=(0.5, -0.15)
-    )
-
-    path2 = os.path.join(tmp_dir, "composition_shift.png") # TEMP
-    fig2.savefig(path2, bbox_inches='tight') # TEMP
-    plt.close(fig2)
+    fig2.legend(handles=legend_handles, loc="lower center", ncol=ncol,
+                fontsize=8, frameon=True, bbox_to_anchor=(0.5, 0.0))
+    fig2.subplots_adjust(top=0.88, bottom=0.22, left=0.02, right=0.98, wspace=0.08)
     plots['composition_shift'] = fig2
 
     # scfa production
-    fig3, ax3 = plt.subplots()
-    scfa_df = pd.DataFrame(results['scfa_production']).T
-    scfa_df.plot(kind='bar', stacked=True, title="Predicted SCFA Production by Genus", ax=ax3)
-    ax3.set_ylabel("log Flux (mmol/gDW/hr)")
-    ax3.tick_params(axis='x', rotation=45)
-    path3 = os.path.join(tmp_dir, "scfa.png")
-    fig3.savefig(path3, bbox_inches='tight') # TEMP
-    plt.close(fig3) # TEMP
+    fig3, ax3 = plt.subplots(figsize=(8, 4), tight_layout=True)
+    scfa_data = results.get('scfa_production', {})
+    if scfa_data:
+        scfa_df = pd.DataFrame(scfa_data).T
+        scfa_df.plot(kind='bar', stacked=True, title="Predicted SCFA Production by Genus", ax=ax3)
+        ax3.set_ylabel("log Flux (mmol/gDW/hr)")
+        ax3.tick_params(axis='x', rotation=45)
+    else:
+        ax3.set_title("No SCFA data")
     plots['scfa'] = fig3
-    # STATIC PLOTS
 
-    # DYNAMIC PLOTS
     # convert history to per-genus DataFrames
-    dfs = {genus: pd.DataFrame(steps) for genus, steps in results["history"].items()}
+    dfs = {genus: pd.DataFrame(steps) for genus, steps in results["history"].items() if steps}
 
     # biomass over time
-    fig4, ax4 = plt.subplots(figsize=(10, 5))
+    fig4, ax4 = plt.subplots(figsize=(8, 4), tight_layout=True)
     for genus, df in dfs.items():
         ax4.plot(df["step"], df["biomass"], label=genus, alpha=0.5)
     ax4.set_xlabel("Time Step")
     ax4.set_ylabel("Biomass (gDW)")
     ax4.set_title("Predicted Biomass Over Time")
-    ax4.legend(fontsize=8)
-    path4 = os.path.join(tmp_dir, "dfba_biomass.png")
-    fig4.savefig(path4, bbox_inches='tight')
-    plt.close(fig4)
+    if dfs:
+        ax4.legend(fontsize=8)
     plots["dfba_biomass"] = fig4
 
-    # key nutrient depletion over time
-    key_nutrients = SCFA_NUTRIENTS.values()
-    fig5, axes5 = plt.subplots(len(dfs), 1, figsize=(10, 4 * len(dfs)), sharex=True)
-    if len(dfs) == 1:
+    # Nutrient depletion: one subplot per nutrient, all genera on each subplot
+    # This keeps it to a fixed 4 panels regardless of how many genera were simulated
+    _NUTRIENT_LABELS = {
+        "2obut[e]": "Butyrate",
+        "ac[e]":    "Acetate",
+        "pro_L[e]": "Propionate",
+        "for[e]":   "Formate",
+    }
+    key_nutrients = list(SCFA_NUTRIENTS.values())
+    genus_colors = {g: cm.tab10(i / max(len(dfs), 1)) for i, g in enumerate(dfs)}
+
+    fig5, axes5 = plt.subplots(len(key_nutrients), 1, figsize=(8, 8), sharex=True)
+    if len(key_nutrients) == 1:
         axes5 = [axes5]
 
-    for ax, (genus, df) in zip(axes5, dfs.items()):
-        for met in key_nutrients:
-            col = f"conc_{met}"
+    for ax, met in zip(axes5, key_nutrients):
+        col = f"conc_{met}"
+        has_data = False
+        for genus, df in dfs.items():
             if col in df.columns:
-                ax.plot(df["step"], df[col], label=met, alpha=0.5)
-        ax.set_title(genus, fontsize=9)
-        ax.set_ylabel("Concentration (mmol)")
-        ax.legend(fontsize=7)
+                ax.plot(df["step"], df[col],
+                        label=genus, color=genus_colors[genus],
+                        linewidth=1.8, alpha=0.85)
+                has_data = True
+        nutrient_name = _NUTRIENT_LABELS.get(met, met)
+        ax.set_title(nutrient_name, fontsize=10, fontweight='bold', loc='left', pad=4)
+        ax.set_ylabel("Concentration\n(mmol)", fontsize=8)
+        ax.tick_params(labelsize=8)
+        ax.grid(True, alpha=0.25, linestyle='--')
+        ax.spines[['top', 'right']].set_visible(False)
+        if has_data:
+            ax.legend(fontsize=7, ncol=2, loc='upper right',
+                      framealpha=0.7, edgecolor='#E2E8F0')
+        else:
+            ax.text(0.5, 0.5, "No data for this nutrient",
+                    ha='center', va='center', transform=ax.transAxes,
+                    color='#94A3B8', fontsize=9, style='italic')
 
-    axes5[-1].set_xlabel("Time Step")
-    fig5.suptitle("Nutrient Depletion Over Time", fontsize=12)
-    plt.tight_layout()
-    path5 = os.path.join(tmp_dir, "dfba_nutrients.png")
-    fig5.savefig(path5, bbox_inches='tight')
-    plt.close(fig5)
+    axes5[-1].set_xlabel("Time Step", fontsize=9)
+    fig5.suptitle("Nutrient Depletion Over Simulation", fontsize=11,
+                  fontweight='bold', y=0.98)
+    fig5.tight_layout(rect=[0, 0, 1, 0.96])
     plots["dfba_nutrients"] = fig5
-    # DYNAMIC PLOTS
 
     return plots
 

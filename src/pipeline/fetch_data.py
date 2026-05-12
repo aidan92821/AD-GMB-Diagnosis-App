@@ -102,7 +102,7 @@ def _fetch_runs_from_ebi(bioproject: str, srr: str = None, n_runs: int = 1, call
             if r['platform'] != 'ILLUMINA':
                 _log(f"Skipping {r['run_accession']}: platform is {r['platform']}, Axis supports only Illumina sequencing.")
         return None, None, None
-    elif any(r['library_strategy'] != 'AMPLICON'):
+    elif any(r['library_strategy'] != 'AMPLICON' for r in runs):
         for r in runs:
             if r['library_strategy'] != 'AMPLICON':
                 _log(f"Skipping {r['run_accession']}: library strategy is {r['library_strategy']}, Axis supports only 16S Amplicon data.")

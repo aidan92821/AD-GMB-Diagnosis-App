@@ -331,6 +331,9 @@ class _ParseWorkerReal(QObject):
                     all_genera.update(g for g, _ in row)
 
                 for run, row in abundances.items():
+                    if run not in self._state.runs:
+                        print(f"Skipping {run}: not in current session (stale cached table)")
+                        continue
                     try:
                         run_id = get_run_id_by_srr(run)
                         label = self._state.runs[run]['label']
@@ -355,6 +358,9 @@ class _ParseWorkerReal(QObject):
                     all_genera.update(g for g, _ in row)
 
                 for run, row in abundances.items():
+                    if run not in self._state.runs:
+                        print(f"Skipping {run}: not in current session (stale cached table)")
+                        continue
                     try:
                         run_id = get_run_id_by_srr(run)
                         label = self._state.runs[run]['label']
@@ -390,12 +396,16 @@ class _ParseWorkerReal(QObject):
                 except Exception:
                     pass
 
-            # remove all the intermediate files
-            cleanup(self._state.bioproject_id)
-
             self.finished.emit(self._state)
         except Exception as exc:
             self.errored.emit(str(exc))
+        finally:
+            # Always clean up intermediate files so stale qiime/ tables never
+            # cause mismatches on the next pipeline run
+            try:
+                cleanup(self._state.bioproject_id)
+            except Exception:
+                pass
 
 
 class _AnalysisWorkerReal(QObject):
@@ -601,9 +611,12 @@ class _AnalysisWorkerReal(QObject):
             return
 
         if flat:
-            run_labels = state.run_labels
-            matrix     = _AnalysisWorkerReal._build_dissimilarity_matrix(run_labels, flat, labels)
-            coords     = _AnalysisWorkerReal._pcoa_from_matrix(run_labels, matrix)
+            # Only use run labels that were actually ingested (present in lbs)
+            run_labels = [lbl for lbl in state.run_labels if lbl in labels]
+            if not run_labels:
+                return
+            matrix = _AnalysisWorkerReal._build_dissimilarity_matrix(run_labels, flat, labels)
+            coords = _AnalysisWorkerReal._pcoa_from_matrix(run_labels, matrix)
 
             for label, (pc1, pc2) in coords.items():
                 run_id = labels[label]
@@ -799,34 +812,60 @@ class _RiskPredictionWorker(QObject):
     finished = pyqtSignal(object)
     errored  = pyqtSignal(str)
 
-    def __init__(self, state: AppState, apoe: dict=None, mri: str=None, run_lbl: str='R1') -> None:
+    def __init__(self, state: AppState, apoe: dict = None, mri: str = None,
+                 run_lbl: str = 'R1', sim_id: object = None) -> None:
         super().__init__()
-        self._state = state
-        self._apoe = apoe
-        self._mri = mri
+        self._state   = state
+        self._apoe    = apoe
+        self._mri     = mri or None
         self._run_lbl = run_lbl
+        self._sim_id  = sim_id
 
     def run(self):
         try:
-            abundance = get_genus_dict(self._state.lbs[self._run_lbl])
-            if self._apoe and self._mri:
-                if all(v == 0 for v in self._apoe.values()):
-                    assessment = run_assess(model='gmb', genus_abundance=abundance, apoe=self._apoe, nifty_path=self._mri)
-                else:
-                    assessment = run_assess(model='full', genus_abundance=abundance, apoe=self._apoe, nifty_path=self._mri)
-            elif self._apoe:
-                if all(v == 0 for v in self._apoe.values()):
-                    assessment = run_assess(model='gmb', genus_abundance=abundance, apoe=self._apoe, nifty_path=self._mri)
-                else:
-                    assessment = run_assess(model='tab', genus_abundance=abundance, apoe=self._apoe, nifty_path=self._mri)
+            # Resolve run_id
+            if not self._state.lbs:
+                raise ValueError("No runs loaded — run the pipeline first.")
+            label = self._run_lbl if (self._run_lbl and self._run_lbl in self._state.lbs) \
+                else next(iter(self._state.lbs))
+            if label not in self._state.lbs:
+                raise ValueError(f"Run '{label}' not found in current project.")
+            run_id = self._state.lbs[label]
+
+            # Fetch genus abundance — from simulation if sim_id provided
+            if self._sim_id is not None:
+                from src.services.assessment_service import get_simulation_genus
+                rows = get_simulation_genus(self._sim_id)
+                abundance = {r["genus"]: r["relative_abundance"] for r in rows}
             else:
-                assessment = run_assess(model='gmb', genus_abundance=abundance, apoe=self._apoe, nifty_path=self._mri)
+                abundance = get_genus_dict(run_id)
+
+            # Choose model based on available inputs
+            has_apoe = self._apoe and not all(v == 0 for v in self._apoe.values())
+            if has_apoe and self._mri:
+                model = 'full'
+            elif has_apoe:
+                model = 'tab'
+            else:
+                model = 'gmb'
+
+            assessment = run_assess(model=model, genus_abundance=abundance,
+                                    apoe=self._apoe, nifty_path=self._mri)
             if 'stderr' in assessment:
-                self.errored.emit(assessment['stderr'])
+                # Extract the human-readable "error" key if present, else raw stderr
+                err_body = assessment['stderr'].strip()
+                try:
+                    import json as _json
+                    parsed = _json.loads(err_body.splitlines()[-1])
+                    self.errored.emit(parsed.get('error', err_body))
+                except Exception:
+                    self.errored.emit(err_body)
+            elif 'error' in assessment:
+                self.errored.emit(assessment['error'])
             else:
-                self._state.risk_result = assessment.pop('risk', None)
+                self._state.risk_result    = assessment.pop('risk', None)
                 self._state.risk_certainty = assessment.pop('certainty', None)
-                self._state.contributions = assessment
+                self._state.contributions  = assessment
                 self.finished.emit(self._state)
         except Exception as exc:
             self.errored.emit(str(exc))
@@ -1346,7 +1385,12 @@ class MainWindow(QMainWindow):
             self._on_unifrac_run()
 
     def _on_analysis_error(self, msg: str) -> None:
+        print(f"Analysis error: {msg}")
         self._status_badge.setText(f"Analysis error: {msg[:60]}")
+        self._status_badge.setObjectName("badge_red")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+        self._broadcast_state()
 
 
     def _on_phylogeny_run(self) -> None:
@@ -1808,6 +1852,8 @@ class MainWindow(QMainWindow):
         self._parsing_thread_real.start()
 
     def _on_parsing_complete(self, state: AppState):
+        self._state = state
+        self._state.pipeline_complete = True   # QIIME2 is done; data is in DB
         self._status_badge.setText("Parsing complete")
         self._status_badge.setObjectName("badge_green")
         self._status_badge.style().unpolish(self._status_badge)
@@ -1817,7 +1863,7 @@ class MainWindow(QMainWindow):
         self._overview_page.load(state)
         self._broadcast_state()
 
-        # hand it off to run analysis
+        # hand it off to run diversity analysis
         self._run_analysis()
 
     def _on_parsing_error(self, msg: str):
@@ -1828,16 +1874,16 @@ class MainWindow(QMainWindow):
         self._status_badge.style().polish(self._status_badge)
 
     # ── Risk ──────────────────────────────────────────────────────────────────
-    def _on_get_risk_assessment(self, apoe: dict=None, mri: str=None, run_lbl: str='R1') -> None:
-        self._status_badge.setText(
-            "Getting risk..."
-        )
+    def _on_get_risk_assessment(self, apoe: dict = None, mri: str = None,
+                                run_lbl: str = 'R1', sim_id: object = None) -> None:
+        self._status_badge.setText("Getting risk...")
         self._status_badge.setObjectName("badge_yellow")
         self._status_badge.style().unpolish(self._status_badge)
         self._status_badge.style().polish(self._status_badge)
         self._status_badge.show()
         self._risk_assess_thread = QThread(self)
-        self._risk_assess_worker = _RiskPredictionWorker(state=self._state, apoe=apoe, mri=mri, run_lbl=run_lbl)
+        self._risk_assess_worker = _RiskPredictionWorker(
+            state=self._state, apoe=apoe, mri=mri, run_lbl=run_lbl, sim_id=sim_id)
         self._risk_assess_worker.moveToThread(self._risk_assess_thread)
         self._risk_assess_thread.started.connect(self._risk_assess_worker.run)
         self._risk_assess_worker.finished.connect(self._on_risk_assess_complete)

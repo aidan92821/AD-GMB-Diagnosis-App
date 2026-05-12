@@ -242,15 +242,23 @@ def create_tables(runner: QiimeRunner, bioproject: str, lib_layout: str, has_tax
         ], callback=callback)
 
     # export representative sequences to FASTA (dna-sequences.fasta)
-    # must happen before the .qza is moved, while it still lives in io_dir
+    # Always regenerate — stale FASTA from a prior cleanup causes FK violations in feature_count
+    fasta_path = Path(reps_tree_dir) / "dna-sequences.fasta"
+    fasta_path.unlink(missing_ok=True)
+    rep_seqs_src = (
+        f"{io_dir}/rep-seqs.qza"
+        if Path(f"{io_dir}/rep-seqs.qza").exists()
+        else f"{reps_tree_dir}/rep-seqs.qza"
+    )
     runner.run([
         'qiime', 'tools', 'export',
-        '--input-path', f"{io_dir}/rep-seqs.qza",
+        '--input-path', rep_seqs_src,
         '--output-path', reps_tree_dir
     ], callback=callback)
 
-    # move rep-seqs.qza to a persistent folder for phylogeny inference
-    runner.mv(file=f"{io_dir}/rep-seqs.qza", dir=reps_tree_dir)
+    # move rep-seqs.qza to a persistent folder for phylogeny inference (idempotent)
+    if Path(f"{io_dir}/rep-seqs.qza").exists():
+        runner.mv(file=f"{io_dir}/rep-seqs.qza", dir=reps_tree_dir)
 
 
 def qiime_preprocess(runner: QiimeRunner, bioproject: str, lib_layout: str, callback=None):
