@@ -647,7 +647,7 @@ class UploadRunsPage(QWidget):
             row.addWidget(status_lbl)
 
             # Browse buttons only for pending NCBI runs (not local and not already uploaded)
-            is_local = srr.startswith("LOCAL_")
+            is_local = srr.startswith("LOCAL")
             if not uploaded and not is_local:
                 if is_paired:
                     for slot, lbl_txt, tip in [

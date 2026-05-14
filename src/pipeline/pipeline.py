@@ -2,12 +2,18 @@
 Fetch and Preprocess Pipeline
 This module is what the GUI interacts with upon user request to fetch and preprocess data.
 '''
+from future import __annotations__
 from db_import import parse_feat_tax_seqs, parse_feature_counts, parse_genus_table
 from fetch_data import fetch_ncbi_data
 import os
 from qiime_preproc import qiime_preprocess, download_classifier
 from services.assessment_service import create_project, create_run, ingest_run_data, get_or_create_user, get_project_overview
 from qiime2_runner import QiimeRunner
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.models.app_state import AppState
+
 
 # get email from user -> db -> retrieve from db to use as argument here
 def run_fetch(bioproject: str, email: str, srr: str=None, n_runs=1):
@@ -32,14 +38,15 @@ def run_fetch(bioproject: str, email: str, srr: str=None, n_runs=1):
     return lib_layout # to _on_fetch_request() in main_window.py
 
 
-def preprocess_parse_import(runner: QiimeRunner, bioproject: str, lib_layout: str, user: dict, project_id, project_name: str=None) -> None:
+def preprocess_parse_import(runner: QiimeRunner, bioproject: str, lib_layout: str, user: dict, project_id, state: AppState, project_name: str=None) -> None:
     
     data_dir = f"data/{bioproject}/"
     
     # preprocess with qiime2
     qiime_preprocess(runner,
                      bioproject=bioproject,
-                     lib_layout=lib_layout)
+                     lib_layout=lib_layout,
+                     state=state)
     
     # parse the data tables for db
     genus_path = f"{data_dir}/qiime/{lib_layout}/genus-table.tsv"

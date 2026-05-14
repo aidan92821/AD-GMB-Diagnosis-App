@@ -319,6 +319,7 @@ def write_manifest(bioproject: str, lib_layout: str, state: AppState) -> None:
             writer = csv.writer(m, delimiter='\t')
             if forward:
                 # paired end
+                state.local_paths['paired'] = []
                 writer.writerow(['sample-id',
                                  'forward-absolute-filepath',
                                  'reverse-absolute-filepath'])
@@ -327,19 +328,20 @@ def write_manifest(bioproject: str, lib_layout: str, state: AppState) -> None:
                     if srr not in state.runs:
                         continue   # skip leftover files from previous fetches
                     state.runs[srr]['uploaded'] = True
-                    writer.writerow([srr,
-                                     str(Path(f"{input_dir}/{f}").resolve()),
-                                     str(Path(f"{input_dir}/{r}").resolve())])
+                    fwd_path = str(Path(f"{input_dir}/{f}").resolve())
+                    rev_path = str(Path(f"{input_dir}/{r}").resolve())
+                    writer.writerow([srr, fwd_path, rev_path])
             else:
                 # single end
+                state.local_paths['single'] = []
                 writer.writerow(['sample-id', 'absolute-filepath'])
                 for s in files:
                     srr = s[:-6]   # strip .fastq (6 chars)
                     if srr not in state.runs:
                         continue   # skip leftover files from previous fetches
                     state.runs[srr]['uploaded'] = True
-                    writer.writerow([srr,
-                                     str(Path(f"{input_dir}/{s}").resolve())])
+                    single_path = str(Path(f"{input_dir}/{s}").resolve())
+                    writer.writerow([srr, single_path])
 
 
 # clean up the temporary files

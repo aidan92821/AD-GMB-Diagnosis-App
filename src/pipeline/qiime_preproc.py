@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from qiime2_runner import QiimeRunner
+    from src.models.app_state import AppState
 
 
 REF_PHYLO_DB = "sepp-refs-silva-128.qza"
@@ -19,11 +20,19 @@ SILVA_CLASSIFIER_LINK = "https://data.qiime2.org/classifiers/sklearn-1.4.2/silva
 
 
 # lib_layout = 'paired' or 'single'
-def import_samples(runner: QiimeRunner, bioproject: str, lib_layout: str, callback=None):
+def import_samples(runner: QiimeRunner, bioproject: str, lib_layout: str, state: AppState, callback=None):
 
     APP_DIR = Path(__file__).parent
-    input_dir = str((APP_DIR / f"data/{bioproject}/fastq/{lib_layout}").resolve())
-    output_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
+    fastq_list = []
+    input_dir = ""
+    if state.local_paths['paired'] or state.local_paths['single']:
+        # local runs uploaded
+        fastq_list = state.local_paths[lib_layout]
+        output_dir = str((APP_DIR / f"data/LOCAL_PROJECT/qiime/{lib_layout}").resolve())
+    else:
+        # runs downloaded from NCBI
+        input_dir = str((APP_DIR / f"data/{bioproject}/fastq/{lib_layout}").resolve())
+        output_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
 
     demux_path = Path(output_dir) / "demux.qza"
     if demux_path.exists():
@@ -37,7 +46,7 @@ def import_samples(runner: QiimeRunner, bioproject: str, lib_layout: str, callba
                    else 'SingleEndFastqManifestPhred33V2'
 
     # import runs
-    if os.listdir(input_dir):
+    if fastq_list or os.listdir(input_dir):
         runner.run([
             'qiime', 'tools', 'import',
             '--type', input_type,
@@ -52,10 +61,13 @@ def import_samples(runner: QiimeRunner, bioproject: str, lib_layout: str, callba
 # 0 -> something weird happened
 # 1 -> single with key: 'single'
 # 2 -> paired with keys: 'forward', 'reverse' in that order
-def qc(runner: QiimeRunner, bioproject: str, lib_layout: str, callback=None):
+def qc(runner: QiimeRunner, bioproject: str, lib_layout: str, state: AppState, callback=None):
 
     APP_DIR = Path(__file__).parent
-    io_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
+    if state.local_paths['paired'] or state.local_paths['single']:
+        io_dir = str((APP_DIR / f"data/LOCAL_PROJECT/qiime/{lib_layout}").resolve())
+    else:
+        io_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
 
     # calculate summary statistics (skip if already done)
     qzv_path = Path(io_dir) / "demux.qzv"
@@ -67,14 +79,17 @@ def qc(runner: QiimeRunner, bioproject: str, lib_layout: str, callback=None):
         ], callback=callback)
 
     # get truncation positions for paired forward, paired reverse, and single
-    return get_trunc(bioproject, lib_layout)
+    return get_trunc(bioproject, lib_layout, state)
 
 
 # lib_layout = 'paired' or 'single'
-def dada2_denoise(runner: QiimeRunner, bioproject: str, lib_layout: str, trunc_f: int=None, trunc_r: int=None, trunc_s: int=None, callback=None):
+def dada2_denoise(runner: QiimeRunner, bioproject: str, lib_layout: str, state: AppState, trunc_f: int=None, trunc_r: int=None, trunc_s: int=None, callback=None):
 
     APP_DIR = Path(__file__).parent
-    io_dir = Path(APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve()
+    if state.local_paths['paired'] or state.local_paths['single']:
+        io_dir = (APP_DIR / f"data/LOCAL_PROJECT/qiime/{lib_layout}").resolve()
+    else:
+        io_dir = Path(APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve()
 
     if (io_dir / "table.qza").exists():
         return
@@ -117,11 +132,14 @@ classifier: silva-138-99-nb-classifier.qza
 source: https://data.qiime2.org/classifiers/sklearn-1.4.2/silva/silva-138-99-nb-classifier.qza
 '''
 # lib_layout: 'paired' or 'single'
-def classify_taxa(runner: QiimeRunner, bioproject: str, lib_layout: str, callback=None):
+def classify_taxa(runner: QiimeRunner, bioproject: str, lib_layout: str, state: AppState, callback=None):
 
     APP_DIR = Path(__file__).parent
     classifier_path = str((APP_DIR / "taxa_classifier/silva-138-99-nb-classifier.qza").resolve())
-    io_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
+    if state.local_paths['paired'] or state.local_paths['single']:
+        io_dir = str((APP_DIR / f"data/LOCAL_PROJECT/qiime/{lib_layout}").resolve())
+    else:
+        io_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
 
     # call the classifier on the denoised data
     runner.run([
@@ -132,7 +150,7 @@ def classify_taxa(runner: QiimeRunner, bioproject: str, lib_layout: str, callbac
     ], callback=callback)
     
 
-def infer_phylogeny(runner: QiimeRunner, bioproject: str, lib_layout: str, callback=None) -> str:
+def infer_phylogeny(runner: QiimeRunner, bioproject: str, lib_layout: str, state: AppState, callback=None) -> str:
     """
     Build a rooted phylogenetic tree from representative sequences using
     MAFFT + FastTree2 (no reference DB download required).
@@ -140,7 +158,10 @@ def infer_phylogeny(runner: QiimeRunner, bioproject: str, lib_layout: str, callb
     Skips inference if tree.nwk already exists.
     """
     APP_DIR = Path(__file__).parent
-    reps_tree_dir = (APP_DIR / f"data/{bioproject}/reps-tree/{lib_layout}").resolve()
+    if state.local_paths['paired'] or state.local_paths['single']:
+        reps_tree_dir = (APP_DIR / f"data/LOCAL_PROJECT/reps-tree/{lib_layout}").resolve()
+    else:
+        reps_tree_dir = (APP_DIR / f"data/{bioproject}/reps-tree/{lib_layout}").resolve()
     nwk_file = reps_tree_dir / "tree.nwk"
 
     if nwk_file.exists():
@@ -181,11 +202,15 @@ def infer_phylogeny(runner: QiimeRunner, bioproject: str, lib_layout: str, callb
 
 
 # lib_layout: 'paired' or 'single'
-def create_tables(runner: QiimeRunner, bioproject: str, lib_layout: str, has_taxonomy: bool = True, callback=None):
+def create_tables(runner: QiimeRunner, bioproject: str, lib_layout: str, state: AppState, has_taxonomy: bool = True, callback=None):
 
     APP_DIR = Path(__file__).parent
-    io_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
-    reps_tree_dir = str((APP_DIR / f"data/{bioproject}/reps-tree/{lib_layout}").resolve())
+    if state.local_paths['paired'] or state.local_paths['single']:
+        io_dir = str((APP_DIR / f"data/LOCAL_PROJECT/qiime/{lib_layout}").resolve())
+        reps_tree_dir = str((APP_DIR / f"data/LOCAL_PROJECT/reps-tree/{lib_layout}").resolve())
+    else:
+        io_dir = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
+        reps_tree_dir = str((APP_DIR / f"data/{bioproject}/reps-tree/{lib_layout}").resolve())
     Path(reps_tree_dir).mkdir(parents=True, exist_ok=True)
 
     # feature table (asv counts) (feature-table.tsv)
@@ -261,7 +286,7 @@ def create_tables(runner: QiimeRunner, bioproject: str, lib_layout: str, has_tax
         runner.mv(file=f"{io_dir}/rep-seqs.qza", dir=reps_tree_dir)
 
 
-def qiime_preprocess(runner: QiimeRunner, bioproject: str, lib_layout: str, callback=None):
+def qiime_preprocess(runner: QiimeRunner, bioproject: str, lib_layout: str, state: AppState, callback=None):
 
     def _log(msg: str):
         print(msg)
@@ -277,21 +302,26 @@ def qiime_preprocess(runner: QiimeRunner, bioproject: str, lib_layout: str, call
         get_silva_classifier()
 
     _log(f"[{lib_layout}] Importing samples…")
-    import_samples(runner, bioproject=bioproject, lib_layout=lib_layout, callback=callback)
+    import_samples(runner, bioproject=bioproject, lib_layout=lib_layout, state=state, callback=callback)
 
     _log(f"[{lib_layout}] Running QC / demux summary…")
-    trunc = qc(runner, bioproject=bioproject, lib_layout=lib_layout, callback=callback)
+    trunc = qc(runner, bioproject=bioproject, lib_layout=lib_layout, state=state, callback=callback)
 
     _log(f"[{lib_layout}] Denoising…")
     if lib_layout == 'paired':
         dada2_denoise(runner, bioproject=bioproject, lib_layout=lib_layout,
-                      trunc_f=trunc['forward'], trunc_r=trunc['reverse'], callback=callback)
+                      trunc_f=trunc['forward'], trunc_r=trunc['reverse'], 
+                      state=state, callback=callback)
     elif lib_layout == 'single':
         dada2_denoise(runner, bioproject=bioproject, lib_layout=lib_layout,
-                      trunc_s=trunc['single'], callback=callback)
+                      trunc_s=trunc['single'], state=state, callback=callback)
 
-    io_dir = APP_DIR / f"data/{bioproject}/qiime/{lib_layout}"
-    reps_tree_dir = APP_DIR / f"data/{bioproject}/reps-tree/{lib_layout}"
+    if state.local_paths['paired'] or state.local_paths['single']:
+        io_dir = APP_DIR / f"data/LOCAL_PROJECT/qiime/{lib_layout}"
+        reps_tree_dir = APP_DIR / f"data/LOCAL_PROJECT/reps-tree/{lib_layout}"
+    else:
+        io_dir = APP_DIR / f"data/{bioproject}/qiime/{lib_layout}"
+        reps_tree_dir = APP_DIR / f"data/{bioproject}/reps-tree/{lib_layout}"
 
     # If denoising did not produce table.qza, nothing left to do
     if not (io_dir / "table.qza").exists():
@@ -309,7 +339,7 @@ def qiime_preprocess(runner: QiimeRunner, bioproject: str, lib_layout: str, call
         has_taxonomy = False
     else:
         try:
-            classify_taxa(runner, bioproject=bioproject, lib_layout=lib_layout, callback=callback)
+            classify_taxa(runner, bioproject=bioproject, lib_layout=lib_layout, state=state, callback=callback)
             has_taxonomy = True
         except Exception as e:
             _log(f"[{lib_layout}] Taxonomy classification failed: {e}")
@@ -322,7 +352,7 @@ def qiime_preprocess(runner: QiimeRunner, bioproject: str, lib_layout: str, call
         _log(f"[{lib_layout}] Output tables already exist — skipping.")
     else:
         create_tables(runner, bioproject=bioproject, lib_layout=lib_layout,
-                      has_taxonomy=has_taxonomy, callback=callback)
+                      has_taxonomy=has_taxonomy, state=state, callback=callback)
 
     _log(f"[{lib_layout}] Preprocessing complete.")
     

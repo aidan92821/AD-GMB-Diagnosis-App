@@ -1,28 +1,44 @@
+from __future__ import annotations
 import pandas as pd
 from pathlib import Path
 import os
 import zipfile
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.models.app_state import AppState
 
 
 # lib_layout = 'paired' or 'single'
 # fastqs = list of fastq filenames
-def get_min_run_len(bioproject: str, lib_layout: str, fastqs: list[str]) -> int:
+def get_min_run_len(bioproject: str, lib_layout: str, fastqs: list[str], state: AppState) -> int:
     
     print('get min run length')
-    APP_DIR = Path(__file__).parent
-    input_dir = str((APP_DIR / f"data/{bioproject}/fastq/{lib_layout}").resolve())
-    
     lengths = []
-
-    try:
-        for fastq in fastqs:
-            with open(f"{input_dir}/{fastq}", 'r', encoding='utf-8') as f:
-                f.readline() # skip header (@...)
-                seq = f.readline().strip() # sequence
-                if seq:
-                    lengths.append(len(seq))
-    except Exception as e:
+    
+    APP_DIR = Path(__file__).parent
+    if state.local_paths['paired'] or state.local_paths['single']:
+        fastq_list = state.local_paths[lib_layout]
+        try:
+            for fastq in fastq_list:
+                with open(f"{fastq}", 'r', encoding='utf-8') as f:
+                    f.readline() # skip header (@...)
+                    seq = f.readline().strip() # sequence
+                    if seq:
+                        lengths.append(len(seq))
+        except Exception as e:
             print(f"An error occurred reading {fastq}: {e}")
+    else:
+        input_dir = str((APP_DIR / f"data/{bioproject}/fastq/{lib_layout}").resolve())
+        try:
+            for fastq in fastqs:
+                with open(f"{input_dir}/{fastq}", 'r', encoding='utf-8') as f:
+                    f.readline() # skip header (@...)
+                    seq = f.readline().strip() # sequence
+                    if seq:
+                        lengths.append(len(seq))
+        except Exception as e:
+                print(f"An error occurred reading {fastq}: {e}")
 
     return min(lengths) if lengths else 0
 
@@ -60,17 +76,27 @@ def find_median_drop(sns, quality_threshold: int) -> int:
 # 0 -> something weird happened
 # 1 -> single with key: 'single'
 # 2 -> paired with keys: 'forward', 'reverse' in that order
-def get_trunc(bioproject: str, lib_layout: str):
+def get_trunc(bioproject: str, lib_layout: str, state: AppState):
 
     print("get trunc")
     QUALITY_THRESHOLD = 25
 
     APP_DIR = Path(__file__).parent
-    input_dir_fastq = str((APP_DIR / f"data/{bioproject}/fastq/{lib_layout}").resolve())
-    input_dir_qiime = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
+    fastq_list = []
+    input_dir_fastq = ""
+    if state.local_paths['paired'] or state.local_paths['single']:
+        # local runs uploaded
+        fastq_list = state.local_paths[lib_layout]
+        input_dir_qiime = str((APP_DIR / f"data/LOCAL_PROJECT/qiime/{lib_layout}").resolve())
+    else:
+        input_dir_fastq = str((APP_DIR / f"data/{bioproject}/fastq/{lib_layout}").resolve())
+        input_dir_qiime = str((APP_DIR / f"data/{bioproject}/qiime/{lib_layout}").resolve())
 
     # organize the fastq types (ignore non-.fastq files like .sra)
-    files = [f for f in os.listdir(input_dir_fastq) if f.endswith('.fastq')]
+    if fastq_list:
+        files = fastq_list
+    else:
+        files = [f for f in os.listdir(input_dir_fastq) if f.endswith('.fastq')]
     forward, reverse = [], []
     if files:
         # if single, they will all be contained in files list
@@ -82,10 +108,10 @@ def get_trunc(bioproject: str, lib_layout: str):
 
     # find the smallest run length
     if forward:
-        min_trunc_forward = get_min_run_len(bioproject, 'paired', forward)
-        min_trunc_reverse = get_min_run_len(bioproject, 'paired', reverse)
+        min_trunc_forward = get_min_run_len(bioproject, 'paired', forward, state=state)
+        min_trunc_reverse = get_min_run_len(bioproject, 'paired', reverse, state=state)
     else:
-        min_trunc_single = get_min_run_len(bioproject, 'single', files)
+        min_trunc_single = get_min_run_len(bioproject, 'single', files, state=state)
 
     # find first base position where median read quality drops below the threshold
     with zipfile.ZipFile(f"{input_dir_qiime}/demux.qzv") as z:

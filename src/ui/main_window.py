@@ -280,22 +280,22 @@ class _PipelineWorkerReal(QObject):
             # preprocess the paired end fastq files
             if self._state.paired_runs:
                 qiime_preprocess(runner=self._runner, bioproject=self._bioproject,
-                                    lib_layout='paired', callback=cb)
+                                    lib_layout='paired', state=self._state, callback=cb)
 
             # preprocess the single end fastq files
             if self._state.single_runs:
                 qiime_preprocess(runner=self._runner, bioproject=self._bioproject,
-                                    lib_layout='single', callback=cb)
+                                    lib_layout='single', state=self._state, callback=cb)
 
             # Infer phylogenetic tree (one per project — prefer single layout)
             self.progress.emit("[phylogeny] Building phylogenetic tree…")
             nwk = ""
             if self._state.single_runs:
                 nwk = infer_phylogeny(runner=self._runner, bioproject=self._bioproject,
-                                      lib_layout='single', callback=cb)
+                                      lib_layout='single', state=self._state, callback=cb)
             elif self._state.paired_runs:
                 nwk = infer_phylogeny(runner=self._runner, bioproject=self._bioproject,
-                                      lib_layout='paired', callback=cb)
+                                      lib_layout='paired', state=self._state, callback=cb)
             self._state._nwk_string = nwk
 
             self.finished.emit(self._state)
@@ -311,7 +311,10 @@ class _ParseWorkerReal(QObject):
 
     def __init__(self, bioproject: str, state: AppState, user):
         super().__init__()
-        self._data_dir = str((Path(__file__).parent.parent / f"pipeline/data/{bioproject}").resolve())
+        if state.local_paths['paired'] or state.local_paths['single']:
+            self._data_dir = str((Path(__file__).parent.parent / f"pipeline/data/LOCAL_PROJECT").resolve())
+        else:
+            self._data_dir = str((Path(__file__).parent.parent / f"pipeline/data/{bioproject}").resolve())
         self._state = state
         self._user = user
 
@@ -395,6 +398,12 @@ class _ParseWorkerReal(QObject):
                         self._state.tree_id = tree_info.get('tree_id')
                 except Exception:
                     pass
+
+            # remove all the intermediate files
+            if self._state.local_paths['paired'] or self._state.local_paths['single']:
+                cleanup(bioproject="LOCAL_PROJECT")
+            else:
+                cleanup(self._state.bioproject_id)
 
             self.finished.emit(self._state)
         except Exception as exc:
@@ -650,9 +659,9 @@ class _PhylogenyWorker(QObject):
                 # only need to get one tree per bioproject
                 nwk = ""    
                 if self._state.single_runs:
-                    nwk = infer_phylogeny(runner=self._runner, bioproject=self._bioproject, lib_layout='single', callback=print)
+                    nwk = infer_phylogeny(runner=self._runner, bioproject=self._bioproject, lib_layout='single', state=self._state, callback=print)
                 elif self._state.paired_runs:
-                    nwk = infer_phylogeny(runner=self._runner, bioproject=self._bioproject, lib_layout='paired', callback=print)
+                    nwk = infer_phylogeny(runner=self._runner, bioproject=self._bioproject, lib_layout='paired', state=self._state, callback=print)
                 # store newick string in db
                 tree_info = create_tree_instance(project_id=self._state.db_project_id, newick_string=nwk)
                 self._state.tree_id = tree_info['tree_id']
@@ -1608,10 +1617,10 @@ class MainWindow(QMainWindow):
             return
 
         # Generate unique accession and label
-        local_n = sum(1 for k in self._state.runs if k.startswith("LOCAL_")) + 1
-        accession = f"LOCAL_{local_n}"
+        local_n = sum(1 for k in self._state.runs if k.startswith("LOCAL")) + 1
+        accession = f"LOCAL{local_n}"
         all_labels = [r['label'] for r in self._state.runs.values()]
-        label = f"L{local_n}"
+        label = f"R{local_n}"
 
         run = {
             'run_accession'    : accession,
@@ -1651,6 +1660,8 @@ class MainWindow(QMainWindow):
             f"{label} added — {uploaded_runs} run(s) ready for pipeline", "ok")
 
     def _write_manifests_from_state(self) -> None:
+
+        print("write manifests from state")
         """Re-write QIIME2 manifest TSVs using paths stored in run dicts.
 
         Works for both NCBI-downloaded files (standard paths) and user-browsed
@@ -1659,16 +1670,50 @@ class MainWindow(QMainWindow):
         """
         import csv as _csv
         from pathlib import Path as _P
+        import shutil
+
+        project = save_ncbi_project(
+            user_id            = self._current_user["user_id"],
+            bio_proj_accession = "LOCAL_PROJECT",
+            title              = "LOCAL_PROJECT",
+            runs               = [
+                {"accession": accession, "layout": run_dict['library_layout']}
+                for accession, run_dict in self._state.runs.items()
+            ],
+        )
+        self._state.db_project_id = project["project_id"]
 
         APP_DIR = _P(__file__).parent.parent / "pipeline"
-        bio = self._state.bioproject_id
+        bio = "LOCAL_PROJECT"
 
         paired = [r for r in self._state.runs.values()
                   if r.get('library_layout', '').upper() == 'PAIRED' and r['uploaded']]
         single = [r for r in self._state.runs.values()
                   if r.get('library_layout', '').upper() == 'SINGLE' and r['uploaded']]
+        
+        # # create the temporary qiime & reps-tree directories
+        temp_qiime_paired = APP_DIR / "data/LOCAL_PROJECT/qiime/paired"
+        if temp_qiime_paired.exists() and temp_qiime_paired.is_dir():
+            shutil.rmtree(temp_qiime_paired)
+        temp_qiime_paired.mkdir(parents=True, exist_ok=True)
+        
+        temp_qiime_single = APP_DIR / "data/LOCAL_PROJECT/qiime/single"
+        if temp_qiime_single.exists() and temp_qiime_single.is_dir():
+            shutil.rmtree(temp_qiime_single)
+        temp_qiime_single.mkdir(parents=True, exist_ok=True)
+        
+        temp_reps_tree_paired = APP_DIR / f"data/LOCAL_PROJECT/reps-tree/paired"
+        if temp_reps_tree_paired.exists() and temp_reps_tree_paired.is_dir():
+            shutil.rmtree(temp_reps_tree_paired)
+        temp_reps_tree_paired.mkdir(parents=True, exist_ok=True)
+        
+        temp_reps_tree_single = APP_DIR / f"data/LOCAL_PROJECT/reps-tree/single"
+        if temp_reps_tree_single.exists() and temp_reps_tree_single.is_dir():
+            shutil.rmtree(temp_reps_tree_single)
+        temp_reps_tree_single.mkdir(parents=True, exist_ok=True)
 
         if paired:
+            self._state.local_paths['paired'] = []
             out = APP_DIR / f"data/{bio}/qiime/paired"
             out.mkdir(parents=True, exist_ok=True)
             with open(out / "manifest.tsv", "w", newline="") as f:
@@ -1677,13 +1722,14 @@ class MainWindow(QMainWindow):
                             'reverse-absolute-filepath'])
                 for r in paired:
                     srr = r['run_accession']
-                    fwd = r.get('fastq_forward') or str(
-                        APP_DIR / f"data/{bio}/fastq/paired/{srr}_1.fastq")
-                    rev = r.get('fastq_reverse') or str(
-                        APP_DIR / f"data/{bio}/fastq/paired/{srr}_2.fastq")
+                    fwd = r.get('fastq_forward')
+                    rev = r.get('fastq_reverse')
                     w.writerow([srr, fwd, rev])
+                    self._state.local_paths['paired'].append(fwd)
+                    self._state.local_paths['paired'].append(rev)
 
         if single:
+            self._state.local_paths['single'] = []
             out = APP_DIR / f"data/{bio}/qiime/single"
             out.mkdir(parents=True, exist_ok=True)
             with open(out / "manifest.tsv", "w", newline="") as f:
@@ -1691,9 +1737,9 @@ class MainWindow(QMainWindow):
                 w.writerow(['sample-id', 'absolute-filepath'])
                 for r in single:
                     srr = r['run_accession']
-                    path = r.get('fastq_path') or str(
-                        APP_DIR / f"data/{bio}/fastq/single/{srr}.fastq")
+                    path = r.get('fastq_path')
                     w.writerow([srr, path])
+                    self._state.local_paths['single'].append(path)
 
     def _on_check_env(self) -> None:
 
