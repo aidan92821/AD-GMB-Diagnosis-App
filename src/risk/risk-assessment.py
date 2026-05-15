@@ -5,6 +5,8 @@ os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 # DO NOT REMOVE OR MOVE
 import json
+import sys
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import pickle
@@ -184,39 +186,42 @@ def mri_preprocess(mri: str) -> np.ndarray:
     return X_img
 
 
-def risk_assess(model: str, genus_abundance: dict, apoe: dict=None, nifty_path: str=None) -> dict[str, float]:
-    '''
-    model options: 'gmb', 'tab', or 'full'
-    returns {'risk': risk_perc, genus: effect}
-    if the effect is NEGATIVE -> made risk lower
-    if the effect is POSITIVE -> made risk higher
-    '''
-
+def risk_assess(model: str, genus_abundance: dict, apoe: dict = None, nifty_path: str = None) -> dict:
     pp_abundance = preprocess_genera(genus_abundance)
     subset = get_genus_subset(pp_abundance)
 
     if model == 'gmb':
-        assessment = run_risk_assessment_gmb(subset)
-        return assessment
+        return run_risk_assessment_gmb(subset)
+
     elif model == 'tab' and apoe:
-        assessment = run_risk_assessment_tab(subset, apoe)
-        return assessment
+        return run_risk_assessment_tab(subset, apoe)
+
     elif model == 'full' and nifty_path:
+        if not Path(nifty_path).exists():
+            raise FileNotFoundError(f"NIfTI file not found: {nifty_path}")
         mri = mri_preprocess(mri=nifty_path)
-        assessment = run_risk_assessment_full(subset, apoe, mri)
+        return run_risk_assessment_full(subset, apoe, mri)
+
     else:
-        print(f"no model named {model}")
-        return {}
-    
+        raise ValueError(
+            f"Cannot run model='{model}': "
+            f"apoe={'provided' if apoe else 'missing'}, "
+            f"nifty_path={'provided' if nifty_path else 'missing'}"
+        )
+
 
 def main():
-    # get args
-    import sys
     data = json.loads(sys.stdin.read())
-    
-    # risk assess
-    assessment = risk_assess(data['model'], data['microbiome'], data['genetic'], data['mri'])
-    print(json.dumps(assessment))
+    try:
+        assessment = risk_assess(
+            data['model'], data['microbiome'], data['genetic'], data['mri']
+        )
+        print(json.dumps(assessment))
+    except Exception as exc:
+        import traceback
+        print(json.dumps({"error": str(exc), "traceback": traceback.format_exc()}),
+              file=sys.stderr)
+        sys.exit(1)
 
 
 main()
