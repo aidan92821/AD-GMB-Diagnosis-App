@@ -16,6 +16,8 @@ if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
 
+def default_paths():
+    return {'paired': [], 'single': []}
 
 @dataclass
 class RunState:
@@ -38,18 +40,19 @@ class  AppState:
     Populated by MainWindow after a successful NCBI fetch.
     """
     # ── Project-level ─────────────────────────────────────────────────────────
-    bioproject_id:  str = ""
-    project_uid:    str = ""           # SRA study ID, e.g. SRP296181
-    title:          str = ""
-    organism:       str = ""
-    single_runs:   list = field(default_factory=list) # holds the current single end SRRs to download
-    paired_runs:   list = field(default_factory=list) # holds the current paired end SRRs to download
-    run_count:      int = 0
-    tree_id:       Optional[int] = None
+    bioproject_id:      str           = ""
+    project_uid:        str           = ""           # SRA study ID, e.g. SRP296181
+    title:              str           = ""
+    organism:           str           = ""
+    single_runs:        list          = field(default_factory=list) # current single end SRRs to download
+    paired_runs:        list          = field(default_factory=list) # current paired end SRRs to download
+    run_count:          int           = 0
+    tree_id:            Optional[int] = None
+    local_paths:        dict          = field(default_factory=default_paths) # {'paired': list[str], 'single': list[str]}
 
     # ── Runs ──────────────────────────────────────────────────────────────────
     runs: dict = field(default_factory=dict)
-    lbs:  dict = field(default_factory=dict) # R1, R2, R3, R4 (label: run_id)
+    lbs:  dict = field(default_factory=dict) # R1, R2, R3, R4 {label: run_id}
 
     # ── Analysis results (filled after QIIME2 runs) ───────────────────────────
     asv_count:      int  = 0
@@ -74,6 +77,12 @@ class  AppState:
 
     # ── Risk ──────────────────────────────────────────────────────────────────
     risk_result: Optional[dict] = None
+    contributions: dict = field(default_factory=dict)
+    risk_certainty: Optional[dict] = None
+
+    # ── Simulation ────────────────────────────────────────────────────────────
+    simu_plots: dict = field(default_factory=dict) # run_label: plots dict {plot_name: plt}
+    simu_stats: dict = field(default_factory=dict) # run_label: stats dataframe
 
     # ── Pipeline gate ─────────────────────────────────────────────────────────
     pipeline_complete: bool = False

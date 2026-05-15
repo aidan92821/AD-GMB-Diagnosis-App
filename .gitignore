@@ -5,6 +5,7 @@ exports/
 # ── Pipeline data (generated at runtime) ──────────────────────────────────────
 src/pipeline/data/
 fasterq.tmp*/
+ml_env/
 
 # ── Bioinformatics files ──────────────────────────────────────────────────────
 *.fastq
@@ -47,6 +48,7 @@ venv/
 .venv/
 env/
 src/venv/
+*_env/
 
 # ── Compiled / binary artifacts ───────────────────────────────────────────────
 python3
@@ -64,6 +66,7 @@ data/key_vault.json
 .DS_Store
 **/.DS_Store
 Thumbs.db
+*.Zone.Identifier
 
 # ── IDE ───────────────────────────────────────────────────────────────────────
 .vscode/

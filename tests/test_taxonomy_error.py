@@ -30,6 +30,7 @@ def test_taxonomy_classification_error_message():
             qiime_preprocess(
                 bioproject="test_project",
                 lib_layout="paired",
+                state=None,
                 callback=None
             )
 

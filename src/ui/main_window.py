@@ -46,13 +46,18 @@ from src.pipeline.fetch_data import (fetch_runs, download_runs,
 from src.pipeline.db_import import (parse_feat_tax_seqs, parse_feature_counts,
                                     parse_genus_table)
 
-from src.services.assessment_service import (save_ncbi_project, create_project, 
+from src.risk.run_assess import run_assess
+
+from src.simulation.simulate_gmb import simulate, plot_sim_results, get_abundance_shift_stats
+
+from src.services.assessment_service import (save_ncbi_project, get_genus_dict, 
                                              create_run,ingest_run_data, 
                                              get_run_id_by_srr, get_feature_counts,
                                              get_tree, store_alpha_diversities,
                                              store_beta_diversity, ServiceError,
                                              get_beta_diversity_matrix, store_pcoa,
-                                             create_tree_instance, get_run_feature_ids)
+                                             create_tree_instance, get_run_feature_ids,
+                                             create_simulation, ingest_simulation_genus)
 
 # ── Sidebar nav ───────────────────────────────────────────────────────────────
 
@@ -81,6 +86,8 @@ NAV = [
 class _FetchWorkerReal(QObject):
     finished = pyqtSignal(object, object, object)   # emits list of single runs, list of paired runs, and project dictionary
     errored  = pyqtSignal(str)
+    progress = pyqtSignal(str)
+    canceled = pyqtSignal()
 
     def __init__(self, bioproject: str, email: str, runner: QiimeRunner, srr: str=None, n_runs=1) -> None:
         super().__init__()
@@ -91,9 +98,22 @@ class _FetchWorkerReal(QObject):
         self._runner = runner
     
     def run(self):
+
+        def cb(line: str):
+            if line:
+                self.progress.emit(line)
+
         try:
-            single_runs, paired_runs, project = fetch_runs(email=self._email, runner=self._runner, bioproject=self._bioproject, srr=self._srr, n_runs=self._n_runs)
-            self.finished.emit(single_runs, paired_runs, project)
+            self.progress.emit("[fetch] Fetching runs...")
+            single_runs, paired_runs, project = fetch_runs(email=self._email, runner=self._runner, 
+                                                           bioproject=self._bioproject, srr=self._srr, 
+                                                           n_runs=self._n_runs, callback=cb)
+            # unsupported sequencing platform
+            if not (single_runs or paired_runs) or not project:
+                # cancel the fetch + download sequence
+                self.canceled.emit()
+            else:
+                self.finished.emit(single_runs, paired_runs, project)
         except Exception as exc:
             self.errored.emit(str(exc))
 
@@ -260,22 +280,22 @@ class _PipelineWorkerReal(QObject):
             # preprocess the paired end fastq files
             if self._state.paired_runs:
                 qiime_preprocess(runner=self._runner, bioproject=self._bioproject,
-                                    lib_layout='paired', callback=cb)
+                                    lib_layout='paired', state=self._state, callback=cb)
 
             # preprocess the single end fastq files
             if self._state.single_runs:
                 qiime_preprocess(runner=self._runner, bioproject=self._bioproject,
-                                    lib_layout='single', callback=cb)
+                                    lib_layout='single', state=self._state, callback=cb)
 
             # Infer phylogenetic tree (one per project — prefer single layout)
             self.progress.emit("[phylogeny] Building phylogenetic tree…")
             nwk = ""
             if self._state.single_runs:
                 nwk = infer_phylogeny(runner=self._runner, bioproject=self._bioproject,
-                                      lib_layout='single', callback=cb)
+                                      lib_layout='single', state=self._state, callback=cb)
             elif self._state.paired_runs:
                 nwk = infer_phylogeny(runner=self._runner, bioproject=self._bioproject,
-                                      lib_layout='paired', callback=cb)
+                                      lib_layout='paired', state=self._state, callback=cb)
             self._state._nwk_string = nwk
 
             self.finished.emit(self._state)
@@ -291,7 +311,10 @@ class _ParseWorkerReal(QObject):
 
     def __init__(self, bioproject: str, state: AppState, user):
         super().__init__()
-        self._data_dir = str((Path(__file__).parent.parent / f"pipeline/data/{bioproject}").resolve())
+        if state.local_paths['paired'] or state.local_paths['single']:
+            self._data_dir = str((Path(__file__).parent.parent / f"pipeline/data/LOCAL_PROJECT").resolve())
+        else:
+            self._data_dir = str((Path(__file__).parent.parent / f"pipeline/data/{bioproject}").resolve())
         self._state = state
         self._user = user
 
@@ -311,6 +334,9 @@ class _ParseWorkerReal(QObject):
                     all_genera.update(g for g, _ in row)
 
                 for run, row in abundances.items():
+                    if run not in self._state.runs:
+                        print(f"Skipping {run}: not in current session (stale cached table)")
+                        continue
                     try:
                         run_id = get_run_id_by_srr(run)
                         label = self._state.runs[run]['label']
@@ -335,6 +361,9 @@ class _ParseWorkerReal(QObject):
                     all_genera.update(g for g, _ in row)
 
                 for run, row in abundances.items():
+                    if run not in self._state.runs:
+                        print(f"Skipping {run}: not in current session (stale cached table)")
+                        continue
                     try:
                         run_id = get_run_id_by_srr(run)
                         label = self._state.runs[run]['label']
@@ -371,11 +400,21 @@ class _ParseWorkerReal(QObject):
                     pass
 
             # remove all the intermediate files
-            cleanup(self._state.bioproject_id)
+            if self._state.local_paths['paired'] or self._state.local_paths['single']:
+                cleanup(bioproject="LOCAL_PROJECT")
+            else:
+                cleanup(self._state.bioproject_id)
 
             self.finished.emit(self._state)
         except Exception as exc:
             self.errored.emit(str(exc))
+        finally:
+            # Always clean up intermediate files so stale qiime/ tables never
+            # cause mismatches on the next pipeline run
+            try:
+                cleanup(self._state.bioproject_id)
+            except Exception:
+                pass
 
 
 class _AnalysisWorkerReal(QObject):
@@ -581,9 +620,12 @@ class _AnalysisWorkerReal(QObject):
             return
 
         if flat:
-            run_labels = state.run_labels
-            matrix     = _AnalysisWorkerReal._build_dissimilarity_matrix(run_labels, flat, labels)
-            coords     = _AnalysisWorkerReal._pcoa_from_matrix(run_labels, matrix)
+            # Only use run labels that were actually ingested (present in lbs)
+            run_labels = [lbl for lbl in state.run_labels if lbl in labels]
+            if not run_labels:
+                return
+            matrix = _AnalysisWorkerReal._build_dissimilarity_matrix(run_labels, flat, labels)
+            coords = _AnalysisWorkerReal._pcoa_from_matrix(run_labels, matrix)
 
             for label, (pc1, pc2) in coords.items():
                 run_id = labels[label]
@@ -617,9 +659,9 @@ class _PhylogenyWorker(QObject):
                 # only need to get one tree per bioproject
                 nwk = ""    
                 if self._state.single_runs:
-                    nwk = infer_phylogeny(runner=self._runner, bioproject=self._bioproject, lib_layout='single', callback=print)
+                    nwk = infer_phylogeny(runner=self._runner, bioproject=self._bioproject, lib_layout='single', state=self._state, callback=print)
                 elif self._state.paired_runs:
-                    nwk = infer_phylogeny(runner=self._runner, bioproject=self._bioproject, lib_layout='paired', callback=print)
+                    nwk = infer_phylogeny(runner=self._runner, bioproject=self._bioproject, lib_layout='paired', state=self._state, callback=print)
                 # store newick string in db
                 tree_info = create_tree_instance(project_id=self._state.db_project_id, newick_string=nwk)
                 self._state.tree_id = tree_info['tree_id']
@@ -779,24 +821,97 @@ class _RiskPredictionWorker(QObject):
     finished = pyqtSignal(object)
     errored  = pyqtSignal(str)
 
-    def __init__(self, state: AppState) -> None:
+    def __init__(self, state: AppState, apoe: dict = None, mri: str = None,
+                 run_lbl: str = 'R1', sim_id: object = None) -> None:
         super().__init__()
-        self._state = state
+        self._state   = state
+        self._apoe    = apoe
+        self._mri     = mri or None
+        self._run_lbl = run_lbl
+        self._sim_id  = sim_id
 
     def run(self):
-        pass
+        try:
+            # Resolve run_id
+            if not self._state.lbs:
+                raise ValueError("No runs loaded — run the pipeline first.")
+            label = self._run_lbl if (self._run_lbl and self._run_lbl in self._state.lbs) \
+                else next(iter(self._state.lbs))
+            if label not in self._state.lbs:
+                raise ValueError(f"Run '{label}' not found in current project.")
+            run_id = self._state.lbs[label]
+
+            # Fetch genus abundance — from simulation if sim_id provided
+            if self._sim_id is not None:
+                from src.services.assessment_service import get_simulation_genus
+                rows = get_simulation_genus(self._sim_id)
+                abundance = {r["genus"]: r["relative_abundance"] for r in rows}
+            else:
+                abundance = get_genus_dict(run_id)
+
+            # Choose model based on available inputs
+            has_apoe = self._apoe and not all(v == 0 for v in self._apoe.values())
+            if has_apoe and self._mri:
+                model = 'full'
+            elif has_apoe:
+                model = 'tab'
+            else:
+                model = 'gmb'
+
+            assessment = run_assess(model=model, genus_abundance=abundance,
+                                    apoe=self._apoe, nifty_path=self._mri)
+            if 'stderr' in assessment:
+                # Extract the human-readable "error" key if present, else raw stderr
+                err_body = assessment['stderr'].strip()
+                try:
+                    import json as _json
+                    parsed = _json.loads(err_body.splitlines()[-1])
+                    self.errored.emit(parsed.get('error', err_body))
+                except Exception:
+                    self.errored.emit(err_body)
+            elif 'error' in assessment:
+                self.errored.emit(assessment['error'])
+            else:
+                self._state.risk_result    = assessment.pop('risk', None)
+                self._state.risk_certainty = assessment.pop('certainty', None)
+                self._state.contributions  = assessment
+                self.finished.emit(self._state)
+        except Exception as exc:
+            self.errored.emit(str(exc))
 
 
 class _SimulationWorker(QObject):
     finished = pyqtSignal(object)
     errored  = pyqtSignal(str)
 
-    def __init__(self, state: AppState) -> None:
+    def __init__(self, state: AppState, user_diet: dict, runner: QiimeRunner, run_label: str='R1') -> None:
         super().__init__()
         self._state = state
+        self._run_id = state.lbs[run_label]
+        self._user_diet = user_diet
+        self._runner = runner
+        self._run_label = run_label
 
     def run(self):
-        pass
+        try:
+            abundance = get_genus_dict(self._run_id)
+            results = simulate(run_id=self._run_id,
+                               abundance=abundance,
+                               user_diet=self._user_diet,
+                               runner=self._runner)
+            # save results to the AppState for pages to get
+            plots = plot_sim_results(results, abundance)
+            stats = get_abundance_shift_stats(abundance_old=abundance, abundance_new=results["new_abundance"])
+            self._state.simu_plots[self._run_label] = plots
+            self._state.simu_stats[self._run_label] = stats
+
+            # save results to the database
+            sim_id = create_simulation(self._run_id)['simulation_id']
+            ingest_simulation_genus(run_id=self._run_id, simulation_id=sim_id, genus_rows=results["new_abundance"])
+            self.finished.emit(self._state)
+        except Exception as exc:
+            self.errored.emit(str(exc))
+
 
 
 # ── Main window ───────────────────────────────────────────────────────────────
@@ -994,6 +1109,8 @@ class MainWindow(QMainWindow):
         self._profile_page.logout_requested.connect(self._on_logout)
         self._profile_page.load_project.connect(self._on_load_project)
         self._profile_page.delete_project.connect(self._on_delete_project)
+        self._alzheimer_page.assessment_requested.connect(self._on_get_risk_assessment)
+        self._simulation_page.simulation_requested.connect(self._on_run_simulation)
 
         host_lay.addWidget(self._stack)
         scroll.setWidget(host)
@@ -1034,6 +1151,8 @@ class MainWindow(QMainWindow):
         self._status_badge.setText("Fetching from NCBI…")
         self._status_badge.show()
 
+        self._show_cancel(True)
+
         # emma changes
         self._fetch_real_thread = QThread(self)
         self._fetch_real_worker = _FetchWorkerReal(bioproject=bioproject,
@@ -1043,6 +1162,8 @@ class MainWindow(QMainWindow):
                                                    n_runs=max_runs)
         self._fetch_real_worker.moveToThread(self._fetch_real_thread)
         self._fetch_real_thread.started.connect(self._fetch_real_worker.run)
+        self._fetch_real_worker.canceled.connect(self._on_cancel)
+        self._fetch_real_worker.progress.connect(self._upload_page.append_terminal_output)
         self._fetch_real_worker.finished.connect(self._on_fetch_complete)
         self._fetch_real_worker.errored.connect(self._on_fetch_error)
         self._fetch_real_worker.finished.connect(self._fetch_real_thread.quit)
@@ -1126,6 +1247,9 @@ class MainWindow(QMainWindow):
         """Start fasterq-dump download."""
         self._show_cancel(True)
         self._status_badge.setText("Downloading FASTQ files…")
+        self._status_badge.setObjectName("badge_yellow")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
         self._upload_page.update_pipeline_status("Downloading FASTQ files from NCBI…", "info")
         self._upload_page.clear_terminal()
 
@@ -1270,7 +1394,12 @@ class MainWindow(QMainWindow):
             self._on_unifrac_run()
 
     def _on_analysis_error(self, msg: str) -> None:
+        print(f"Analysis error: {msg}")
         self._status_badge.setText(f"Analysis error: {msg[:60]}")
+        self._status_badge.setObjectName("badge_red")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+        self._broadcast_state()
 
 
     def _on_phylogeny_run(self) -> None:
@@ -1351,6 +1480,7 @@ class MainWindow(QMainWindow):
             self._runner.cancel()
 
         # Terminate all active worker threads
+        threads_to_kill = []
         for attr in (
             '_fetch_real_thread',
             '_dl_thread_real',
@@ -1361,27 +1491,55 @@ class MainWindow(QMainWindow):
             thread = getattr(self, attr, None)
             if thread and thread.isRunning():
                 thread.quit()
-                thread.terminate()
-                thread.wait(2000)
+                # thread.terminate()
+                # thread.wait(2000)
+                threads_to_kill.append(thread)
 
-        # Delete intermediate files
-        if self._state and self._state.bioproject_id:
+        # # Delete intermediate files
+        # if self._state and self._state.bioproject_id:
+        #     try:
+        #         from src.pipeline.fetch_data import cleanup
+        #         cleanup(self._state.bioproject_id)
+        #     except Exception as exc:
+        #         print(f"Cleanup error on cancel: {exc}")
+
+        # give threads a short time to quit gracefully
+        # process UI events while waiting so the app doesn't freeze
+        from PyQt6.QtCore import QCoreApplication
+        import time
+        deadline = time.time() + 2.0
+        while any(t.isRunning() for t in threads_to_kill) and time.time() < deadline:
+            QCoreApplication.processEvents()
+            time.sleep(0.05)
+
+        # force kill anything still running
+        for thread in threads_to_kill:
+            if thread.isRunning():
+                thread.terminate()
+
+        # run cleanup in background so it doesn't block UI
+        def _do_cleanup():
             try:
                 from src.pipeline.fetch_data import cleanup
                 cleanup(self._state.bioproject_id)
             except Exception as exc:
                 print(f"Cleanup error on cancel: {exc}")
 
+        if self._state and self._state.bioproject_id:
+            import threading
+            threading.Thread(target=_do_cleanup, daemon=True).start()
+
         # Reset UI
         self._cancel_btn.hide()
         self._cancel_btn.setEnabled(True)
         self._overview_page._restore_fetch_btn()
-        self._status_badge.setText("Cancelled")
+        self._status_badge.setText("Canceled")
         self._status_badge.setObjectName("badge_yellow")
         self._status_badge.style().unpolish(self._status_badge)
         self._status_badge.style().polish(self._status_badge)
-        self._upload_page.update_pipeline_status("Cancelled by user", "warn")
-        self._upload_page.append_terminal_output("\n[CANCELLED] Operation cancelled.\n")
+        self._upload_page.update_pipeline_status("Canceled", "warn")
+        self._upload_page.append_terminal_output("\n[CANCELED] Operation canceled.\n")
+        self._overview_page._status_lbl.hide()
         # Restore Run Pipeline button so the user can retry
         if self._state and any(r.get('uploaded') for r in self._state.runs.values()):
             self._upload_page.reset_pipeline_btn(
@@ -1460,10 +1618,10 @@ class MainWindow(QMainWindow):
             return
 
         # Generate unique accession and label
-        local_n = sum(1 for k in self._state.runs if k.startswith("LOCAL_")) + 1
-        accession = f"LOCAL_{local_n}"
+        local_n = sum(1 for k in self._state.runs if k.startswith("LOCAL")) + 1
+        accession = f"LOCAL{local_n}"
         all_labels = [r['label'] for r in self._state.runs.values()]
-        label = f"L{local_n}"
+        label = f"R{local_n}"
 
         run = {
             'run_accession'    : accession,
@@ -1503,6 +1661,8 @@ class MainWindow(QMainWindow):
             f"{label} added — {uploaded_runs} run(s) ready for pipeline", "ok")
 
     def _write_manifests_from_state(self) -> None:
+
+        print("write manifests from state")
         """Re-write QIIME2 manifest TSVs using paths stored in run dicts.
 
         Works for both NCBI-downloaded files (standard paths) and user-browsed
@@ -1511,16 +1671,50 @@ class MainWindow(QMainWindow):
         """
         import csv as _csv
         from pathlib import Path as _P
+        import shutil
+
+        project = save_ncbi_project(
+            user_id            = self._current_user["user_id"],
+            bio_proj_accession = "LOCAL_PROJECT",
+            title              = "LOCAL_PROJECT",
+            runs               = [
+                {"accession": accession, "layout": run_dict['library_layout']}
+                for accession, run_dict in self._state.runs.items()
+            ],
+        )
+        self._state.db_project_id = project["project_id"]
 
         APP_DIR = _P(__file__).parent.parent / "pipeline"
-        bio = self._state.bioproject_id
+        bio = "LOCAL_PROJECT"
 
         paired = [r for r in self._state.runs.values()
                   if r.get('library_layout', '').upper() == 'PAIRED' and r['uploaded']]
         single = [r for r in self._state.runs.values()
                   if r.get('library_layout', '').upper() == 'SINGLE' and r['uploaded']]
+        
+        # # create the temporary qiime & reps-tree directories
+        temp_qiime_paired = APP_DIR / "data/LOCAL_PROJECT/qiime/paired"
+        if temp_qiime_paired.exists() and temp_qiime_paired.is_dir():
+            shutil.rmtree(temp_qiime_paired)
+        temp_qiime_paired.mkdir(parents=True, exist_ok=True)
+        
+        temp_qiime_single = APP_DIR / "data/LOCAL_PROJECT/qiime/single"
+        if temp_qiime_single.exists() and temp_qiime_single.is_dir():
+            shutil.rmtree(temp_qiime_single)
+        temp_qiime_single.mkdir(parents=True, exist_ok=True)
+        
+        temp_reps_tree_paired = APP_DIR / f"data/LOCAL_PROJECT/reps-tree/paired"
+        if temp_reps_tree_paired.exists() and temp_reps_tree_paired.is_dir():
+            shutil.rmtree(temp_reps_tree_paired)
+        temp_reps_tree_paired.mkdir(parents=True, exist_ok=True)
+        
+        temp_reps_tree_single = APP_DIR / f"data/LOCAL_PROJECT/reps-tree/single"
+        if temp_reps_tree_single.exists() and temp_reps_tree_single.is_dir():
+            shutil.rmtree(temp_reps_tree_single)
+        temp_reps_tree_single.mkdir(parents=True, exist_ok=True)
 
         if paired:
+            self._state.local_paths['paired'] = []
             out = APP_DIR / f"data/{bio}/qiime/paired"
             out.mkdir(parents=True, exist_ok=True)
             with open(out / "manifest.tsv", "w", newline="") as f:
@@ -1529,13 +1723,14 @@ class MainWindow(QMainWindow):
                             'reverse-absolute-filepath'])
                 for r in paired:
                     srr = r['run_accession']
-                    fwd = r.get('fastq_forward') or str(
-                        APP_DIR / f"data/{bio}/fastq/paired/{srr}_1.fastq")
-                    rev = r.get('fastq_reverse') or str(
-                        APP_DIR / f"data/{bio}/fastq/paired/{srr}_2.fastq")
+                    fwd = r.get('fastq_forward')
+                    rev = r.get('fastq_reverse')
                     w.writerow([srr, fwd, rev])
+                    self._state.local_paths['paired'].append(fwd)
+                    self._state.local_paths['paired'].append(rev)
 
         if single:
+            self._state.local_paths['single'] = []
             out = APP_DIR / f"data/{bio}/qiime/single"
             out.mkdir(parents=True, exist_ok=True)
             with open(out / "manifest.tsv", "w", newline="") as f:
@@ -1543,9 +1738,9 @@ class MainWindow(QMainWindow):
                 w.writerow(['sample-id', 'absolute-filepath'])
                 for r in single:
                     srr = r['run_accession']
-                    path = r.get('fastq_path') or str(
-                        APP_DIR / f"data/{bio}/fastq/single/{srr}.fastq")
+                    path = r.get('fastq_path')
                     w.writerow([srr, path])
+                    self._state.local_paths['single'].append(path)
 
     def _on_check_env(self) -> None:
 
@@ -1704,6 +1899,8 @@ class MainWindow(QMainWindow):
         self._parsing_thread_real.start()
 
     def _on_parsing_complete(self, state: AppState):
+        self._state = state
+        self._state.pipeline_complete = True   # QIIME2 is done; data is in DB
         self._status_badge.setText("Parsing complete")
         self._status_badge.setObjectName("badge_green")
         self._status_badge.style().unpolish(self._status_badge)
@@ -1713,7 +1910,7 @@ class MainWindow(QMainWindow):
         self._overview_page.load(state)
         self._broadcast_state()
 
-        # hand it off to run analysis
+        # hand it off to run diversity analysis
         self._run_analysis()
 
     def _on_parsing_error(self, msg: str):
@@ -1722,6 +1919,76 @@ class MainWindow(QMainWindow):
         self._status_badge.setObjectName("badge_red")
         self._status_badge.style().unpolish(self._status_badge)
         self._status_badge.style().polish(self._status_badge)
+
+    # ── Risk ──────────────────────────────────────────────────────────────────
+    def _on_get_risk_assessment(self, apoe: dict = None, mri: str = None,
+                                run_lbl: str = 'R1', sim_id: object = None) -> None:
+        self._status_badge.setText("Getting risk...")
+        self._status_badge.setObjectName("badge_yellow")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+        self._status_badge.show()
+        self._risk_assess_thread = QThread(self)
+        self._risk_assess_worker = _RiskPredictionWorker(
+            state=self._state, apoe=apoe, mri=mri, run_lbl=run_lbl, sim_id=sim_id)
+        self._risk_assess_worker.moveToThread(self._risk_assess_thread)
+        self._risk_assess_thread.started.connect(self._risk_assess_worker.run)
+        self._risk_assess_worker.finished.connect(self._on_risk_assess_complete)
+        self._risk_assess_worker.errored.connect(self._on_risk_assess_error)
+        self._risk_assess_worker.finished.connect(self._risk_assess_thread.quit)
+        self._risk_assess_worker.errored.connect(self._risk_assess_thread.quit)
+        self._risk_assess_thread.start()
+    
+    def _on_risk_assess_complete(self, state: AppState):
+        self._status_badge.setText("Assessment complete")
+        self._status_badge.setObjectName("badge_green")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+        self._alzheimer_page.load(state=state)
+    
+    def _on_risk_assess_error(self, msg: str):
+        self._upload_page.show_pipeline_error(msg)
+        print(msg)
+        self._status_badge.setText("Assessment error")
+        self._status_badge.setObjectName("badge_red")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+
+
+    # ── Simulation ────────────────────────────────────────────────────────────
+
+    def _on_run_simulation(self, user_diet: dict, run_label: str='R1'):
+        self._status_badge.setText("Running simulation...")
+        self._status_badge.setObjectName("badge_yellow")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+        self._status_badge.show()
+
+        self._simulation_thread = QThread(self)
+        self._simulation_worker = _SimulationWorker(state=self._state, run_label=run_label, 
+                                                    user_diet=user_diet, runner=self._runner)
+        self._simulation_worker.moveToThread(self._simulation_thread)
+        self._simulation_thread.started.connect(self._simulation_worker.run)
+        self._simulation_worker.finished.connect(self._on_simulation_complete)
+        self._simulation_worker.errored.connect(self._on_simulation_error)
+        self._simulation_worker.finished.connect(self._simulation_thread.quit)
+        self._simulation_worker.errored.connect(self._simulation_thread.quit)
+        self._simulation_thread.start()
+    
+    def _on_simulation_complete(self, state: AppState):
+        self._status_badge.setText("Simulation complete")
+        self._status_badge.setObjectName("badge_green")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+        self._simulation_page.load(state=state)
+    
+    def _on_simulation_error(self, msg: str):
+        self._upload_page.show_pipeline_error(msg)
+        self._status_badge.setText("Simulation error")
+        self._status_badge.setObjectName("badge_red")
+        self._status_badge.style().unpolish(self._status_badge)
+        self._status_badge.style().polish(self._status_badge)
+
 
     # ── Profile page integration ──────────────────────────────────────────────
 

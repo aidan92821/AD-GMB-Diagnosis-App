@@ -16,13 +16,13 @@ _YML_FILES = {
     "osx-arm64": APP_DIR / "qiime2.yml",
 }
 
-MICROMAMBA_VERSION = "2.0.8"
+_MICROMAMBA_BASE = "https://github.com/mamba-org/micromamba-releases/releases/latest/download"
 
 # Download URLs per platform — from micromamba's official GitHub releases
 _MICROMAMBA_URLS = {
-    "linux-64":   f"https://github.com/mamba-org/mamba/releases/download/micromamba-{MICROMAMBA_VERSION}/micromamba-linux-64",
-    "osx-64":     f"https://github.com/mamba-org/mamba/releases/download/micromamba-{MICROMAMBA_VERSION}/micromamba-osx-64",
-    "osx-arm64":  f"https://github.com/mamba-org/mamba/releases/download/micromamba-{MICROMAMBA_VERSION}/micromamba-osx-arm64",
+    "linux-64":   f"{_MICROMAMBA_BASE}/micromamba-linux-64",
+    "osx-64":     f"{_MICROMAMBA_BASE}/micromamba-osx-64",
+    "osx-arm64":  f"{_MICROMAMBA_BASE}/micromamba-osx-arm64",
 }
 
 
@@ -82,6 +82,7 @@ def create_env(callback=None):
         "CONDA_SOLVER": "classic",
     })
 
+    # creates the qiime conda environment
     cmd = [
         str(MAMBA_BIN),
         "create",

@@ -17,8 +17,14 @@ if TYPE_CHECKING:
 # this function downloads one run at a time if the run is specified
 # it can download up to 4 runs at a time if no run is specified
 # returns two lists of strings: paired end runs and single end runs (SRR Accessions)
-def _fetch_runs_from_ebi(bioproject: str, srr: str = None, n_runs: int = 1) -> tuple[list[str], list[str], dict]:
+def _fetch_runs_from_ebi(bioproject: str, srr: str = None, n_runs: int = 1, callback=None) -> tuple[list[str], list[str], dict]:
     """Fetch run metadata from EBI ENA as a fallback when NCBI is unavailable."""
+
+    def _log(msg: str):
+        print(msg)
+        if callback:
+            callback(msg)
+
     fields = ",".join([
         "run_accession",
         "library_layout",
@@ -90,13 +96,30 @@ def _fetch_runs_from_ebi(bioproject: str, srr: str = None, n_runs: int = 1) -> t
         'runs'          : runs,
     }
 
+    # check to make sure it's Illumina sequencing data
+    if any(r['platform'] != 'ILLUMINA' for r in runs):
+        for r in runs:
+            if r['platform'] != 'ILLUMINA':
+                _log(f"Skipping {r['run_accession']}: platform is {r['platform']}, Axis supports only Illumina sequencing.")
+        return None, None, None
+    elif any(r['library_strategy'] != 'AMPLICON' for r in runs):
+        for r in runs:
+            if r['library_strategy'] != 'AMPLICON':
+                _log(f"Skipping {r['run_accession']}: library strategy is {r['library_strategy']}, Axis supports only 16S Amplicon data.")
+        return None, None, None
+
     paired_runs = [r['run_accession'] for r in runs if r['library_layout'] == 'PAIRED']
     single_runs = [r['run_accession'] for r in runs if r['library_layout'] == 'SINGLE']
 
     return single_runs, paired_runs, project
 
 
-def fetch_runs(email, runner, bioproject: str, srr=None, n_runs=1) -> tuple[list[str], list[str], dict]:
+def fetch_runs(email, runner, bioproject: str, srr=None, n_runs=1, callback=None) -> tuple[list[str], list[str], dict]:
+
+    def _log(msg: str):
+        print(msg)
+        if callback:
+            callback(msg)
 
     env = os.environ.copy()
     env.update({
@@ -138,6 +161,16 @@ def fetch_runs(email, runner, bioproject: str, srr=None, n_runs=1) -> tuple[list
     if info.empty:
         raise ValueError(f"No matching runs found for bioproject '{bioproject}'"
                          + (f" / SRR '{srr}'" if srr else "") + ".")
+
+    # check to make sure it's Illumina sequencing data
+    if any(info['Platform'] != 'ILLUMINA'):
+        for _, row in info[info['Platform'] != 'ILLUMINA'].iterrows():
+            _log(f"Skipping {row['Run']}: platform is {row['Platform']}, Axis supports only Illumina sequencing.")
+        return None, None, None
+    elif any(info['LibraryStrategy'] != 'AMPLICON'):
+        for _, row in info[info['LibraryStrategy'] != 'AMPLICON'].iterrows():
+            _log(f"Skipping {row['Run']}: library strategy is {row['LibraryStrategy']}, Axis supports only 16S Amplicon data.")
+        return None, None, None
 
     # determine paired or single end
     paired_runs = info.loc[info['LibraryLayout'] == 'PAIRED', 'Run'].tolist()
@@ -286,6 +319,7 @@ def write_manifest(bioproject: str, lib_layout: str, state: AppState) -> None:
             writer = csv.writer(m, delimiter='\t')
             if forward:
                 # paired end
+                state.local_paths['paired'] = []
                 writer.writerow(['sample-id',
                                  'forward-absolute-filepath',
                                  'reverse-absolute-filepath'])
@@ -294,31 +328,35 @@ def write_manifest(bioproject: str, lib_layout: str, state: AppState) -> None:
                     if srr not in state.runs:
                         continue   # skip leftover files from previous fetches
                     state.runs[srr]['uploaded'] = True
-                    writer.writerow([srr,
-                                     str(Path(f"{input_dir}/{f}").resolve()),
-                                     str(Path(f"{input_dir}/{r}").resolve())])
+                    fwd_path = str(Path(f"{input_dir}/{f}").resolve())
+                    rev_path = str(Path(f"{input_dir}/{r}").resolve())
+                    writer.writerow([srr, fwd_path, rev_path])
             else:
                 # single end
+                state.local_paths['single'] = []
                 writer.writerow(['sample-id', 'absolute-filepath'])
                 for s in files:
                     srr = s[:-6]   # strip .fastq (6 chars)
                     if srr not in state.runs:
                         continue   # skip leftover files from previous fetches
                     state.runs[srr]['uploaded'] = True
-                    writer.writerow([srr,
-                                     str(Path(f"{input_dir}/{s}").resolve())])
+                    single_path = str(Path(f"{input_dir}/{s}").resolve())
+                    writer.writerow([srr, single_path])
 
 
 # clean up the temporary files
 # after data tables have been imported to the database, remove them
 # the only files needed after importing are rep-seqs.fasta and tree.nwk
-def cleanup(bioproject: str):
+def cleanup(bioproject: str, qiime: bool=True):
     APP_DIR = Path(__file__).parent # pipeline/
     FASTQ_DIR = (APP_DIR / f"data/{bioproject}/fastq")
     QIIME_DIR = (APP_DIR / f"data/{bioproject}/qiime")
     
-    shutil.rmtree(FASTQ_DIR, ignore_errors=True)
-    shutil.rmtree(QIIME_DIR, ignore_errors=True)
+    if FASTQ_DIR.exists():
+        shutil.rmtree(FASTQ_DIR, ignore_errors=True)
+    if qiime:
+        if QIIME_DIR.exists():
+            shutil.rmtree(QIIME_DIR, ignore_errors=True)
 
 
 '''DEPRECATED'''

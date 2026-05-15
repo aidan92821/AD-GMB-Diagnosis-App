@@ -138,3 +138,56 @@ class QiimeRunner:
         )
 
         process.wait()
+
+    def get_agora_models(self, genus: str, zip_path: str):
+        print(f"[get_agora_models] function entry")
+        # get the first file in the .zip that matches a genus
+        cmd_list = ['unzip', '-l', zip_path]
+        process_1 = subprocess.Popen(
+            cmd_list,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+        cmd_grep = ['grep', genus]
+        process_2 = subprocess.Popen(
+            cmd_grep,
+            stdin=process_1.stdout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1
+        )
+        cmd_head = ['head', '-1']
+        process_3 = subprocess.Popen(
+            cmd_head,
+            stdin=process_2.stdout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1
+        )
+        process_1.stdout.close()
+        process_2.stdout.close()
+        line = process_3.stdout.readline()
+        process_1.wait()
+        process_2.wait()
+        process_3.wait()
+        if not line.strip():
+            return None
+        return line.strip().split()[-1] # just get the filename
+    
+    def unzip_agora(self, zip_path: str, model_file: str, dest_dir_path: str):
+        print(f"[unzip_agora] function entry")
+        
+        cmd = ['unzip', '-n', zip_path, model_file, '-d', dest_dir_path]
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+
+        process.wait()

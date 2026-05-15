@@ -284,7 +284,10 @@ def ingest_run_data(
 
         # Flush features before inserting counts — feature_count has a FK to feature
         session.flush()
-        create_feature_count_bulk(session, run_id=run_id, counts=feature_counts)
+        # Only insert counts whose feature_id was actually inserted (guards against stale FASTA)
+        inserted_ids = {f["feature_id"] for f in features}
+        safe_counts = {fid: cnt for fid, cnt in feature_counts.items() if fid in inserted_ids}
+        create_feature_count_bulk(session, run_id=run_id, counts=safe_counts)
 
         session.commit()
         return {
@@ -312,6 +315,19 @@ def get_genus_data(run_id: int) -> list[dict]:
             {"genus": g.genus, "relative_abundance": g.relative_abundance}
             for g in genera
         ]
+    except RepositoryError as e:
+        raise ServiceError(str(e)) from e
+    finally:
+        session.close()
+
+
+def get_genus_dict(run_id: int):
+    session = SessionLocal()
+    try:
+        genera = get_genus_for_run(session, run_id)
+        return {
+            g.genus: g.relative_abundance for g in genera
+        }
     except RepositoryError as e:
         raise ServiceError(str(e)) from e
     finally:

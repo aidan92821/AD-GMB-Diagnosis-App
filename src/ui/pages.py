@@ -1,5 +1,5 @@
 """
-Axis – page panels.
+Axis - page panels.
 
 Every page has a  load(state: AppState)  method called by MainWindow
 whenever the shared state changes.  No page imports from example_data.
@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QPushButton, QHBoxLayout, QVBoxLayout, QGridLayout,
     QFileDialog, QTableWidget, QTableWidgetItem, QHeaderView,
     QSizePolicy, QScrollArea, QPlainTextEdit, QSlider, QSpinBox,
+    QTabWidget, QSplitter,
 )
 from PyQt6.QtCore import Qt, QThread, QObject, pyqtSignal
 from PyQt6.QtGui import QFont, QTextCursor, QColor
@@ -38,7 +39,8 @@ from ui.helpers import (
 
 from src.services.assessment_service import (ServiceError, get_feature_counts,
                                              get_genus_data, get_alpha_diversities,
-                                             get_beta_diversity_matrix, get_pcoa)
+                                             get_beta_diversity_matrix, get_pcoa,
+                                             get_simulations_for_run)
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -102,7 +104,8 @@ class OverviewPage(QWidget):
         lay.addWidget(section_title("Fetch data from NCBI"))
         lay.addWidget(label_hint(
             "Enter a BioProject accession to load all runs for that study.  "
-            "Optionally filter to a single run by entering its Run accession."
+            "Optionally filter to a single run by entering its Run accession.  "
+            "Must be Illumina-sequenced 16S Amplicon data."
         ))
 
         input_row = QHBoxLayout(); input_row.setSpacing(12)
@@ -123,7 +126,7 @@ class OverviewPage(QWidget):
         run_lbl.setTextFormat(Qt.TextFormat.RichText)
         run_lbl.setObjectName("label_muted")
         self._run_input = QLineEdit()
-        self._run_input.setPlaceholderText("e.g. SRR001001  —  leave blank for all runs")
+        self._run_input.setPlaceholderText("e.g. SRR001001  —  leave blank for random run from project")
         self._run_input.textChanged.connect(self._validate_inputs)
         self._run_input.textChanged.connect(self._on_run_input_changed)
         col_run.addWidget(run_lbl); col_run.addWidget(self._run_input)
@@ -644,7 +647,7 @@ class UploadRunsPage(QWidget):
             row.addWidget(status_lbl)
 
             # Browse buttons only for pending NCBI runs (not local and not already uploaded)
-            is_local = srr.startswith("LOCAL_")
+            is_local = srr.startswith("LOCAL")
             if not uploaded and not is_local:
                 if is_paired:
                     for slot, lbl_txt, tip in [
@@ -2261,8 +2264,14 @@ class _MriPreprocessWorker(QObject):
 
 
 class AlzheimerPage(QWidget):
+    # (apoe, mri_path, run_label, sim_id_or_None)
+    assessment_requested = pyqtSignal(dict, str, str, object)
+
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._state: AppState | None = None
+        self._nii_path: str | None = None
+        self._mri_thread: QThread | None = None
         self._build()
 
     def _build(self):
@@ -2277,17 +2286,13 @@ class AlzheimerPage(QWidget):
         hdr.addWidget(label_hint("Based on gut-brain axis biomarkers"))
         root.addLayout(hdr)
 
-        # ── Input card: MRI upload + APOE genotype ────────────────────────────
-        self._nii_path: str | None = None
-        self._mri_thread: QThread | None = None
-
+        # ── Input card ────────────────────────────────────────────────────────
         input_card = card()
         inp_lay = input_card.layout()
         inp_lay.setSpacing(12)
 
         # MRI section
         inp_lay.addWidget(section_title("MRI Scan"))
-
         mri_row = QHBoxLayout()
         browse_btn = btn_outline("Browse .nii file")
         browse_btn.setFixedWidth(150)
@@ -2302,9 +2307,9 @@ class AlzheimerPage(QWidget):
         inp_lay.addWidget(section_title("APOE Genotype"))
         inp_lay.addWidget(label_hint(
             "Enter the number of copies of each allele (0–2). "
-            "The three values must sum to exactly 2 (one from each parent)."
+            "The three values must sum to exactly 2 (one from each parent). "
+            "Or set all to zero to use gut microbiome data only."
         ))
-
         apoe_row = QHBoxLayout()
         apoe_row.setSpacing(24)
         self._apoe_spins: dict[str, QSpinBox] = {}
@@ -2321,11 +2326,36 @@ class AlzheimerPage(QWidget):
             apoe_row.addLayout(col)
         apoe_row.addStretch()
         inp_lay.addLayout(apoe_row)
-
         self._apoe_status = QLabel("")
         self._apoe_status.setObjectName("label_hint")
         inp_lay.addWidget(self._apoe_status)
         self._validate_apoe()
+
+        # ── Data source section ───────────────────────────────────────────────
+        inp_lay.addWidget(section_title("Data Source"))
+        inp_lay.addWidget(label_hint(
+            "Choose which run to assess, and whether to use the original "
+            "sequencing data or a projected microbiome from a simulation."
+        ))
+        source_row = QHBoxLayout()
+        source_row.setSpacing(16)
+
+        run_col = QVBoxLayout(); run_col.setSpacing(4)
+        run_col.addWidget(label_muted("Run"))
+        self._run_combo = QComboBox()
+        self._run_combo.setMinimumWidth(90)
+        self._run_combo.currentIndexChanged.connect(self._on_run_combo_changed)
+        run_col.addWidget(self._run_combo)
+        source_row.addLayout(run_col)
+
+        src_col = QVBoxLayout(); src_col.setSpacing(4)
+        src_col.addWidget(label_muted("Microbiome data"))
+        self._source_combo = QComboBox()
+        self._source_combo.setMinimumWidth(260)
+        src_col.addWidget(self._source_combo)
+        source_row.addLayout(src_col)
+        source_row.addStretch()
+        inp_lay.addLayout(source_row)
 
         # Run button + status
         run_row = QHBoxLayout()
@@ -2337,7 +2367,7 @@ class AlzheimerPage(QWidget):
             "QPushButton:pressed { background: #047857; }"
             "QPushButton:disabled { background: #9CA3AF; }"
         )
-        self._run_btn.clicked.connect(self._run_assessment)
+        self._run_btn.clicked.connect(self._on_run_assess_clicked)
         run_row.addStretch()
         run_row.addWidget(self._run_btn)
         inp_lay.addLayout(run_row)
@@ -2378,7 +2408,7 @@ class AlzheimerPage(QWidget):
         sum_row.addWidget(vdivider())
 
         conf_col = QVBoxLayout(); conf_col.setSpacing(2)
-        conf_col.addWidget(label_muted("Confidence"))
+        conf_col.addWidget(label_muted("Certainty"))
         self._conf_lbl = QLabel("—")
         self._conf_lbl.setObjectName("conf_number")
         conf_col.addWidget(self._conf_lbl)
@@ -2394,8 +2424,46 @@ class AlzheimerPage(QWidget):
         root.addWidget(self._scroll, 1)
 
         # Initial render with example data
-        self._state: AppState | None = None
-        self._render(ALZHEIMER_RISK)
+        self._render(ALZHEIMER_RISK, self._state)
+
+    # ── Data-source combo helpers ─────────────────────────────────────────────
+
+    def _on_run_combo_changed(self) -> None:
+        self._refresh_source_combo()
+
+    def _refresh_source_combo(self) -> None:
+        self._source_combo.blockSignals(True)
+        self._source_combo.clear()
+        self._source_combo.addItem("Original sequencing data", userData=None)
+
+        run_label = self._run_combo.currentData()
+        if self._state and run_label and run_label in self._state.lbs:
+            run_id = self._state.lbs[run_label]
+            try:
+                for sim in get_simulations_for_run(run_id):
+                    created = (sim.get("created_at") or "")[:10]
+                    display = f"Simulation {sim['simulation_id']}"
+                    if created:
+                        display += f"  ({created})"
+                    self._source_combo.addItem(display, userData=sim["simulation_id"])
+            except Exception:
+                pass
+
+        self._source_combo.blockSignals(False)
+
+    # ── Button handler ────────────────────────────────────────────────────────
+
+    def _on_run_assess_clicked(self):
+        apoe = {
+            "e2_count": self._apoe_spins["ε2"].value(),
+            "e3_count": self._apoe_spins["ε3"].value(),
+            "e4_count": self._apoe_spins["ε4"].value(),
+        }
+        mri       = self._nii_path or ""
+        run_label = self._run_combo.currentData() or ""
+        sim_id    = self._source_combo.currentData()   # None = original data
+        self.assessment_requested.emit(apoe, mri, run_label, sim_id)
+
 
     # ── MRI browse ────────────────────────────────────────────────────────────
     def _browse_mri(self):
@@ -2415,113 +2483,127 @@ class AlzheimerPage(QWidget):
             self._apoe_status.setText("✓ Valid genotype")
             self._apoe_status.setStyleSheet("color: #10B981;")
             return True
+        elif total == 0:
+            self._apoe_status.setText("✓ Not using genotype data")
+            self._apoe_status.setStyleSheet("color: #10B981;")
+            return True
         self._apoe_status.setText(f"Allele counts sum to {total} — must equal 2")
         self._apoe_status.setStyleSheet("color: #EF4444;")
         return False
 
-    # ── Run assessment ────────────────────────────────────────────────────────
-    def _run_assessment(self):
-        if not self._validate_apoe():
-            return
+    # # ── Run assessment ────────────────────────────────────────────────────────
+    # def _run_assessment(self):
+    #     if not self._validate_apoe():
+    #         return
 
-        self._run_btn.setEnabled(False)
+    #     self._run_btn.setEnabled(False)
 
-        if self._nii_path:
-            self._assess_status.setText("Preprocessing MRI scan…")
-            self._mri_thread = QThread(self)
-            self._mri_worker = _MriPreprocessWorker(self._nii_path)
-            self._mri_worker.moveToThread(self._mri_thread)
-            self._mri_thread.started.connect(self._mri_worker.run)
-            self._mri_worker.finished.connect(self._on_preprocess_done)
-            self._mri_worker.errored.connect(self._on_preprocess_error)
-            self._mri_worker.finished.connect(self._mri_thread.quit)
-            self._mri_worker.errored.connect(self._mri_thread.quit)
-            self._mri_thread.start()
-        else:
-            self._assess_status.setText("Running assessment (no MRI)…")
-            self._run_model(mri_array=None)
+    #     if self._nii_path:
+    #         self._assess_status.setText("Preprocessing MRI scan…")
+    #         self._mri_thread = QThread(self)
+    #         self._mri_worker = _MriPreprocessWorker(self._nii_path)
+    #         self._mri_worker.moveToThread(self._mri_thread)
+    #         self._mri_thread.started.connect(self._mri_worker.run)
+    #         self._mri_worker.finished.connect(self._on_preprocess_done)
+    #         self._mri_worker.errored.connect(self._on_preprocess_error)
+    #         self._mri_worker.finished.connect(self._mri_thread.quit)
+    #         self._mri_worker.errored.connect(self._mri_thread.quit)
+    #         self._mri_thread.start()
+    #     else:
+    #         self._assess_status.setText("Running assessment (no MRI)…")
+    #         self._run_model(mri_array=None)
 
-    def _on_preprocess_done(self, mri_array):
-        print(f"[MRI] shape={mri_array.shape}  dtype={mri_array.dtype}")
-        print(f"[MRI] min={mri_array.min():.3f}  max={mri_array.max():.3f}  mean={mri_array.mean():.3f}")
-        self._assess_status.setText(
-            f"MRI preprocessed — shape {mri_array.shape}. Computing risk…"
-        )
-        self._run_model(mri_array=mri_array)
+    # def _on_preprocess_done(self, mri_array):
+    #     self._assess_status.setText(
+    #         f"MRI preprocessed — shape {mri_array.shape}. Computing risk…"
+    #     )
+    #     self._run_model(mri_array=mri_array)
 
-    def _on_preprocess_error(self, msg: str):
-        if "nibabel" in msg or "scipy" in msg:
-            self._assess_status.setText(
-                "MRI dependencies missing — run:  pip install nibabel scipy\n"
-                "Running assessment without MRI…"
-            )
-        else:
-            self._assess_status.setText(f"MRI error: {msg}  — running without MRI…")
-        self._run_model(mri_array=None)
+    # def _on_preprocess_error(self, msg: str):
+    #     if "nibabel" in msg or "scipy" in msg:
+    #         self._assess_status.setText(
+    #             "MRI dependencies missing — run:  pip install nibabel scipy\n"
+    #             "Running assessment without MRI…"
+    #         )
+    #     else:
+    #         self._assess_status.setText(f"MRI error: {msg}  — running without MRI…")
+    #     self._run_model(mri_array=None)
 
-    # ── Model call ────────────────────────────────────────────────────────────
-    def _run_model(self, mri_array=None):
-        try:
-            from src.services.ad_risk_model import (
-                predict_from_project, predict_ad_risk,
-                get_genus_abundances, get_last_run_genus_abundances,
-            )
+    # # ── Model call ────────────────────────────────────────────────────────────
+    # def _run_model(self, mri_array=None):
+    #     try:
+    #         from src.services.ad_risk_model import predict_ad_risk
 
-            apoe = {
-                "e2": self._apoe_spins["ε2"].value(),
-                "e3": self._apoe_spins["ε3"].value(),
-                "e4": self._apoe_spins["ε4"].value(),
-            }
-            print(f"[APOE] user input: {apoe}")
+    #         # ── Genus abundances ──────────────────────────────────────────────
+    #         # Prefer fresh DB data (populated by QIIME2 pipeline) when available
+    #         genus_abundances: dict[str, float] = {}
 
-            # Priority 1: project linked in state → query all runs for that project
-            if self._state and self._state.db_project_id:
-                genus_abundances = get_genus_abundances(self._state.db_project_id)
-                print(f"[Genus] source=DB project  total genera={len(genus_abundances)}")
-                print(f"[Genus] {genus_abundances}")
-                result = predict_from_project(self._state.db_project_id, apoe, mri_array)
+    #         if self._state and self._state.db_project_id:
+    #             try:
+    #                 from src.services.assessment_service import (
+    #                     get_project_overview, get_genus_data,
+    #                 )
+    #                 overview = get_project_overview(self._state.db_project_id)
+    #                 run_ids  = overview.get("run_ids", [])
+    #                 if run_ids:
+    #                     for rid in run_ids:
+    #                         for item in get_genus_data(rid):
+    #                             g = item["genus"]
+    #                             v = item["relative_abundance"]
+    #                             genus_abundances[g] = genus_abundances.get(g, 0.0) + v
+    #                     # average across runs
+    #                     n = len(run_ids)
+    #                     genus_abundances = {g: v / n for g, v in genus_abundances.items()}
+    #             except Exception:
+    #                 pass  # fall through to state cache below
 
-            # Priority 2: in-app analysis cache on state
-            elif self._state and self._state.genus_abundances:
-                genus_abundances = {}
-                run_count = len(self._state.genus_abundances)
-                for run_data in self._state.genus_abundances.values():
-                    for item in run_data:
-                        if isinstance(item, dict):
-                            g, v = item["genus"], item["relative_abundance"]
-                        else:
-                            g, v = item[0], item[1]
-                        genus_abundances[g] = genus_abundances.get(g, 0.0) + v / run_count
-                print(f"[Genus] source=state cache  total genera={len(genus_abundances)}")
-                print(f"[Genus] {genus_abundances}")
-                result = predict_ad_risk(genus_abundances, apoe, mri_array)
+    #         # Fall back to in-app analysis cache stored on state
+    #         if not genus_abundances and self._state and self._state.genus_abundances:
+    #             run_count = len(self._state.genus_abundances)
+    #             for run_data in self._state.genus_abundances.values():
+    #                 for item in run_data:
+    #                     if isinstance(item, dict):
+    #                         g, v = item["genus"], item["relative_abundance"]
+    #                     else:
+    #                         g, v = item[0], item[1]
+    #                     genus_abundances[g] = genus_abundances.get(g, 0.0) + v / run_count
 
-            # Priority 3: most recent run with genus data in DB
-            else:
-                genus_abundances = get_last_run_genus_abundances()
-                print(f"[Genus] source=last DB run  total genera={len(genus_abundances)}")
-                print(f"[Genus] {genus_abundances}")
-                result = predict_ad_risk(genus_abundances, apoe, mri_array)
+    #         apoe = {
+    #             "e2": self._apoe_spins["ε2"].value(),
+    #             "e3": self._apoe_spins["ε3"].value(),
+    #             "e4": self._apoe_spins["ε4"].value(),
+    #         }
 
-            self._run_btn.setEnabled(True)
-            source   = result.get("model_source", "heuristic")
-            mri_note = "· MRI included" if mri_array is not None else "· no MRI"
-            src_note = "trained model" if source == "trained" else "heuristic (place model files in data/models/)"
-            self._assess_status.setText(
-                f"Risk: {result['predicted_pct']:.0f}%  "
-                f"Confidence: {result['confidence_pct']:.0f}%  "
-                f"{mri_note}  ·  {src_note}"
-            )
-            self._render(result)
+    #         result = predict_ad_risk(genus_abundances, apoe, mri_array)
 
-        except Exception as exc:
-            self._run_btn.setEnabled(True)
-            self._assess_status.setText(f"Model error: {exc}")
+    #         self._run_btn.setEnabled(True)
+    #         source   = result.get("model_source", "heuristic")
+    #         mri_note = "· MRI included" if mri_array is not None else "· no MRI"
+    #         src_note = "trained model" if source == "trained" else "heuristic (place model files in data/models/)"
+    #         self._assess_status.setText(
+    #             f"Risk: {result['predicted_pct']:.0f}%  "
+    #             f"Confidence: {result['confidence_pct']:.0f}%  "
+    #             f"{mri_note}  ·  {src_note}"
+    #         )
+    #         self._render(result)
+
+    #     except Exception as exc:
+    #         self._run_btn.setEnabled(True)
+    #         self._assess_status.setText(f"Model error: {exc}")
 
     def load(self, state: AppState):
         self._state = state
+
+        # Repopulate run combo
+        self._run_combo.blockSignals(True)
+        self._run_combo.clear()
+        for label in state.lbs:
+            self._run_combo.addItem(label, userData=label)
+        self._run_combo.blockSignals(False)
+        self._refresh_source_combo()
+
         d = state.risk_result if (state and state.risk_result) else ALZHEIMER_RISK
-        self._render(d)
+        self._render(d, state)
 
     # ── Render results ────────────────────────────────────────────────────────
     def _modality_bar(self, label: str, pct: float, color: str) -> QWidget:
@@ -2553,10 +2635,15 @@ class AlzheimerPage(QWidget):
         lay.addWidget(bar)
         return w
 
-    def _render(self, d: dict):
-        pct   = d.get("predicted_pct", 0)
-        conf  = d.get("confidence_pct", 0)
-        level = d.get("risk_level", "unknown").capitalize()
+    def _render(self, d: dict, state: AppState):
+        pct = state.risk_result * 100 if state and state.risk_result else 0
+        conf = state.risk_certainty if state and state.risk_certainty else 0
+        if pct > 75:
+            level = "high"
+        elif pct > 45:
+            level = "moderate"
+        else:
+            level = "low"
 
         self._pct_lbl.setText(f"{pct:.0f}%")
         self._lvl_lbl.setText(level)
@@ -2569,70 +2656,87 @@ class AlzheimerPage(QWidget):
         inner_lay.setSpacing(12)
 
         # ── Modality contributions ─────────────────────────────────────────────
-        apoe_pct  = d.get("apoe_score",  0.5) * 100
-        micro_pct = d.get("micro_score", 0.5) * 100
-        mri_score = d.get("mri_score")
-        mri_pct   = (mri_score * 100) if mri_score is not None else None
+        # apoe_pct  = d.get("apoe_score",  0.5) * 100
+        # micro_pct = d.get("micro_score", 0.5) * 100
+        # mri_score = d.get("mri_score")
+        # mri_pct   = (mri_score * 100) if mri_score is not None else None
 
-        mod_card = card()
-        mod_lay  = mod_card.layout()
-        mod_lay.addWidget(section_title("Modality Contributions"))
-        mod_lay.addWidget(label_hint(
-            "Individual risk contribution from each data source "
-            "(higher = more AD-like signal in that modality)"
-        ))
-        mod_lay.addSpacing(4)
-        mod_lay.addWidget(self._modality_bar("APOE Genotype (PRS)",       apoe_pct,  "#6366F1"))
-        mod_lay.addWidget(self._modality_bar("Gut Microbiome Dysbiosis",  micro_pct, "#10B981"))
-        if mri_pct is not None:
-            mod_lay.addWidget(self._modality_bar("MRI Structural Score",  mri_pct,   "#F59E0B"))
-        else:
-            no_mri = label_hint("MRI: not provided — upload a .nii scan to include structural data")
-            no_mri.setWordWrap(True)
-            mod_lay.addWidget(no_mri)
-        inner_lay.addWidget(mod_card)
+        # mod_card = card()
+        # mod_lay  = mod_card.layout()
+        # mod_lay.addWidget(section_title("Modality Contributions"))
+        # mod_lay.addWidget(label_hint(
+        #     "Individual risk contribution from each data source "
+        #     "(higher = more AD-like signal in that modality)"
+        # ))
+        # mod_lay.addSpacing(4)
+        # mod_lay.addWidget(self._modality_bar("APOE Genotype (PRS)",       apoe_pct,  "#6366F1"))
+        # mod_lay.addWidget(self._modality_bar("Gut Microbiome Dysbiosis",  micro_pct, "#10B981"))
+        # if mri_pct is not None:
+        #     mod_lay.addWidget(self._modality_bar("MRI Structural Score",  mri_pct,   "#F59E0B"))
+        # else:
+        #     no_mri = label_hint("MRI: not provided — upload a .nii scan to include structural data")
+        #     no_mri.setWordWrap(True)
+        #     mod_lay.addWidget(no_mri)
+        # inner_lay.addWidget(mod_card)
 
         # ── Biomarker grid ────────────────────────────────────────────────────
         bm_section = card()
         bm_section.layout().addWidget(section_title("Key biomarkers"))
 
-        biomarkers = d.get("biomarkers", [])
-        cols = 3
-        grid = QGridLayout()
-        grid.setSpacing(10)
-        grid.setColumnStretch(0, 1)
-        grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(2, 1)
+        # biomarkers = d.get("biomarkers", [])
+        if state:
+            biomarkers = state.contributions
+            cols = 3
+            grid = QGridLayout()
+            grid.setSpacing(10)
+            grid.setColumnStretch(0, 1)
+            grid.setColumnStretch(1, 1)
+            grid.setColumnStretch(2, 1)
 
-        for idx, bm in enumerate(biomarkers):
-            row, col = divmod(idx, cols)
-            f = QFrame()
-            f.setObjectName("bm_card")
-            f.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
-            lay = QVBoxLayout(f)
-            lay.setContentsMargins(12, 10, 12, 10)
-            lay.setSpacing(4)
+            # for idx, bm in enumerate(biomarkers):
+            for idx, (genus, contribution) in enumerate(biomarkers.items()):
+                try:
+                    contribution = float(contribution)
+                except (TypeError, ValueError):
+                    print(f"Bad contribution for {genus}: {repr(contribution)}")
+                    continue
+        
+                row, col = divmod(idx, cols)
+                f = QFrame()
+                f.setObjectName("bm_card")
+                f.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+                lay = QVBoxLayout(f)
+                lay.setContentsMargins(12, 10, 12, 10)
+                lay.setSpacing(4)
 
-            nm = QLabel(bm["name"])
-            nm.setObjectName("bm_name")
-            nm.setWordWrap(True)
-            lay.addWidget(nm)
+                nm = QLabel(genus)
+                nm.setObjectName("bm_name")
+                nm.setWordWrap(True)
+                lay.addWidget(nm)
 
-            arrow     = {"low": "↓", "high": "↑", "normal": "✓"}.get(bm["status"], "")
-            style_key = "ok" if bm["status"] == "normal" else bm["status"]
-            vl = QLabel(f"{arrow} {bm['value']:.1f}{bm['unit']}")
-            vl.setObjectName(f"bm_val_{style_key}")
-            lay.addWidget(vl)
+                arrow     = "↓" if contribution < 0 else "↑"
+                # arrow     = {"low": "↓", "high": "↑", "normal": "✓"}.get(bm["status"], "")
+                # style_key = "ok" if bm["status"] == "normal" else bm["status"]
+                # vl = QLabel(f"{arrow} {bm['value']:.1f}{bm['unit']}")
+                # vl.setObjectName(f"bm_val_{style_key}")
+                # lay.addWidget(vl)
 
-            rf = QLabel(f"Ref: {bm['normal']}  ·  {bm['role']}")
-            rf.setObjectName("bm_ref")
-            rf.setWordWrap(True)
-            lay.addWidget(rf)
+                # rf = QLabel(f"Ref: {bm['normal']}  ·  {bm['role']}")
+                # rf.setObjectName("bm_ref")
+                # rf.setWordWrap(True)
+                # lay.addWidget(rf)
 
-            grid.addWidget(f, row, col)
+                # grid.addWidget(f, row, col)
+                style_key = "low" if contribution < 0 else "high"
+                vl = QLabel(f"{arrow} {contribution:.3f}")
+                vl.setObjectName(f"bm_val_{style_key}")
+                lay.addWidget(vl)
 
-        bm_section.layout().addLayout(grid)
-        inner_lay.addWidget(bm_section)
+                grid.addWidget(f, row, col)
+
+
+            bm_section.layout().addLayout(grid)
+            inner_lay.addWidget(bm_section)
 
         # ── Disclaimer ────────────────────────────────────────────────────────
         disc = label_hint(
@@ -2662,62 +2766,78 @@ class SimulationPage(QWidget):
     _INFLAM    = {"Fusobacterium", "Escherichia", "Klebsiella", "Enterococcus",
                   "Sutterella"}
 
+    simulation_requested = pyqtSignal(dict, str)  # (user_diet, run_label)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._state: AppState | None = None
         self._genus_data: list[dict] = []
+        self._current_run: str | None = None
         self._build()
 
     # ── Build UI ──────────────────────────────────────────────────────────────
 
-    def _build(self):
-        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
-        from matplotlib.figure import Figure
+    # Descriptions shown below each tab's title bar
+    _TAB_META = [
+        ("Composition Shift",  "composition_shift",
+         "Relative abundance of top-10 genera before vs. after diet intervention"),
+        ("SCFA Production",    "scfa",
+         "Short-chain fatty acid secretion rates per genus (log flux, mmol/gDW/hr)"),
+        ("Biomass Over Time",  "dfba_biomass",
+         "Simulated biomass trajectory per genus across dFBA time steps"),
+        ("Nutrient Depletion", "dfba_nutrients",
+         "Key nutrient concentrations depleted over the simulation window"),
+    ]
 
+    def _build(self):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
 
-        scroll = QScrollArea(self)
+        scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         outer.addWidget(scroll)
 
-        inner_w = QWidget()
-        scroll.setWidget(inner_w)
-        root = QVBoxLayout(inner_w)
-        root.setContentsMargins(24, 20, 24, 20)
-        root.setSpacing(12)
+        body = QWidget()
+        scroll.setWidget(body)
+        root = QVBoxLayout(body)
+        root.setContentsMargins(24, 20, 24, 24)
+        root.setSpacing(16)
 
         # ── Header ────────────────────────────────────────────────────────────
         hdr = QHBoxLayout()
         hdr.addWidget(page_title("Gut Microbiome Simulation"))
         hdr.addStretch()
-        hdr.addWidget(label_hint("COMETS-inspired 30-day dynamic model"))
+        hdr.addWidget(label_hint("dFBA model · top-10 genera via AGORA2"))
         root.addLayout(hdr)
 
-        # ── Two-column row: left sliders | right (graphs + table) ─────────────
+        # ── Main row ──────────────────────────────────────────────────────────
         row = QHBoxLayout()
-        row.setSpacing(14)
+        row.setSpacing(16)
         root.addLayout(row)
 
-        # ── Left: slider panel ────────────────────────────────────────────────
-        left = card()
-        left.setFixedWidth(210)
-        left_lay = left.layout()
-        left_lay.setSpacing(6)
-        left_lay.addWidget(section_title("Interventions"))
+        # ── Left: controls card ───────────────────────────────────────────────
+        ctrl = card()
+        ctrl.setFixedWidth(210)
+        ctrl_lay = ctrl.layout()
+        ctrl_lay.setSpacing(8)
+
+        ctrl_lay.addWidget(section_title("Run"))
+        self._run_combo = QComboBox()
+        self._run_combo.setPlaceholderText("No project loaded")
+        ctrl_lay.addWidget(self._run_combo)
+
+        ctrl_lay.addSpacing(8)
+        ctrl_lay.addWidget(section_title("Interventions"))
 
         self._sliders: dict[str, QSlider] = {}
-        slider_cfg = [
-            ("Antibiotic Level", "antibiotic",  0, "#EF4444"),
-            ("Probiotic Level",  "probiotic",  30, "#10B981"),
-            ("Dietary Fiber",    "fiber",       50, "#6366F1"),
-            ("Processed Food",   "processed",   20, "#F59E0B"),
-        ]
-        for lbl_text, key, default, color in slider_cfg:
-            self._sliders[key] = self._add_slider(left_lay, lbl_text, key, default, color)
+        for lbl_text, key, default, color in [
+            ("Dietary Fiber",  "fiber",     50, "#6366F1"),
+            ("Processed Food", "processed", 20, "#F59E0B"),
+        ]:
+            self._sliders[key] = self._add_slider(ctrl_lay, lbl_text, key, default, color)
 
-        left_lay.addSpacing(4)
+        ctrl_lay.addSpacing(8)
         run_btn = btn_primary("Run Simulation")
         run_btn.setStyleSheet(
             "QPushButton { background: #10B981; color: white; border: none; "
@@ -2725,48 +2845,103 @@ class SimulationPage(QWidget):
             "QPushButton:hover { background: #059669; }"
             "QPushButton:pressed { background: #047857; }"
         )
-        run_btn.clicked.connect(self._run_sim)
-        left_lay.addWidget(run_btn)
+        run_btn.clicked.connect(self._on_sim_requested)
+        ctrl_lay.addWidget(run_btn)
+        ctrl_lay.addStretch()
 
-        row.addWidget(left, 0, Qt.AlignmentFlag.AlignTop)
+        row.addWidget(ctrl, 0, Qt.AlignmentFlag.AlignTop)
 
-        # ── Right: single card containing graphs grid + table ─────────────────
-        right = card()
-        right_lay = right.layout()
-        right_lay.setSpacing(8)
+        # ── Right: tab widget + table ─────────────────────────────────────────
+        right = QWidget()
+        right_lay = QVBoxLayout(right)
+        right_lay.setContentsMargins(0, 0, 0, 0)
+        right_lay.setSpacing(10)
 
-        # 2 × 2 graphs grid
-        graphs_lay = QGridLayout()
-        graphs_lay.setSpacing(6)
-        graphs_lay.setContentsMargins(0, 0, 0, 0)
+        self._tabs = QTabWidget()
+        self._tabs.setFixedHeight(560)
+        self._tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #E2E8F0;
+                border-radius: 8px;
+                background: #FFFFFF;
+            }
+            QTabWidget::tab-bar { left: 8px; }
+            QTabBar::tab {
+                background: #F1F5F9;
+                color: #64748B;
+                border: 1px solid #E2E8F0;
+                border-bottom: none;
+                border-top-left-radius: 6px;
+                border-top-right-radius: 6px;
+                padding: 7px 16px;
+                margin-right: 3px;
+                font-size: 12px;
+                font-weight: 600;
+            }
+            QTabBar::tab:selected {
+                background: #FFFFFF;
+                color: #6366F1;
+                border-bottom: 2px solid #6366F1;
+            }
+            QTabBar::tab:hover:!selected { background: #E2E8F0; }
+        """)
 
-        self._figs: list = []
-        self._canvases: list = []
-        for i in range(4):
-            fig = Figure(figsize=(4, 1.5), tight_layout=True)
-            canvas = FigureCanvasQTAgg(fig)
-            canvas.setFixedHeight(140)
-            canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            graphs_lay.addWidget(canvas, i // 2, i % 2)
-            self._figs.append(fig)
-            self._canvases.append(canvas)
+        self._plot_containers: list[QWidget] = []
+        self._plot_keys: list[str] = []
 
-        right_lay.addLayout(graphs_lay)
+        for title, key, description in self._TAB_META:
+            tab_page = QWidget()
+            tab_page.setStyleSheet("background: #FFFFFF;")
+            tab_lay = QVBoxLayout(tab_page)
+            tab_lay.setContentsMargins(12, 8, 12, 8)
+            tab_lay.setSpacing(6)
 
-        # Divider + table header
+            # Subtitle bar
+            desc_lbl = QLabel(description)
+            desc_lbl.setStyleSheet(
+                "color: #64748B; font-size: 11px; "
+                "background: #F8FAFC; border-radius: 4px; padding: 4px 8px;"
+            )
+            desc_lbl.setWordWrap(True)
+            tab_lay.addWidget(desc_lbl)
+
+            # Nutrient tab gets a scroll area so 4 subplots always have enough room
+            if key == "dfba_nutrients":
+                scroll_wrap = QScrollArea()
+                scroll_wrap.setWidgetResizable(True)
+                scroll_wrap.setFrameShape(QFrame.Shape.NoFrame)
+                scroll_wrap.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+                container = QWidget()
+                container.setMinimumHeight(680)
+                container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+                c_lay = QVBoxLayout(container)
+                c_lay.setContentsMargins(0, 0, 0, 0)
+                scroll_wrap.setWidget(container)
+                tab_lay.addWidget(scroll_wrap, 1)
+            else:
+                container = QWidget()
+                container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+                c_lay = QVBoxLayout(container)
+                c_lay.setContentsMargins(0, 0, 0, 0)
+                tab_lay.addWidget(container, 1)
+
+            self._plot_containers.append(container)
+            self._plot_keys.append(key)
+            self._tabs.addTab(tab_page, title)
+
+        right_lay.addWidget(self._tabs)
+
+        # Species-change table
         right_lay.addWidget(section_title("Species Changes (Initial → Day 30)"))
-
-        # Table
         self._table = QTableWidget(0, 4)
-        self._table.setHorizontalHeaderLabels(["Genus", "Initial %", "Final %", "Δ Change"])
+        self._table.setHorizontalHeaderLabels(["Genus", "Before", "After", "Δ Change"])
         self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setAlternatingRowColors(True)
-        self._table.setFixedHeight(175)
+        self._table.setFixedHeight(200)
         right_lay.addWidget(self._table)
 
-        row.addWidget(right, 1, Qt.AlignmentFlag.AlignTop)
-
+        row.addWidget(right, 1)
         root.addStretch()
         self._draw_placeholders()
 
@@ -2804,181 +2979,117 @@ class SimulationPage(QWidget):
 
     def load(self, state: AppState):
         self._state = state
-        self._genus_data = []
-
         if not state:
             return
 
-        from src.services.assessment_service import get_genus_data
-        if state.lbs:
-            for run_id in state.lbs.values():
-                try:
-                    data = get_genus_data(run_id)
-                    if data:
-                        self._genus_data = data
-                        break
-                except Exception:
-                    pass
+        # Populate run combo from available runs
+        self._run_combo.blockSignals(True)
+        self._run_combo.clear()
+        for label in state.lbs:
+            self._run_combo.addItem(label, userData=label)
+        self._run_combo.blockSignals(False)
 
-        if self._genus_data:
-            self._run_sim()
+        # Restore the previously selected run if still present, else default to first
+        if self._current_run and self._current_run in state.lbs:
+            idx = self._run_combo.findData(self._current_run)
+            if idx >= 0:
+                self._run_combo.setCurrentIndex(idx)
+        elif state.lbs:
+            self._current_run = next(iter(state.lbs))
+
+        # Show results for the current run if a simulation has been run for it
+        if self._current_run and self._current_run in state.simu_plots:
+            self._display_results(self._current_run)
         else:
             self._draw_placeholders()
 
     # ── Simulation ────────────────────────────────────────────────────────────
 
-    def _run_sim(self):
-        import numpy as np
-
-        antibiotic = self._sliders["antibiotic"].value() / 100.0
-        probiotic  = self._sliders["probiotic"].value()  / 100.0
-        fiber      = self._sliders["fiber"].value()      / 100.0
-        processed  = self._sliders["processed"].value()  / 100.0
-
-        if not self._genus_data:
-            self._draw_placeholders()
+    def _on_sim_requested(self):
+        run_label = self._run_combo.currentData() or self._current_run
+        if not run_label:
             return
+        self._current_run = run_label
 
-        genera  = [d["genus"] for d in self._genus_data]
-        init_ab = np.array([d["relative_abundance"] for d in self._genus_data], dtype=float)
-        total   = init_ab.sum()
-        if total > 0:
-            init_ab /= total
+        user_diet = {
+            'fiber':     self._sliders["fiber"].value()     / 100.0,
+            'junk_food': self._sliders["processed"].value() / 100.0,
+        }
+        self.simulation_requested.emit(user_diet, run_label)
 
-        is_butyrate  = np.array([g in self._BUTYRATE for g in genera], dtype=float)
-        is_probiotic = np.array([g in self._PROBIOTIC for g in genera], dtype=float)
-        is_inflam    = np.array([g in self._INFLAM    for g in genera], dtype=float)
+    # ── Display dFBA results ──────────────────────────────────────────────────
 
-        T = 30
-        history = np.zeros((T, len(genera)))
-        history[0] = init_ab.copy()
+    def _display_results(self, run_label: str):
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+        from matplotlib.figure import Figure
 
-        for t in range(1, T):
-            prev = history[t - 1].copy()
+        plots = self._state.simu_plots.get(run_label, {})
+        stats = self._state.simu_stats.get(run_label)
 
-            # Antibiotic: broad-spectrum kill, exponentially decaying with time
-            antibiotic_kill = antibiotic * np.exp(-0.12 * t) * 0.9
-            delta_ab = -antibiotic_kill * prev
+        for key, container in zip(self._plot_keys, self._plot_containers):
+            fig = plots.get(key)
+            lay = container.layout()
 
-            # Probiotic boosts probiotic genera
-            delta_ab += probiotic * 0.018 * is_probiotic
+            while lay.count():
+                w = lay.takeAt(0).widget()
+                if w:
+                    w.deleteLater()
 
-            # Fiber feeds butyrate producers
-            delta_ab += fiber * 0.014 * is_butyrate
+            if fig is not None:
+                canvas = FigureCanvasQTAgg(fig)
+            else:
+                ph = Figure(tight_layout=True)
+                ax = ph.add_subplot(111)
+                ax.text(0.5, 0.5, "No data", ha='center', va='center',
+                        transform=ax.transAxes, color='#94A3B8', fontsize=10)
+                ax.axis('off')
+                canvas = FigureCanvasQTAgg(ph)
 
-            # Processed food feeds inflammatory genera, starves butyrate producers
-            delta_ab += processed * 0.012 * is_inflam
-            delta_ab -= processed * 0.010 * is_butyrate
+            canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            lay.addWidget(canvas)
+            canvas.draw()
 
-            new_ab = np.clip(prev + delta_ab, 1e-7, None)
-            new_ab /= new_ab.sum()
-            history[t] = new_ab
+        # Switch to first tab that has data
+        for i, key in enumerate(self._plot_keys):
+            if plots.get(key) is not None:
+                self._tabs.setCurrentIndex(i)
+                break
 
-        # ── Derived metrics ────────────────────────────────────────────────────
-        def _shannon(ab):
-            p = ab[ab > 0]
-            return float(-np.sum(p * np.log2(p)))
-
-        times         = np.arange(T)
-        diversity     = np.array([_shannon(history[t]) for t in range(T)])
-        butyrate_lvl  = np.array([(history[t] * is_butyrate).sum() for t in range(T)])
-        inflam_lvl    = np.array([(history[t] * is_inflam).sum()   for t in range(T)])
-        max_sh        = np.log2(len(genera)) if len(genera) > 1 else 1.0
-        ad_risk       = 100.0 * (
-            0.35 * np.clip(inflam_lvl    / max(inflam_lvl.max(),   1e-9), 0, 1) +
-            0.30 * np.clip(1 - diversity / max_sh,                        0, 1) +
-            0.35 * np.clip(1 - butyrate_lvl / max(butyrate_lvl.max(), 1e-9), 0, 1)
-        )
-
-        # ── Plot 1: Top genera over time ───────────────────────────────────────
-        top_n   = min(6, len(genera))
-        top_idx = np.argsort(init_ab)[::-1][:top_n]
-        COLORS  = ['#6366F1', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6', '#06B6D4']
-
-        self._figs[0].clear()
-        ax0 = self._figs[0].add_subplot(111)
-        for k, i in enumerate(top_idx):
-            ax0.plot(times, history[:, i] * 100, label=genera[i],
-                     color=COLORS[k % len(COLORS)], linewidth=1.4)
-        ax0.set_title("Genus Abundance Over Time", fontsize=8, fontweight='bold')
-        ax0.set_xlabel("Day", fontsize=7); ax0.set_ylabel("Rel. Abundance (%)", fontsize=7)
-        ax0.tick_params(labelsize=7)
-        ax0.legend(fontsize=6, loc='upper right', framealpha=0.7)
-        ax0.set_facecolor('#F8FAFC')
-        self._canvases[0].draw()
-
-        # ── Plot 2: Alpha diversity ────────────────────────────────────────────
-        self._figs[1].clear()
-        ax1 = self._figs[1].add_subplot(111)
-        ax1.plot(times, diversity, color='#10B981', linewidth=1.6)
-        ax1.fill_between(times, diversity, alpha=0.15, color='#10B981')
-        ax1.set_title("Alpha Diversity (Shannon)", fontsize=8, fontweight='bold')
-        ax1.set_xlabel("Day", fontsize=7); ax1.set_ylabel("Shannon Index", fontsize=7)
-        ax1.tick_params(labelsize=7)
-        ax1.set_facecolor('#F8FAFC')
-        self._canvases[1].draw()
-
-        # ── Plot 3: Metabolite proxies ─────────────────────────────────────────
-        self._figs[2].clear()
-        ax2 = self._figs[2].add_subplot(111)
-        ax2.plot(times, butyrate_lvl * 100, label="Butyrate / SCFA",
-                 color='#10B981', linewidth=1.6)
-        ax2.plot(times, inflam_lvl * 100, label="LPS / Inflammatory",
-                 color='#EF4444', linewidth=1.6, linestyle='--')
-        ax2.set_title("Metabolite Proxies", fontsize=8, fontweight='bold')
-        ax2.set_xlabel("Day", fontsize=7); ax2.set_ylabel("Relative Level (%)", fontsize=7)
-        ax2.tick_params(labelsize=7)
-        ax2.legend(fontsize=6, framealpha=0.7)
-        ax2.set_facecolor('#F8FAFC')
-        self._canvases[2].draw()
-
-        # ── Plot 4: AD risk score over time ───────────────────────────────────
-        self._figs[3].clear()
-        ax3 = self._figs[3].add_subplot(111)
-        ax3.plot(times, ad_risk, color='#EF4444', linewidth=1.6)
-        ax3.fill_between(times, ad_risk, alpha=0.10, color='#EF4444')
-        ax3.axhline(33, color='#F59E0B', linestyle=':', linewidth=1.0, label='Moderate (33)')
-        ax3.axhline(66, color='#EF4444', linestyle=':', linewidth=1.0, label='High (66)')
-        ax3.set_ylim(0, 100)
-        ax3.set_title("Predicted AD Risk Score", fontsize=8, fontweight='bold')
-        ax3.set_xlabel("Day", fontsize=7); ax3.set_ylabel("Risk Score", fontsize=7)
-        ax3.tick_params(labelsize=7)
-        ax3.legend(fontsize=6, framealpha=0.7)
-        ax3.set_facecolor('#F8FAFC')
-        self._canvases[3].draw()
-
-        # ── Table: species changes ─────────────────────────────────────────────
-        final_ab = history[-1]
-        rows = sorted(
-            [(genera[i], init_ab[i] * 100, final_ab[i] * 100,
-              (final_ab[i] - init_ab[i]) * 100)
-             for i in range(len(genera))],
-            key=lambda x: abs(x[3]), reverse=True,
-        )
-        self._table.setRowCount(len(rows))
-        for r, (genus, ini, fin, delta) in enumerate(rows):
-            self._table.setItem(r, 0, QTableWidgetItem(genus))
-            self._table.setItem(r, 1, QTableWidgetItem(f"{ini:.3f}"))
-            self._table.setItem(r, 2, QTableWidgetItem(f"{fin:.3f}"))
-            delta_item = QTableWidgetItem(f"{'+' if delta >= 0 else ''}{delta:.3f}")
-            delta_item.setForeground(QColor("#10B981" if delta >= 0 else "#EF4444"))
-            self._table.setItem(r, 3, delta_item)
+        # Species-change table
+        self._table.setRowCount(0)
+        if stats is not None and not stats.empty:
+            rows_df = stats.sort_values('abs_change', key=abs, ascending=False)
+            self._table.setRowCount(len(rows_df))
+            for r, row in enumerate(rows_df.itertuples(index=False)):
+                self._table.setItem(r, 0, QTableWidgetItem(str(row.genus)))
+                self._table.setItem(r, 1, QTableWidgetItem(f"{row.before:.4f}"))
+                self._table.setItem(r, 2, QTableWidgetItem(f"{row.after:.4f}"))
+                delta = row.abs_change
+                delta_item = QTableWidgetItem(f"{'+' if delta >= 0 else ''}{delta:.4f}")
+                delta_item.setForeground(QColor("#10B981" if delta >= 0 else "#EF4444"))
+                self._table.setItem(r, 3, delta_item)
 
     # ── Placeholder ───────────────────────────────────────────────────────────
 
     def _draw_placeholders(self):
-        titles = [
-            "Genus Abundance Over Time",
-            "Alpha Diversity (Shannon)",
-            "Metabolite Proxies",
-            "Predicted AD Risk Score",
-        ]
-        for i, (fig, canvas) in enumerate(zip(self._figs, self._canvases)):
-            fig.clear()
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+        from matplotlib.figure import Figure
+
+        for container in self._plot_containers:
+            lay = container.layout()
+            while lay.count():
+                w = lay.takeAt(0).widget()
+                if w:
+                    w.deleteLater()
+            fig = Figure(tight_layout=True)
             ax = fig.add_subplot(111)
-            ax.text(0.5, 0.5, "Load a project to run simulation",
-                    ha='center', va='center', transform=ax.transAxes,
-                    color='#94A3B8', fontsize=10)
-            ax.set_title(titles[i], fontsize=10, fontweight='bold')
             ax.set_facecolor('#F8FAFC')
+            ax.text(0.5, 0.5, "Run a simulation to see results",
+                    ha='center', va='center', transform=ax.transAxes,
+                    color='#94A3B8', fontsize=11, style='italic')
+            ax.axis('off')
+            canvas = FigureCanvasQTAgg(fig)
+            canvas.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+            lay.addWidget(canvas)
             canvas.draw()
+        self._table.setRowCount(0)
