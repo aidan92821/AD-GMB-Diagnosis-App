@@ -12,14 +12,26 @@ A PyQt6 desktop application that fetches real gut microbiome sequencing data fro
 ### Overview
 ![Overview page](docs/screenshots/overview.png)
 
+### Upload Runs
+![Upload runs page](docs/screenshots/upload.png)
+
 ### Diversity Analysis
 ![Diversity page](docs/screenshots/diversity.png)
 
 ### Taxonomy
 ![Taxonomy page](docs/screenshots/taxonomy.png)
 
+### ASV Table
+![ASV table page](docs/screenshots/asv-table.png)
+
+### Phylogeny
+![Phylogeny page](docs/screenshots/phylogeny.png)
+
 ### Alzheimer Risk Assessment
 ![Alzheimer risk page](docs/screenshots/alzheimer.png)
+
+<!-- ### Biomarker & Research
+![Biomarker page](docs/screenshots/biomarker.png) -->
 
 ### Gut Microbiome Simulation
 ![Simulation page](docs/screenshots/simulation.png)
